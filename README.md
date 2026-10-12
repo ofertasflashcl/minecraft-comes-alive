@@ -7,6 +7,14 @@ Hosted on
 [CurseForge](https://www.curseforge.com/minecraft/mc-mods/minecraft-comes-alive-reborn) and
 [Modrinth](https://modrinth.com/mod/minecraft-comes-alive-reborn)
 
+## Download compiled jar (1.20.1 universal)
+
+**Latest beta:** [minecraft-comes-alive-7.7.1-beta.4+1.20.1-universal.jar](https://cdn.modrinth.com/data/1W98a849/versions/ZPB4MSNl/minecraft-comes-alive-7.7.1-beta.4%2B1.20.1-universal.jar)
+
+- Minecraft 1.20.1
+- Forge + Fabric (universal)
+- Beta build — backup your world before using
+
 Minecraft Comes Alive (MCA) is a Minecraft mod that replaces Minecraft's villagers with normal player-like NPCs. It
 works in single player, LAN, and SMP.
 
