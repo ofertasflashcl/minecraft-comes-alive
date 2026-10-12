@@ -80,6 +80,33 @@ public class VillagerBrain<E extends Mob & VillagerLike<E>> {
             });
         }
 
+        // Squad jobs keep their own fear plan. Everyone else can drop a chore to answer a relative.
+        Chore activeChore = entity.getTrackedValue(ACTIVE_CHORE);
+        boolean squadJob = activeChore == Chore.PROSPECT || activeChore == Chore.ESCORT;
+        boolean pinned = entity.getBrain().getMemoryInternal(MemoryModuleTypeMCA.PLAYER_FOLLOWING).isPresent()
+                || entity.getBrain().hasMemoryValue(MemoryModuleTypeMCA.STAYING);
+        boolean answerSos = false;
+        if (!squadJob && !pinned && entity.getAgeState().ordinal() >= AgeState.TEEN.ordinal() && entity instanceof VillagerEntityMCA villagerEntity) {
+            answerSos = DistressCalls.nearestFamilyCall(villagerEntity, 96).isPresent();
+        }
+        if (squadJob) {
+            entity.getBrain().eraseMemory(MemoryModuleType.HURT_BY);
+            entity.getBrain().eraseMemory(MemoryModuleType.HURT_BY_ENTITY);
+            entity.getBrain().eraseMemory(MemoryModuleType.IS_PANICKING);
+        }
+        if (answerSos) {
+            entity.getBrain().setActiveActivityIfPossible(ActivitiesMCA.RESCUE);
+        } else if (activeChore != Chore.NONE) {
+            entity.getBrain().getActiveNonCoreActivity().ifPresent(activity -> {
+                if (!activity.equals(ActivitiesMCA.CHORE)) {
+                    entity.getBrain().setActiveActivityIfPossible(ActivitiesMCA.CHORE);
+                }
+            });
+        } else if (entity.getBrain().isActive(ActivitiesMCA.RESCUE) && entity.level() instanceof ServerLevel serverLevel) {
+            entity.getBrain().setActiveActivityIfPossible(Activity.IDLE);
+            entity.getBrain().updateActivityFromSchedule(serverLevel.getDayTime(), serverLevel.getGameTime());
+        }
+
         boolean panicking = entity.getBrain().isActive(Activity.PANIC);
         if (panicking != entity.getTrackedValue(PANICKING)) {
             entity.setTrackedValue(PANICKING, panicking);

@@ -23,7 +23,19 @@ public abstract class AbstractChoreTask extends Behavior<VillagerEntityMCA> {
     protected int lastAge;
 
     public AbstractChoreTask(Map<MemoryModuleType<?>, MemoryStatus> requirements) {
-        super(requirements, 400);
+        this(requirements, 400);
+    }
+
+    public AbstractChoreTask(Map<MemoryModuleType<?>, MemoryStatus> requirements, int duration) {
+        super(requirements, duration);
+    }
+
+    /**
+     * Prospecting and escort keep their own plan when something is hunting them.
+     * Vanilla panic would erase that plan.
+     */
+    protected boolean allowsWorkWhileAfraid() {
+        return false;
     }
 
     @Override
@@ -45,7 +57,7 @@ public abstract class AbstractChoreTask extends Behavior<VillagerEntityMCA> {
             return false;
         }
 
-        return villager == null || !villager.getVillagerBrain().isPanicking();
+        return villager == null || allowsWorkWhileAfraid() || !villager.getVillagerBrain().isPanicking();
     }
 
     @Override

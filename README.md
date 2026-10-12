@@ -14,7 +14,10 @@ Villagers can be interacted with - you can talk to them, ask them to follow you,
 Interacting with people builds relationships. Get your relationship high enough, and you will be able to marry someone.
 
 After getting married, you will be able to have children who will do many chores for you such as: Farming, Fishing,
-Woodcutting, Hunting, and Mining.
+Woodcutting, Hunting, and Mining. Prospecting now walks a real shaft: they follow ore, explore caves, and keep digging.
+If something hunts them they wall themselves in, shout their coordinates, or dig down and cap the hole. Family nearby
+comes. From the work menu you can also set Escort: a squad that rings you, fights what attacks you, and sends one
+guard when a miner calls.
 
 Children will eventually grow up into adults. Adults can get married and have children of their own, and this cycle can
 repeat indefinitely!

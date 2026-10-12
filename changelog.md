@@ -1,5 +1,9 @@
 # TBD
 
+* Prospecting is a real mining chore: ore, caves, and a shaft that keeps going. In danger the miner builds a seal, calls coordinates, or digs down to escape.
+* Escort chore: a squad follows you, fights what threatens you, and one of them answers a miner's call.
+* Relatives who are loaded will drop ordinary work and come when family calls from underground.
+* Fixed the work menu so the active chore button matches the job.
 * Fixed adding skins to server wide pool not working without cheats in singleplayer
 
 # 7.7.37

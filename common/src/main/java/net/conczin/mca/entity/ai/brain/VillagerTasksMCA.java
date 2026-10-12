@@ -15,9 +15,11 @@ import net.conczin.mca.entity.ai.RangedWeaponHelper;
 import net.conczin.mca.entity.ai.brain.sensor.GuardEnemiesSensor;
 import net.conczin.mca.entity.ai.brain.tasks.*;
 import net.conczin.mca.entity.ai.brain.tasks.chore.ChoppingTask;
+import net.conczin.mca.entity.ai.brain.tasks.chore.EscortTask;
 import net.conczin.mca.entity.ai.brain.tasks.chore.FishingTask;
 import net.conczin.mca.entity.ai.brain.tasks.chore.HarvestingTask;
 import net.conczin.mca.entity.ai.brain.tasks.chore.HuntingTask;
+import net.conczin.mca.entity.ai.brain.tasks.chore.ProspectingTask;
 import net.conczin.mca.entity.ai.navigation.BedApproachTarget;
 import net.conczin.mca.entity.ai.relationship.AgeState;
 import net.conczin.mca.registry.EntitiesMCA;
@@ -175,6 +177,7 @@ public class VillagerTasksMCA {
         }
 
         brain.addActivity(ActivitiesMCA.GRIEVE, VillagerTasksMCA.getGrievingPackage());
+        brain.addActivity(ActivitiesMCA.RESCUE, VillagerTasksMCA.getRescuePackage());
 
         if (!noDefault) {
             brain.addActivity(Activity.CORE, VillagerTasksMCA.getImportantCorePackage(0.5F));
@@ -634,7 +637,15 @@ public class VillagerTasksMCA {
                 Pair.of(0, new ChoppingTask()),
                 Pair.of(0, new FishingTask()),
                 Pair.of(0, new HarvestingTask()),
-                Pair.of(0, new HuntingTask())
+                Pair.of(0, new HuntingTask()),
+                Pair.of(0, new ProspectingTask()),
+                Pair.of(0, new EscortTask())
+        );
+    }
+
+    public static ImmutableList<Pair<Integer, ? extends BehaviorControl<? super VillagerEntityMCA>>> getRescuePackage() {
+        return ImmutableList.of(
+                Pair.of(0, new FamilyRescueTask())
         );
     }
 
