@@ -23,6 +23,7 @@ public interface ActivityMCA {
 
     RegistrySupplier<Activity> CHORE = activity("chore");
     RegistrySupplier<Activity> GRIEVE = activity("grieve");
+    RegistrySupplier<Activity> RESCUE = activity("rescue");
 
     RegistrySupplier<SensorType<ExplodingCreeperSensor>> EXPLODING_CREEPER = sensor("exploding_creeper", ExplodingCreeperSensor::new);
     RegistrySupplier<SensorType<GuardEnemiesSensor>> GUARD_ENEMIES = sensor("guard_enemies", GuardEnemiesSensor::new);

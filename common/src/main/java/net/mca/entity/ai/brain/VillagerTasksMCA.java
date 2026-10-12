@@ -14,9 +14,11 @@ import net.mca.entity.ai.MemoryModuleTypeMCA;
 import net.mca.entity.ai.SchedulesMCA;
 import net.mca.entity.ai.brain.tasks.*;
 import net.mca.entity.ai.brain.tasks.chore.ChoppingTask;
+import net.mca.entity.ai.brain.tasks.chore.EscortTask;
 import net.mca.entity.ai.brain.tasks.chore.FishingTask;
 import net.mca.entity.ai.brain.tasks.chore.HarvestingTask;
 import net.mca.entity.ai.brain.tasks.chore.HuntingTask;
+import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
 import net.mca.entity.ai.relationship.AgeState;
 import net.mca.server.world.data.VillageManager;
 import net.mca.server.world.data.villageComponents.VillageGuardsManager;
@@ -155,6 +157,7 @@ public class VillagerTasksMCA {
         }
 
         brain.setTaskList(ActivityMCA.GRIEVE.get(), VillagerTasksMCA.getGrievingPackage());
+        brain.setTaskList(ActivityMCA.RESCUE.get(), VillagerTasksMCA.getRescuePackage());
 
         if (!noDefault) {
             brain.setTaskList(Activity.CORE, VillagerTasksMCA.getImportantCorePackage(0.5F));
@@ -589,7 +592,15 @@ public class VillagerTasksMCA {
                 Pair.of(0, new ChoppingTask()),
                 Pair.of(0, new FishingTask()),
                 Pair.of(0, new HarvestingTask()),
-                Pair.of(0, new HuntingTask())
+                Pair.of(0, new HuntingTask()),
+                Pair.of(0, new ProspectingTask()),
+                Pair.of(0, new EscortTask())
+        );
+    }
+
+    public static ImmutableList<Pair<Integer, ? extends Task<? super VillagerEntityMCA>>> getRescuePackage() {
+        return ImmutableList.of(
+                Pair.of(0, new FamilyRescueTask())
         );
     }
 

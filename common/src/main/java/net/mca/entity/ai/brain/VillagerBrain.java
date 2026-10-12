@@ -6,6 +6,7 @@ import net.mca.entity.Status;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.VillagerLike;
 import net.mca.entity.ai.*;
+import net.mca.entity.ai.relationship.AgeState;
 import net.mca.entity.ai.relationship.Personality;
 import net.mca.util.network.datasync.CDataManager;
 import net.mca.util.network.datasync.CDataParameter;
@@ -13,6 +14,7 @@ import net.mca.util.network.datasync.CEnumParameter;
 import net.mca.util.network.datasync.CParameter;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ai.brain.Activity;
+import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
@@ -55,14 +57,36 @@ public class VillagerBrain<E extends MobEntity & VillagerLike<E>> {
         // When you relog, it should continue doing the chores.
         // Chore saves but Activity doesn't, so this checks if the activity is not on there and puts it on there.
 
-        if (entity.getTrackedValue(ACTIVE_CHORE) != Chore.NONE) {
-            // find something to do
-            //todo here switch between rest and chore
+        Chore job = entity.getTrackedValue(ACTIVE_CHORE);
+        boolean squad = job == Chore.PROSPECT || job == Chore.ESCORT;
+        if (squad) {
+            entity.getBrain().forget(MemoryModuleType.HURT_BY);
+            entity.getBrain().forget(MemoryModuleType.HURT_BY_ENTITY);
+            entity.getBrain().forget(MemoryModuleType.NEAREST_HOSTILE);
+        }
+
+        boolean pinned = entity.getBrain().getOptionalMemory(MemoryModuleTypeMCA.PLAYER_FOLLOWING.get()).isPresent()
+                || entity.getBrain().getOptionalMemory(MemoryModuleTypeMCA.STAYING.get()).isPresent();
+        boolean rescue = false;
+        if (!squad && !pinned && entity instanceof VillagerEntityMCA villager
+                && villager.getAgeState().ordinal() >= AgeState.TEEN.ordinal()) {
+            rescue = DistressCalls.nearestFamilyCall(villager, 96).isPresent();
+        }
+
+        if (rescue) {
+            entity.getBrain().getFirstPossibleNonCoreActivity().ifPresent(activity -> {
+                if (!activity.equals(ActivityMCA.RESCUE.get())) {
+                    entity.getBrain().doExclusively(ActivityMCA.RESCUE.get());
+                }
+            });
+        } else if (job != Chore.NONE) {
             entity.getBrain().getFirstPossibleNonCoreActivity().ifPresent(activity -> {
                 if (!activity.equals(ActivityMCA.CHORE.get())) {
                     entity.getBrain().doExclusively(ActivityMCA.CHORE.get());
                 }
             });
+        } else if (entity.getBrain().hasActivity(ActivityMCA.RESCUE.get())) {
+            entity.getBrain().doExclusively(Activity.IDLE);
         }
 
         boolean panicking = entity.getBrain().hasActivity(Activity.PANIC);

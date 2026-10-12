@@ -22,7 +22,15 @@ public abstract class AbstractChoreTask extends MultiTickTask<VillagerEntityMCA>
     protected static final int WALKING_THRESHOLD = 200;
 
     public AbstractChoreTask(Map<MemoryModuleType<?>, MemoryModuleState> requirements) {
-        super(requirements, 400);
+        this(requirements, 400);
+    }
+
+    public AbstractChoreTask(Map<MemoryModuleType<?>, MemoryModuleState> requirements, int duration) {
+        super(requirements, duration);
+    }
+
+    protected boolean allowsWorkWhileAfraid() {
+        return false;
     }
 
     @Override
@@ -44,7 +52,7 @@ public abstract class AbstractChoreTask extends MultiTickTask<VillagerEntityMCA>
             return false;
         }
 
-        return villager == null || !villager.getVillagerBrain().isPanicking();
+        return villager == null || allowsWorkWhileAfraid() || !villager.getVillagerBrain().isPanicking();
     }
 
     @Override

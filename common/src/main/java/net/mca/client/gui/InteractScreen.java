@@ -355,7 +355,7 @@ public class InteractScreen extends AbstractDynamicScreen {
             NetworkHandler.sendToServer(new InteractionDialogueInitMessage(villager.asEntity().getUuid()));
         } else if (id.equals("gui.button.work")) {
             setLayout("work");
-            disableButton("gui.button." + villager.getVillagerBrain().getCurrentJob().name().toLowerCase(Locale.ENGLISH));
+            disableButton("gui.button." + villager.getVillagerBrain().getCurrentJob().getId());
         } else if (id.equals("gui.button.professions")) {
             setLayout("professions");
         } else if (id.equals("gui.button.backarrow")) {

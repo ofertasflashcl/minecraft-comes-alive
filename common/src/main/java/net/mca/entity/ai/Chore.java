@@ -17,7 +17,8 @@ public enum Chore {
     HARVEST ("harvesting", HoeItem.class),
     CHOP    ("chopping", AxeItem.class),
     HUNT    ("hunting", SwordItem.class),
-    FISH    ("fishing", FishingRodItem.class);
+    FISH    ("fishing", FishingRodItem.class),
+    ESCORT  ("escort", SwordItem.class);
 
     private static final Chore[] VALUES = values();
     private static final Map<String, Chore> REGISTRY = Stream.of(VALUES).collect(Collectors.toMap(
@@ -37,6 +38,10 @@ public enum Chore {
 
     public Text getName() {
         return Text.translatable("gui.label." + friendlyName);
+    }
+
+    public String getId() {
+        return friendlyName;
     }
 
     @Nullable

@@ -1,3 +1,9 @@
+# TBD
+
+* Prospecting now actually mines: ores, caves, shafts, a sealed shelter, coordinates, or a dig-down escape
+* Escort lets several family members form a squad around you and fight
+* Loaded teen or older relatives drop ordinary chores and answer a miner's distress call
+
 # 7.6.27
 
 * Fixed destiny status not being saved reliably

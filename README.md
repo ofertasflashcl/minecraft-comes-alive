@@ -10,7 +10,9 @@ Villagers can be interacted with - you can talk to them, ask them to follow you,
 Interacting with people builds relationships. Get your relationship high enough, and you will be able to marry someone.
 
 After getting married, you will be able to have children who will do many chores for you such as: Farming, Fishing,
-Woodcutting, Hunting, and Mining.
+Woodcutting, Hunting, and Mining. Prospecting keeps them in the mine (caves, shafts, and ore) and, if something attacks,
+they wall themselves in and send their coordinates, or dig downward. Escort puts several relatives in a ring around you
+so they fight as a small squad. A relative who hears the call comes to help.
 
 Children will eventually grow up into adults. Adults can get married and have children of their own, and this cycle can
 repeat indefinitely!
