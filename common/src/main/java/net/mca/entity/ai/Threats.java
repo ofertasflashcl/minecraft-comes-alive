@@ -49,9 +49,10 @@ public final class Threats {
         double bestDistance = radius * radius;
         Box box = new Box(around).expand(radius);
         for (MobEntity mob : world.getNonSpectatingEntities(MobEntity.class, box)) {
-            if (!isThreat(mob, self, ward)) {
+            if (!isThreat(mob, self, ward) || !VillagerEyes.sees(world, self, mob)) {
                 continue;
             }
+            VillagerEyes.remember(self, mob, world.getTime());
             double distance = mob.squaredDistanceTo(around.getX() + 0.5, around.getY(), around.getZ() + 0.5);
             if (distance < bestDistance) {
                 bestDistance = distance;
@@ -59,6 +60,34 @@ public final class Threats {
             }
         }
         return best;
+    }
+
+    /**
+     * A moving threat that is not in view. Sneaking makes no sound. The position is blurred.
+     */
+    @Nullable
+    public static BlockPos footstep(ServerWorld world, LivingEntity self, @Nullable PlayerEntity ward) {
+        MobEntity best = null;
+        double bestDistance = 10 * 10;
+        Box box = new Box(self.getBlockPos()).expand(10);
+        for (MobEntity mob : world.getNonSpectatingEntities(MobEntity.class, box)) {
+            if (!isThreat(mob, self, ward) || !VillagerEyes.hears(self, mob) || VillagerEyes.sees(world, self, mob)) {
+                continue;
+            }
+            double distance = self.squaredDistanceTo(mob);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = mob;
+            }
+        }
+        if (best == null) {
+            return null;
+        }
+        double reach = Math.sqrt(bestDistance);
+        double jitter = 1.5 + reach * 0.2;
+        double x = best.getX() + (self.getRandom().nextDouble() - 0.5) * jitter;
+        double z = best.getZ() + (self.getRandom().nextDouble() - 0.5) * jitter;
+        return BlockPos.ofFloored(x, best.getY(), z);
     }
 
     public static boolean lavaNear(ServerWorld world, BlockPos pos) {

@@ -5,6 +5,7 @@ import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.DistressCalls;
 import net.mca.entity.ai.Threats;
+import net.mca.entity.ai.VillagerEyes;
 import net.mca.entity.ai.WorkTools;
 import net.mca.entity.ai.relationship.AgeState;
 import net.mca.util.InventoryUtils;
@@ -31,8 +32,10 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -79,6 +82,9 @@ public class ProspectingTask extends AbstractChoreTask {
     private boolean announcedAny;
     private int stillTicks;
     private BlockPos lastFeet;
+    private long lastLookTick = -1000L;
+    private BlockPos lastLookFeet;
+    private final Map<Long, Seen> eyes = new HashMap<>();
     private final Set<Long> visited = new LinkedHashSet<>();
     private final Set<Long> ignored = new LinkedHashSet<>();
 
@@ -195,6 +201,7 @@ public class ProspectingTask extends AbstractChoreTask {
 
     private void seek(ServerWorld world, VillagerEntityMCA villager) {
         maybePlaceTorch(world, villager);
+        refreshEyes(world, villager);
         BlockPos head = villager.getBlockPos().up();
         if (!world.isAir(head) && isDiggable(world, head, false)) {
             digTarget = head;
@@ -514,30 +521,31 @@ public class ProspectingTask extends AbstractChoreTask {
     private BlockPos findOre(ServerWorld world, BlockPos origin) {
         BlockPos best = null;
         int bestValue = 0;
+        float bestConfidence = -1.0F;
         double bestDistance = Double.MAX_VALUE;
         ItemStack tool = tool();
-        for (int dy = -6; dy <= 6; dy++) {
-            for (int dx = -12; dx <= 12; dx++) {
-                for (int dz = -12; dz <= 12; dz++) {
-                    if (dx * dx + dz * dz > 144) {
-                        continue;
-                    }
-                    BlockPos pos = origin.add(dx, dy, dz);
-                    if (ignored.contains(pos.asLong())) {
-                        continue;
-                    }
-                    BlockState state = world.getBlockState(pos);
-                    int value = oreValue(state);
-                    if (value == 0 || !tool.isSuitableFor(state)) {
-                        continue;
-                    }
-                    double distance = pos.getSquaredDistance(origin);
-                    if (value > bestValue || (value == bestValue && distance < bestDistance)) {
-                        bestValue = value;
-                        bestDistance = distance;
-                        best = pos;
-                    }
-                }
+        Iterator<Seen> marks = eyes.values().iterator();
+        while (marks.hasNext()) {
+            Seen seen = marks.next();
+            if (seen.value <= 0 || seen.confidence < VillagerEyes.FORGET_CONFIDENCE) {
+                continue;
+            }
+            if (ignored.contains(seen.pos.asLong())) {
+                marks.remove();
+                continue;
+            }
+            BlockState state = world.getBlockState(seen.pos);
+            int value = oreValue(state);
+            if (value == 0 || !tool.isSuitableFor(state)) {
+                marks.remove();
+                continue;
+            }
+            double distance = seen.pos.getSquaredDistance(origin);
+            if (value > bestValue || (value == bestValue && seen.confidence > bestConfidence) || (value == bestValue && seen.confidence == bestConfidence && distance < bestDistance)) {
+                bestValue = value;
+                bestConfidence = seen.confidence;
+                bestDistance = distance;
+                best = seen.pos;
             }
         }
         return best;
@@ -546,35 +554,123 @@ public class ProspectingTask extends AbstractChoreTask {
     private BlockPos findCave(ServerWorld world, BlockPos origin) {
         BlockPos best = null;
         double bestScore = Double.MAX_VALUE;
-        BlockPos.Mutable cursor = new BlockPos.Mutable();
-        for (int dy = -8; dy <= 3; dy++) {
-            for (int dx = -10; dx <= 10; dx++) {
-                for (int dz = -10; dz <= 10; dz++) {
-                    if (dx * dx + dz * dz > 100) {
-                        continue;
-                    }
-                    cursor.set(origin.getX() + dx, origin.getY() + dy, origin.getZ() + dz);
-                    if (visited.contains(cursor.asLong())) {
-                        continue;
-                    }
-                    if (!world.isAir(cursor) || !world.isAir(cursor.up())) {
-                        continue;
-                    }
-                    if (!world.getBlockState(cursor.down()).blocksMovement()) {
-                        continue;
-                    }
-                    if (world.isAir(cursor.up(3)) && world.isAir(cursor.up(4))) {
-                        continue;
-                    }
-                    double score = cursor.getSquaredDistance(origin) + cursor.getY() * 3.0;
-                    if (score < bestScore) {
-                        bestScore = score;
-                        best = cursor.toImmutable();
-                    }
-                }
+        for (Seen seen : eyes.values()) {
+            if (seen.value != 0 || seen.confidence < 0.12F || visited.contains(seen.pos.asLong())) {
+                continue;
+            }
+            if (!isCaveCell(world, seen.pos)) {
+                continue;
+            }
+            double score = seen.pos.getSquaredDistance(origin) + seen.pos.getY() * 3.0 - seen.confidence;
+            if (score < bestScore) {
+                bestScore = score;
+                best = seen.pos;
             }
         }
         return best;
+    }
+
+    private void refreshEyes(ServerWorld world, VillagerEntityMCA villager) {
+        BlockPos feet = villager.getBlockPos();
+        boolean moved = lastLookFeet == null || !lastLookFeet.equals(feet);
+        long now = world.getTime();
+        if (!VillagerEyes.shouldScan(now, lastLookTick, moved)) {
+            return;
+        }
+        long gap = Math.max(1L, now - lastLookTick);
+        lastLookTick = now;
+        lastLookFeet = feet.toImmutable();
+        Set<Long> visible = new LinkedHashSet<>();
+        VillagerEyes.trace(world, villager, new VillagerEyes.Look() {
+            @Override
+            public void open(BlockPos pos, BlockState state) {
+                if (!isCaveCell(world, pos)) {
+                    return;
+                }
+                double distance = Math.sqrt(pos.getSquaredDistance(villager.getPos()));
+                mark(pos, 0, VillagerEyes.confidence(villager, distance), now, visible);
+            }
+
+            @Override
+            public void solid(BlockPos pos, BlockState state) {
+                int value = oreValue(state);
+                if (value <= 0 || !tool().isSuitableFor(state)) {
+                    return;
+                }
+                double distance = Math.sqrt(pos.getSquaredDistance(villager.getPos()));
+                mark(pos, value, VillagerEyes.confidence(villager, distance), now, visible);
+            }
+        });
+        Iterator<Map.Entry<Long, Seen>> it = eyes.entrySet().iterator();
+        while (it.hasNext()) {
+            Seen seen = it.next().getValue();
+            if (visible.contains(seen.pos.asLong())) {
+                continue;
+            }
+            long age = Math.max(1L, now - seen.lastSeen);
+            seen.confidence = VillagerEyes.refresh(seen.confidence, 0.0F, false, gap);
+            if (VillagerEyes.forgotten(seen.confidence, age)) {
+                it.remove();
+                continue;
+            }
+            if (seen.value > 0 && oreValue(world.getBlockState(seen.pos)) == 0) {
+                it.remove();
+            }
+        }
+        pruneEyes();
+    }
+
+    private void mark(BlockPos pos, int value, float confidence, long now, Set<Long> visible) {
+        if (ignored.contains(pos.asLong())) {
+            return;
+        }
+        long id = pos.asLong();
+        visible.add(id);
+        Seen previous = eyes.get(id);
+        Seen seen = previous == null ? new Seen(pos.toImmutable()) : previous;
+        seen.value = value;
+        seen.lastSeen = now;
+        seen.confidence = VillagerEyes.refresh(previous == null ? 0.0F : previous.confidence, confidence, true, 0L);
+        eyes.put(id, seen);
+    }
+
+    private void pruneEyes() {
+        if (eyes.size() <= 24) {
+            return;
+        }
+        eyes.entrySet().stream()
+                .sorted((a, b) -> {
+                    int value = Integer.compare(a.getValue().value > 0 ? 1 : 0, b.getValue().value > 0 ? 1 : 0);
+                    if (value != 0) {
+                        return value;
+                    }
+                    return Float.compare(a.getValue().confidence, b.getValue().confidence);
+                })
+                .limit(eyes.size() - 24L)
+                .map(Map.Entry::getKey)
+                .toList()
+                .forEach(eyes::remove);
+    }
+
+    private boolean isCaveCell(ServerWorld world, BlockPos pos) {
+        if (!world.isAir(pos) || !world.isAir(pos.up())) {
+            return false;
+        }
+        if (!world.getBlockState(pos.down()).blocksMovement()) {
+            return false;
+        }
+        return !(world.isAir(pos.up(3)) && world.isAir(pos.up(4)));
+    }
+
+    private static final class Seen {
+        private final BlockPos pos;
+        private int value;
+        private float confidence;
+        private long lastSeen;
+
+        private Seen(BlockPos pos) {
+            this.pos = pos;
+        }
     }
 
     private BlockPos nextSolidToward(ServerWorld world, BlockPos from, BlockPos ore) {

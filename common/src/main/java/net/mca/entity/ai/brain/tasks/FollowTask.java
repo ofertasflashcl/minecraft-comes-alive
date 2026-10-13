@@ -4,6 +4,7 @@ import com.google.common.collect.ImmutableMap;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.MemoryModuleTypeMCA;
 import net.mca.entity.ai.Threats;
+import net.mca.entity.ai.VillagerEyes;
 import net.mca.entity.ai.WorkTools;
 import net.mca.util.InventoryUtils;
 import net.minecraft.entity.EquipmentSlot;
@@ -58,6 +59,17 @@ public class FollowTask extends MultiTickTask<VillagerEntityMCA> {
             }
             if (threat != null && threat.isAlive()) {
                 fight(villager, playerToFollow, threat);
+                return;
+            }
+            BlockPos lost = VillagerEyes.searchWhere(world, villager);
+            if (lost == null) {
+                lost = Threats.footstep(world, villager, playerToFollow);
+            }
+            if (lost != null) {
+                villager.moveTowards(lost, 1.0F, 1);
+                if ((villager.age & 3) == 0) {
+                    villager.getNavigation().startMovingTo(lost.getX() + 0.5, lost.getY(), lost.getZ() + 0.5, 1.0);
+                }
                 return;
             }
             villager.getBrain().forget(MemoryModuleType.ATTACK_TARGET);

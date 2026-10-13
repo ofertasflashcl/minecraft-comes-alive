@@ -4,7 +4,7 @@
 * Followers attack whatever is coming at you instead of only walking. Low health or a creeper still makes them step back.
 * Villagers who are not mining or escorting close in and defend themselves.
 * Escort keeps a ring around you and breaks it to fight, or to reach a miner who called for help.
-* A teen or older relative drops their chore and goes to a family distress call. The rescue closes the distance and hits with the same attack as everyone else.
+* Eyes, from the ray eye in test-juego #80. A villager sees along the head: glass, panes and bars let the look through, stone and tinted glass stop it, and darkness hides what is not close. A miner only goes for ore or cave air a ray actually hit. If something slips out of sight they search the last place they saw it. Sneaking makes no footsteps.
 
 # 7.6.27
 

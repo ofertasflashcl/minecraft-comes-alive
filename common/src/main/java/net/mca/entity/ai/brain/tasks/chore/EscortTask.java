@@ -5,6 +5,7 @@ import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.DistressCalls;
 import net.mca.entity.ai.Threats;
+import net.mca.entity.ai.VillagerEyes;
 import net.mca.entity.ai.WorkTools;
 import net.mca.entity.ai.relationship.AgeState;
 import net.mca.util.InventoryUtils;
@@ -108,6 +109,18 @@ public class EscortTask extends AbstractChoreTask {
         if (threat != null && threat.isAlive()) {
             fight(world, villager, player, threat);
             stuckTicks = 0;
+            return;
+        }
+
+        BlockPos lost = VillagerEyes.searchWhere(world, villager);
+        if (lost == null) {
+            lost = Threats.footstep(world, villager, player);
+        }
+        if (lost != null) {
+            villager.moveTowards(lost, 1.0F, 1);
+            if ((villager.age & 3) == 0) {
+                villager.getNavigation().startMovingTo(lost.getX() + 0.5, lost.getY(), lost.getZ() + 0.5, 1.0);
+            }
             return;
         }
 

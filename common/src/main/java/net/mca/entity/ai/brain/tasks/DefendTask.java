@@ -5,6 +5,7 @@ import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.MemoryModuleTypeMCA;
 import net.mca.entity.ai.Threats;
+import net.mca.entity.ai.VillagerEyes;
 import net.mca.entity.ai.WorkTools;
 import net.mca.util.InventoryUtils;
 import net.minecraft.entity.EquipmentSlot;
@@ -29,7 +30,7 @@ public class DefendTask extends MultiTickTask<VillagerEntityMCA> {
 
     @Override
     protected boolean shouldRun(ServerWorld world, VillagerEntityMCA villager) {
-        return target(world, villager) != null;
+        return target(world, villager) != null || trail(world, villager) != null;
     }
 
     @Override
@@ -41,6 +42,14 @@ public class DefendTask extends MultiTickTask<VillagerEntityMCA> {
     protected void keepRunning(ServerWorld world, VillagerEntityMCA villager, long time) {
         MobEntity threat = target(world, villager);
         if (threat == null) {
+            BlockPos lost = trail(world, villager);
+            if (lost == null) {
+                return;
+            }
+            villager.moveTowards(lost, 0.9F, 1);
+            if ((villager.age & 3) == 0) {
+                villager.getNavigation().startMovingTo(lost.getX() + 0.5, lost.getY(), lost.getZ() + 0.5, 0.9);
+            }
             return;
         }
         equip(villager);
@@ -81,6 +90,21 @@ public class DefendTask extends MultiTickTask<VillagerEntityMCA> {
         }
         boolean staying = villager.getBrain().getOptionalMemory(MemoryModuleTypeMCA.STAYING.get()).isPresent();
         return Threats.nearest(world, villager.getBlockPos(), staying ? 6 : 14, villager, null);
+    }
+
+    private static BlockPos trail(ServerWorld world, VillagerEntityMCA villager) {
+        Chore job = villager.getVillagerBrain().getCurrentJob();
+        if (job == Chore.PROSPECT || job == Chore.ESCORT) {
+            return null;
+        }
+        if (villager.getBrain().getOptionalMemory(MemoryModuleTypeMCA.PLAYER_FOLLOWING.get()).isPresent()) {
+            return null;
+        }
+        BlockPos lost = VillagerEyes.searchWhere(world, villager);
+        if (lost != null) {
+            return lost;
+        }
+        return Threats.footstep(world, villager, null);
     }
 
     private static void equip(VillagerEntityMCA villager) {
