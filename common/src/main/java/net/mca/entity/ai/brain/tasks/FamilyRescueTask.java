@@ -4,14 +4,17 @@ import com.google.common.collect.ImmutableMap;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.DistressCalls;
 import net.mca.entity.ai.Threats;
+import net.mca.entity.ai.WorkTools;
 import net.mca.entity.ai.relationship.AgeState;
+import net.mca.util.InventoryUtils;
+import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.brain.EntityLookTarget;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.brain.WalkTarget;
 import net.minecraft.entity.ai.brain.task.MultiTickTask;
-import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.ItemStack;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Hand;
@@ -72,7 +75,11 @@ public class FamilyRescueTask extends MultiTickTask<VillagerEntityMCA> {
         }
 
         villager.getBrain().remember(MemoryModuleType.LOOK_TARGET, new net.minecraft.entity.ai.brain.BlockPosLookTarget(tracking.pos()));
-        villager.getBrain().remember(MemoryModuleType.WALK_TARGET, new WalkTarget(tracking.pos(), distance > 64 ? 1.05F : 0.75F, 2));
+        float speed = distance > 16 * 16 ? 1.05F : 0.75F;
+        villager.getBrain().remember(MemoryModuleType.WALK_TARGET, new WalkTarget(tracking.pos(), speed, 2));
+        if ((villager.age & 3) == 0) {
+            villager.getNavigation().startMovingTo(tracking.pos().getX() + 0.5, tracking.pos().getY(), tracking.pos().getZ() + 0.5, speed);
+        }
     }
 
     private void announce(ServerWorld world, VillagerEntityMCA villager, DistressCalls.Call call) {
@@ -89,21 +96,22 @@ public class FamilyRescueTask extends MultiTickTask<VillagerEntityMCA> {
     }
 
     private void fight(ServerWorld world, VillagerEntityMCA villager, MobEntity threat) {
+        InventoryUtils.holdMain(villager, WorkTools::isWeapon);
         villager.getBrain().remember(MemoryModuleType.LOOK_TARGET, new EntityLookTarget(threat, true));
         villager.getBrain().remember(MemoryModuleType.WALK_TARGET, new WalkTarget(new EntityLookTarget(threat, false), 1.05F, 1));
         villager.getBrain().remember(MemoryModuleType.ATTACK_TARGET, threat);
-        if (villager.squaredDistanceTo(threat) > 6.25F) {
-            return;
+        if ((villager.age & 3) == 0) {
+            villager.getNavigation().startMovingTo(threat, 1.05);
         }
-        if (attackCooldown-- > 0) {
+        if (villager.squaredDistanceTo(threat) > 6.25F || attackCooldown-- > 0) {
             return;
         }
         attackCooldown = 12;
         villager.swingHand(Hand.MAIN_HAND);
-        float damage = (float) villager.getAttributeValue(EntityAttributes.GENERIC_ATTACK_DAMAGE);
-        if (damage < 1.0F) {
-            damage = 3.0F;
+        villager.tryAttack(threat);
+        ItemStack weapon = villager.getMainHandStack();
+        if (WorkTools.isWeapon(weapon)) {
+            weapon.damage(1, villager, e -> e.sendEquipmentBreakStatus(EquipmentSlot.MAINHAND));
         }
-        threat.damage(world.getDamageSources().mobAttack(villager), damage);
     }
 }

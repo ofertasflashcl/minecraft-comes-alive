@@ -1,5 +1,6 @@
 package net.mca.util;
 
+import net.mca.entity.VillagerEntityMCA;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.inventory.Inventory;
@@ -7,6 +8,7 @@ import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.item.*;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtList;
+import net.minecraft.util.Hand;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.Comparator;
@@ -28,6 +30,39 @@ public interface InventoryUtils {
             return i;
         }
         return -1;
+    }
+
+    /**
+     * Main hand shares the inventory stack, the same way hunting and chopping do.
+     * A stack that exists only in the hand (food split out of the bag) is put back first.
+     */
+    static boolean holdMain(VillagerEntityMCA villager, Predicate<ItemStack> match) {
+        ItemStack held = villager.getMainHandStack();
+        if (match.test(held)) {
+            return true;
+        }
+        SimpleInventory inv = villager.getInventory();
+        int slot = getFirstSlotContainingItem(inv, match);
+        if (slot < 0) {
+            return false;
+        }
+        if (!held.isEmpty() && !sharesSlot(inv, held)) {
+            ItemStack leftover = inv.addStack(held.copy());
+            if (!leftover.isEmpty()) {
+                villager.dropStack(leftover);
+            }
+        }
+        villager.setStackInHand(Hand.MAIN_HAND, inv.getStack(slot));
+        return match.test(villager.getMainHandStack());
+    }
+
+    private static boolean sharesSlot(SimpleInventory inv, ItemStack stack) {
+        for (int i = 0; i < inv.size(); i++) {
+            if (inv.getStack(i) == stack) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static boolean contains(Inventory inv, Class<?> clazz) {

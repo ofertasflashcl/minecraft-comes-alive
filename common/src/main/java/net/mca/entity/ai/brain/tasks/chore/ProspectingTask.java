@@ -11,6 +11,7 @@ import net.mca.util.InventoryUtils;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleState;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
@@ -24,11 +25,11 @@ import net.minecraft.registry.RegistryKeys;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.TagKey;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import net.minecraft.world.GameRules;
 
 import java.util.Iterator;
 import java.util.LinkedHashSet;
@@ -76,7 +77,8 @@ public class ProspectingTask extends AbstractChoreTask {
     private long lastCry;
     private long lastOreAnnounce;
     private boolean announcedAny;
-    private boolean griefWarned;
+    private int stillTicks;
+    private BlockPos lastFeet;
     private final Set<Long> visited = new LinkedHashSet<>();
     private final Set<Long> ignored = new LinkedHashSet<>();
 
@@ -116,9 +118,9 @@ public class ProspectingTask extends AbstractChoreTask {
 
     @Override
     protected void finishRunning(ServerWorld world, VillagerEntityMCA villager, long time) {
-        ItemStack stack = villager.getStackInHand(villager.getDominantHand());
-        if (!stack.isEmpty()) {
-            villager.setStackInHand(villager.getDominantHand(), ItemStack.EMPTY);
+        ItemStack stack = villager.getMainHandStack();
+        if (WorkTools.isPickaxe(stack)) {
+            villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
         }
     }
 
@@ -131,13 +133,7 @@ public class ProspectingTask extends AbstractChoreTask {
         if (villager.getVillagerBrain().getCurrentJob() != Chore.PROSPECT) {
             return;
         }
-        if (!world.getGameRules().getBoolean(GameRules.DO_MOB_GRIEFING)) {
-            if (!griefWarned) {
-                griefWarned = true;
-                abandonJobWithMessage("chore.mining.nogrief");
-            }
-            return;
-        }
+        noteMotion(villager);
         if (!equipPick(villager)) {
             abandonJobWithMessage("chore.mining.nopick");
             return;
@@ -199,6 +195,25 @@ public class ProspectingTask extends AbstractChoreTask {
 
     private void seek(ServerWorld world, VillagerEntityMCA villager) {
         maybePlaceTorch(world, villager);
+        BlockPos head = villager.getBlockPos().up();
+        if (!world.isAir(head) && isDiggable(world, head, false)) {
+            digTarget = head;
+            phase = Phase.DIG;
+            digTicks = 0;
+            digTicksNeeded = ticksFor(world.getBlockState(head));
+            return;
+        }
+        if (stillTicks > 40) {
+            BlockPos front = villager.getBlockPos().offset(villager.getHorizontalFacing());
+            if (isDiggable(world, front, true)) {
+                digTarget = front;
+                phase = Phase.DIG;
+                digTicks = 0;
+                digTicksNeeded = ticksFor(world.getBlockState(front));
+                stillTicks = 0;
+                return;
+            }
+        }
         if (scanCooldown-- > 0 && digTarget != null) {
             phase = Phase.DIG;
             return;
@@ -224,6 +239,7 @@ public class ProspectingTask extends AbstractChoreTask {
                 return;
             }
             villager.moveTowards(cave, speed(villager), 1);
+            stepToward(villager, cave, speed(villager));
             return;
         }
 
@@ -246,6 +262,7 @@ public class ProspectingTask extends AbstractChoreTask {
             tunnelLeft--;
             remember(visited, step.asLong(), 512);
             villager.moveTowards(step, speed(villager), 0);
+            stepToward(villager, step, speed(villager));
             return;
         }
         digTarget = !world.isAir(step) ? step : step.up();
@@ -273,8 +290,17 @@ public class ProspectingTask extends AbstractChoreTask {
             }
             return;
         }
-        if (villager.getBlockPos().getSquaredDistance(digTarget) > 9) {
-            villager.moveTowards(digTarget, speed(villager), 1);
+        if (villager.getBlockPos().getSquaredDistance(digTarget) > 6.25) {
+            walk(villager, digTarget, speed(villager));
+            if (stillTicks > 25) {
+                BlockPos wall = nextSolidToward(world, villager.getBlockPos(), digTarget);
+                if (wall != null && villager.getBlockPos().getSquaredDistance(wall) <= 6.25) {
+                    digTarget = wall;
+                    digTicks = 0;
+                    digTicksNeeded = ticksFor(world.getBlockState(wall));
+                    stillTicks = 0;
+                }
+            }
             return;
         }
         BlockState state = world.getBlockState(digTarget);
@@ -284,7 +310,7 @@ public class ProspectingTask extends AbstractChoreTask {
             phase = Phase.SEEK;
             return;
         }
-        villager.swingHand(villager.getDominantHand());
+        villager.swingHand(Hand.MAIN_HAND);
         villager.lookAt(digTarget);
         if (++digTicks < digTicksNeeded) {
             return;
@@ -295,6 +321,8 @@ public class ProspectingTask extends AbstractChoreTask {
                 announceOre(world, state);
             }
             vacuum(world, digTarget);
+        } else {
+            remember(ignored, digTarget.asLong(), 256);
         }
         digTicks = 0;
         digTarget = null;
@@ -403,7 +431,7 @@ public class ProspectingTask extends AbstractChoreTask {
             digTicks = 0;
             digTicksNeeded = ticksFor(world.getBlockState(pos));
         }
-        villager.swingHand(villager.getDominantHand());
+        villager.swingHand(Hand.MAIN_HAND);
         villager.lookAt(pos);
         if (++digTicks < digTicksNeeded) {
             return false;
@@ -429,7 +457,7 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         boolean broken = world.breakBlock(pos, true, villager);
         if (broken) {
-            tool.damage(1, villager, e -> e.sendEquipmentBreakStatus(villager.getDominantSlot()));
+            tool.damage(1, villager, e -> e.sendEquipmentBreakStatus(EquipmentSlot.MAINHAND));
         }
         return broken;
     }
@@ -626,19 +654,32 @@ public class ProspectingTask extends AbstractChoreTask {
     }
 
     private boolean equipPick(VillagerEntityMCA villager) {
-        if (WorkTools.isPickaxe(villager.getStackInHand(villager.getDominantHand()))) {
-            return true;
-        }
-        int slot = InventoryUtils.getFirstSlotContainingItem(villager.getInventory(), WorkTools::isPickaxe);
-        if (slot < 0) {
-            return false;
-        }
-        villager.setStackInHand(villager.getDominantHand(), villager.getInventory().getStack(slot));
-        return true;
+        return InventoryUtils.holdMain(villager, WorkTools::isPickaxe);
     }
 
     private ItemStack tool() {
-        return villager.getStackInHand(villager.getDominantHand());
+        return villager.getMainHandStack();
+    }
+
+    private void walk(VillagerEntityMCA villager, BlockPos pos, float speed) {
+        villager.moveTowards(pos, speed, 0);
+        stepToward(villager, pos, speed);
+    }
+
+    private void stepToward(VillagerEntityMCA villager, BlockPos pos, float speed) {
+        if ((villager.age & 3) == 0) {
+            villager.getNavigation().startMovingTo(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5, Math.max(0.7F, speed));
+        }
+    }
+
+    private void noteMotion(VillagerEntityMCA villager) {
+        BlockPos now = villager.getBlockPos();
+        if (lastFeet != null && lastFeet.equals(now)) {
+            stillTicks++;
+        } else {
+            stillTicks = 0;
+            lastFeet = now.toImmutable();
+        }
     }
 
     private int ticksFor(BlockState state) {

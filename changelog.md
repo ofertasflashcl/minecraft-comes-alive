@@ -1,8 +1,10 @@
 # TBD
 
-* Prospecting now actually mines: ores, caves, shafts, a sealed shelter, coordinates, or a dig-down escape
-* Escort lets several family members form a squad around you and fight
-* Loaded teen or older relatives drop ordinary chores and answer a miner's distress call
+* Prospecting mines for real: ores, caves, two-block tunnels, a sealed shelter, coordinates, or a dig-down escape. A blocked path is broken. The pick stays in the main hand so the ore drops, and a held item is put back in the bag instead of deleted.
+* Followers attack whatever is coming at you instead of only walking. Low health or a creeper still makes them step back.
+* Villagers who are not mining or escorting close in and defend themselves.
+* Escort keeps a ring around you and breaks it to fight, or to reach a miner who called for help.
+* A teen or older relative drops their chore and goes to a family distress call. The rescue closes the distance and hits with the same attack as everyone else.
 
 # 7.6.27
 

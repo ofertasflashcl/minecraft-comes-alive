@@ -8,16 +8,17 @@ import net.mca.entity.ai.Threats;
 import net.mca.entity.ai.WorkTools;
 import net.mca.entity.ai.relationship.AgeState;
 import net.mca.util.InventoryUtils;
+import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.brain.EntityLookTarget;
 import net.minecraft.entity.ai.brain.MemoryModuleState;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.brain.WalkTarget;
-import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.mob.CreeperEntity;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -68,9 +69,9 @@ public class EscortTask extends AbstractChoreTask {
 
     @Override
     protected void finishRunning(ServerWorld world, VillagerEntityMCA villager, long time) {
-        ItemStack stack = villager.getStackInHand(villager.getDominantHand());
-        if (!stack.isEmpty()) {
-            villager.setStackInHand(villager.getDominantHand(), ItemStack.EMPTY);
+        ItemStack stack = villager.getMainHandStack();
+        if (WorkTools.isWeapon(stack)) {
+            villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
         }
         villager.getBrain().forget(MemoryModuleType.ATTACK_TARGET);
     }
@@ -169,11 +170,16 @@ public class EscortTask extends AbstractChoreTask {
                 away = new Vec3d(1, 0, 0);
             }
             away = away.normalize().multiply(5);
-            villager.moveTowards(BlockPos.ofFloored(villager.getPos().add(away)), 1.1F, 0);
+            BlockPos flee = BlockPos.ofFloored(villager.getPos().add(away));
+            villager.moveTowards(flee, 1.1F, 0);
+            villager.getNavigation().startMovingTo(flee.getX() + 0.5, flee.getY(), flee.getZ() + 0.5, 1.1);
             return;
         }
 
         villager.getBrain().remember(MemoryModuleType.WALK_TARGET, new WalkTarget(new EntityLookTarget(threat, false), 1.1F, 1));
+        if ((villager.age & 3) == 0) {
+            villager.getNavigation().startMovingTo(threat, 1.1);
+        }
         if (villager.squaredDistanceTo(threat) > 6.25F) {
             return;
         }
@@ -181,18 +187,11 @@ public class EscortTask extends AbstractChoreTask {
             return;
         }
         attackCooldown = 10;
-        villager.swingHand(villager.getDominantHand());
-        float damage = (float) villager.getAttributeValue(EntityAttributes.GENERIC_ATTACK_DAMAGE);
-        if (damage < 1.0F) {
-            damage = 3.0F;
-        }
-        if (villager.getAgeState().ordinal() < AgeState.ADULT.ordinal()) {
-            damage *= 0.65F;
-        }
-        threat.damage(world.getDamageSources().mobAttack(villager), damage);
-        ItemStack weapon = villager.getStackInHand(villager.getDominantHand());
-        if (!weapon.isEmpty()) {
-            weapon.damage(1, villager, e -> e.sendEquipmentBreakStatus(villager.getDominantSlot()));
+        villager.swingHand(Hand.MAIN_HAND);
+        villager.tryAttack(threat);
+        ItemStack weapon = villager.getMainHandStack();
+        if (WorkTools.isWeapon(weapon)) {
+            weapon.damage(1, villager, e -> e.sendEquipmentBreakStatus(EquipmentSlot.MAINHAND));
         }
     }
 
@@ -217,16 +216,13 @@ public class EscortTask extends AbstractChoreTask {
         float speed = distance > 10 ? 1.15F : (distance > 4 ? 0.9F : 0.65F);
         villager.getBrain().remember(MemoryModuleType.LOOK_TARGET, new EntityLookTarget(player, true));
         villager.moveTowards(BlockPos.ofFloored(x, player.getY(), z), speed, 1);
+        if (distance > 3.2 && (villager.age & 3) == 0) {
+            villager.getNavigation().startMovingTo(x, player.getY(), z, speed);
+        }
     }
 
     private void equipWeapon(VillagerEntityMCA villager) {
-        ItemStack held = villager.getStackInHand(villager.getDominantHand());
-        if (WorkTools.isWeapon(held)) {
-            return;
-        }
-        int slot = InventoryUtils.getFirstSlotContainingItem(villager.getInventory(), WorkTools::isWeapon);
-        if (slot >= 0) {
-            villager.setStackInHand(villager.getDominantHand(), villager.getInventory().getStack(slot));
+        if (InventoryUtils.holdMain(villager, WorkTools::isWeapon)) {
             return;
         }
         if (!warnedNoWeapon) {
