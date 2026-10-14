@@ -187,6 +187,7 @@
   "child.chore.harvesting.nohoe": "No tengo una azada para cultivar.",
   "chore.mining.orenotify": "¡Encontre algo! Hay unos %2$s cerca.",
   "chore.mining.nopick": "Ya no tengo un pico.",
+  "chore.mining.full": "Tengo la mochila llena, hasta aquí llego.",
   "chore.mining.tooyoung": "Soy muy joven para la mina.",
   "chore.mining.help": "¡Ayuda! Estoy en peligro en %2$s, %3$s, %4$s.",
   "chore.mining.shelter": "Me estoy tapiando hasta que pase el peligro.",

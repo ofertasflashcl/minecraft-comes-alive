@@ -5,29 +5,30 @@ import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.MemoryModuleTypeMCA;
 import net.mca.entity.ai.Threats;
 import net.mca.entity.ai.VillagerEyes;
-import net.mca.entity.ai.WorkTools;
-import net.mca.util.InventoryUtils;
-import net.minecraft.entity.EquipmentSlot;
+import net.mca.entity.ai.body.CombatMind;
+import net.mca.entity.ai.body.Motor;
+import net.mca.entity.ai.sense.Retina;
+import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleState;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.brain.task.LookTargetUtil;
 import net.minecraft.entity.ai.brain.task.MultiTickTask;
-import net.minecraft.entity.mob.CreeperEntity;
-import net.minecraft.entity.mob.MobEntity;
+import net.minecraft.entity.ai.pathing.Path;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.item.ItemStack;
 import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Vec3d;
 
 /**
- * Stay with the player. Break formation only to hit whatever is coming at them.
+ * Stay with the player and fight at their side: whatever hurts them, whatever they are hitting, and any
+ * threat the eye catches near them. With a bow or crossbow the villager shoots from range; with a sword or
+ * axe it closes in. When the way to the player is cut (a gap, a ledge) and walking cannot get there, it
+ * bridges or pillars with the blocks it carries, the way a player would.
  */
 public class FollowTask extends MultiTickTask<VillagerEntityMCA> {
-    private int attackCooldown;
     private int stuckTicks;
+    private int unreachableTicks;
     private boolean warned;
+    private final Motor motor = new Motor();
 
     public FollowTask() {
         super(ImmutableMap.of(
@@ -46,95 +47,99 @@ public class FollowTask extends MultiTickTask<VillagerEntityMCA> {
     }
 
     @Override
+    protected void finishRunning(ServerWorld world, VillagerEntityMCA villager, long time) {
+        CombatMind.disengage(villager);
+        motor.reset(world, villager);
+    }
+
+    @Override
     protected void keepRunning(ServerWorld world, VillagerEntityMCA villager, long time) {
-        villager.getBrain().getOptionalMemory(MemoryModuleTypeMCA.PLAYER_FOLLOWING.get()).ifPresent(playerToFollow -> {
-            if (villager.getBrain().getOptionalMemory(MemoryModuleType.HURT_BY_ENTITY).filter(livingEntity -> livingEntity == playerToFollow).isPresent()) {
-                villager.getBrain().forget(MemoryModuleTypeMCA.PLAYER_FOLLOWING.get());
-                return;
-            }
-
-            MobEntity threat = Threats.nearest(world, playerToFollow.getBlockPos(), 16, villager, playerToFollow);
-            if (threat == null) {
-                threat = Threats.nearest(world, villager.getBlockPos(), 8, villager, playerToFollow);
-            }
-            if (threat != null && threat.isAlive()) {
-                fight(villager, playerToFollow, threat);
-                return;
-            }
-            BlockPos lost = VillagerEyes.searchWhere(world, villager);
-            if (lost == null) {
-                lost = Threats.footstep(world, villager, playerToFollow);
-            }
-            if (lost != null) {
-                villager.moveTowards(lost, 1.0F, 1);
-                if ((villager.age & 3) == 0) {
-                    villager.getNavigation().startMovingTo(lost.getX() + 0.5, lost.getY(), lost.getZ() + 0.5, 1.0);
-                }
-                return;
-            }
-            villager.getBrain().forget(MemoryModuleType.ATTACK_TARGET);
-            follow(villager, playerToFollow);
-        });
+        villager.getBrain().getOptionalMemory(MemoryModuleTypeMCA.PLAYER_FOLLOWING.get()).ifPresent(player -> guard(world, villager, player));
     }
 
-    private void fight(VillagerEntityMCA villager, PlayerEntity player, MobEntity threat) {
-        equip(villager);
-        if (!warned) {
-            warned = true;
-            villager.sendChatMessage(player, "chore.escort.engaging");
+    /** One tick of following and protecting {@code ward}. */
+    public void guard(ServerWorld world, VillagerEntityMCA villager, LivingEntity ward) {
+        if (villager.getBrain().getOptionalMemory(MemoryModuleType.HURT_BY_ENTITY).filter(livingEntity -> livingEntity == ward).isPresent()) {
+            villager.getBrain().forget(MemoryModuleTypeMCA.PLAYER_FOLLOWING.get());
+            return;
         }
-        villager.getBrain().remember(MemoryModuleType.ATTACK_TARGET, threat);
+        if ((villager.age & 1) == 0) {
+            Retina.look(world, villager);
+        }
 
-        if (threat instanceof CreeperEntity && villager.squaredDistanceTo(threat) < 16) {
-            Vec3d away = villager.getPos().subtract(threat.getPos());
-            if (away.lengthSquared() < 0.01) {
-                away = new Vec3d(1, 0, 0);
+        LivingEntity threat = CombatMind.pickTarget(world, villager, ward, 16);
+        if (threat != null && threat.isAlive()) {
+            if (!warned && ward instanceof PlayerEntity player) {
+                warned = true;
+                villager.sendChatMessage(player, "chore.escort.engaging");
             }
-            away = away.normalize().multiply(5);
-            BlockPos flee = BlockPos.ofFloored(villager.getPos().add(away));
-            villager.moveTowards(flee, 1.15F, 0);
-            villager.getNavigation().startMovingTo(flee.getX() + 0.5, flee.getY(), flee.getZ() + 0.5, 1.15);
+            motor.reset(world, villager);
+            CombatMind.fight(world, villager, ward, threat);
             return;
         }
+        warned = false;
+        CombatMind.disengage(villager);
 
-        villager.moveTowards(threat.getBlockPos(), 1.05F, 1);
-        if ((villager.age & 3) == 0) {
-            villager.getNavigation().startMovingTo(threat, 1.05);
+        BlockPos lost = VillagerEyes.searchWhere(world, villager);
+        if (lost == null) {
+            lost = Threats.footstep(world, villager, ward instanceof PlayerEntity p ? p : null);
         }
-        if (villager.squaredDistanceTo(threat) > 6.25F || attackCooldown-- > 0) {
+        if (lost != null && lost.isWithinDistance(ward.getBlockPos(), 16)) {
+            Retina.memory(villager).doing("buscando donde lo vio por última vez", world.getTime());
+            villager.moveTowards(lost, 1.0F, 1);
+            if ((villager.age & 3) == 0) {
+                villager.getNavigation().startMovingTo(lost.getX() + 0.5, lost.getY(), lost.getZ() + 0.5, 1.0);
+            }
             return;
         }
-        attackCooldown = 10;
-        villager.swingHand(Hand.MAIN_HAND);
-        villager.tryAttack(threat);
-        ItemStack weapon = villager.getMainHandStack();
-        if (WorkTools.isWeapon(weapon)) {
-            weapon.damage(1, villager, e -> e.sendEquipmentBreakStatus(EquipmentSlot.MAINHAND));
-        }
+        follow(world, villager, ward);
     }
 
-    private void follow(VillagerEntityMCA villager, PlayerEntity player) {
-        double distance = villager.distanceTo(player);
+    private void follow(ServerWorld world, VillagerEntityMCA villager, LivingEntity ward) {
+        double distance = villager.distanceTo(ward);
         if (distance > 40) {
             stuckTicks++;
             if (stuckTicks > 30) {
-                villager.requestTeleport(player.getX(), player.getY(), player.getZ());
+                villager.requestTeleport(ward.getX(), ward.getY(), ward.getZ());
                 villager.fallDistance = 0;
                 stuckTicks = 0;
+                motor.reset(world, villager);
                 return;
             }
         } else {
             stuckTicks = 0;
         }
+        Retina.memory(villager).doing("siguiendo a " + ward.getName().getString(), world.getTime());
+
+        // can walking get there at all? checked once a second
+        if (distance > 3.0 && (villager.age % 20) == 0) {
+            Path path = villager.getNavigation().findPathTo(ward, 1);
+            if (path == null || !path.reachesTarget() && path.getEnd() != null && !path.getEnd().getBlockPos().isWithinDistance(ward.getBlockPos(), 2.5)) {
+                unreachableTicks += 20;
+            } else {
+                unreachableTicks = 0;
+            }
+        }
+        if (distance <= 3.0) {
+            unreachableTicks = 0;
+        }
+        if (unreachableTicks >= 40 && ward.isOnGround()) {
+            Retina.memory(villager).doing("abriéndose camino hacia " + ward.getName().getString(), world.getTime());
+            Motor.Result result = motor.step(world, villager, ward.getBlockPos(), false, true);
+            if (result == Motor.Result.BLOCKED) {
+                unreachableTicks = 0;
+                motor.reset(world, villager);
+            }
+            if (result != Motor.Result.BLOCKED) {
+                return;
+            }
+        }
+
         float dist = (float) distance - 2;
         float speed = Math.min(1.15f, Math.max(0.7f, dist * 0.4f * 0.25f));
-        LookTargetUtil.walkTowards(villager, player, (villager.hasVehicle() ? 1.7f : 0.9f) * speed, 2);
+        LookTargetUtil.walkTowards(villager, ward, (villager.hasVehicle() ? 1.7f : 0.9f) * speed, 2);
         if (distance > 8 && (villager.age & 7) == 0) {
-            villager.getNavigation().startMovingTo(player, 1.05);
+            villager.getNavigation().startMovingTo(ward, 1.05);
         }
-    }
-
-    private static void equip(VillagerEntityMCA villager) {
-        InventoryUtils.holdMain(villager, WorkTools::isWeapon);
     }
 }

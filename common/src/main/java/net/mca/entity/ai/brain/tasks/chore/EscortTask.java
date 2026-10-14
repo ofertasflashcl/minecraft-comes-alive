@@ -7,7 +7,11 @@ import net.mca.entity.ai.DistressCalls;
 import net.mca.entity.ai.Threats;
 import net.mca.entity.ai.VillagerEyes;
 import net.mca.entity.ai.WorkTools;
+import net.mca.entity.ai.body.Archery;
+import net.mca.entity.ai.body.CombatMind;
 import net.mca.entity.ai.relationship.AgeState;
+import net.mca.entity.ai.sense.Retina;
+import net.minecraft.entity.LivingEntity;
 import net.mca.util.InventoryUtils;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.brain.EntityLookTarget;
@@ -34,7 +38,7 @@ public class EscortTask extends AbstractChoreTask {
     private int stuckTicks;
     private boolean warnedNoWeapon;
     private UUID answeringCaller;
-    private MobEntity focus;
+    private LivingEntity focus;
 
     public EscortTask() {
         super(ImmutableMap.of(
@@ -71,10 +75,10 @@ public class EscortTask extends AbstractChoreTask {
     @Override
     protected void finishRunning(ServerWorld world, VillagerEntityMCA villager, long time) {
         ItemStack stack = villager.getMainHandStack();
-        if (WorkTools.isWeapon(stack)) {
+        if (WorkTools.isWeapon(stack) || Archery.isRanged(stack)) {
             villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
         }
-        villager.getBrain().forget(MemoryModuleType.ATTACK_TARGET);
+        CombatMind.disengage(villager);
     }
 
     @Override
@@ -92,11 +96,11 @@ public class EscortTask extends AbstractChoreTask {
         }
         equipWeapon(villager);
 
-        boolean playerSafe = Threats.nearest(world, player.getBlockPos(), 14, villager, player) == null;
-        MobEntity threat = Threats.nearest(world, player.getBlockPos(), 16, villager, player);
-        if (threat == null) {
-            threat = Threats.nearest(world, villager.getBlockPos(), 8, villager, player);
+        if ((villager.age & 1) == 0) {
+            Retina.look(world, villager);
         }
+        LivingEntity threat = CombatMind.pickTarget(world, villager, player, 16);
+        boolean playerSafe = threat == null;
 
         if (threat == null && playerSafe) {
             DistressCalls.Call call = DistressCalls.nearestForAssigner(world, player.getUuid(), villager.getBlockPos(), 96).orElse(null);
@@ -125,7 +129,7 @@ public class EscortTask extends AbstractChoreTask {
         }
 
         focus = null;
-        villager.getBrain().forget(MemoryModuleType.ATTACK_TARGET);
+        CombatMind.disengage(villager);
         holdFormation(villager, player);
     }
 
@@ -152,7 +156,7 @@ public class EscortTask extends AbstractChoreTask {
         }
         MobEntity threat = Threats.nearest(world, call.pos(), 12, villager, player);
         if (threat != null) {
-            fight(world, villager, player, threat);
+            fight(world, villager, null, threat);
             return;
         }
         double distance = villager.squaredDistanceTo(call.pos().getX() + 0.5, call.pos().getY(), call.pos().getZ() + 0.5);
@@ -169,43 +173,14 @@ public class EscortTask extends AbstractChoreTask {
         villager.getBrain().remember(MemoryModuleType.WALK_TARGET, new WalkTarget(call.pos(), 1.05F, 2));
     }
 
-    private void fight(ServerWorld world, VillagerEntityMCA villager, PlayerEntity player, MobEntity threat) {
+    private void fight(ServerWorld world, VillagerEntityMCA villager, PlayerEntity player, LivingEntity threat) {
         if (focus != threat) {
             focus = threat;
-            villager.sendChatMessage(player, "chore.escort.engaging");
-        }
-        villager.getBrain().remember(MemoryModuleType.LOOK_TARGET, new EntityLookTarget(threat, true));
-        villager.getBrain().remember(MemoryModuleType.ATTACK_TARGET, threat);
-
-        if (threat instanceof CreeperEntity && villager.squaredDistanceTo(threat) < 16) {
-            Vec3d away = villager.getPos().subtract(threat.getPos());
-            if (away.lengthSquared() < 0.01) {
-                away = new Vec3d(1, 0, 0);
+            if (player != null) {
+                villager.sendChatMessage(player, "chore.escort.engaging");
             }
-            away = away.normalize().multiply(5);
-            BlockPos flee = BlockPos.ofFloored(villager.getPos().add(away));
-            villager.moveTowards(flee, 1.1F, 0);
-            villager.getNavigation().startMovingTo(flee.getX() + 0.5, flee.getY(), flee.getZ() + 0.5, 1.1);
-            return;
         }
-
-        villager.getBrain().remember(MemoryModuleType.WALK_TARGET, new WalkTarget(new EntityLookTarget(threat, false), 1.1F, 1));
-        if ((villager.age & 3) == 0) {
-            villager.getNavigation().startMovingTo(threat, 1.1);
-        }
-        if (villager.squaredDistanceTo(threat) > 6.25F) {
-            return;
-        }
-        if (attackCooldown-- > 0) {
-            return;
-        }
-        attackCooldown = 10;
-        villager.swingHand(Hand.MAIN_HAND);
-        villager.tryAttack(threat);
-        ItemStack weapon = villager.getMainHandStack();
-        if (WorkTools.isWeapon(weapon)) {
-            weapon.damage(1, villager, e -> e.sendEquipmentBreakStatus(EquipmentSlot.MAINHAND));
-        }
+        CombatMind.fight(world, villager, player, threat);
     }
 
     private void holdFormation(VillagerEntityMCA villager, PlayerEntity player) {
@@ -235,7 +210,7 @@ public class EscortTask extends AbstractChoreTask {
     }
 
     private void equipWeapon(VillagerEntityMCA villager) {
-        if (InventoryUtils.holdMain(villager, WorkTools::isWeapon)) {
+        if (CombatMind.busy(villager) || InventoryUtils.holdMain(villager, s -> WorkTools.isWeapon(s) || Archery.isRanged(s))) {
             return;
         }
         if (!warnedNoWeapon) {

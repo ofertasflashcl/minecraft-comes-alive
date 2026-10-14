@@ -5,88 +5,68 @@ import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.DistressCalls;
 import net.mca.entity.ai.Threats;
-import net.mca.entity.ai.VillagerEyes;
 import net.mca.entity.ai.WorkTools;
+import net.mca.entity.ai.body.Hands;
+import net.mca.entity.ai.body.Mining;
+import net.mca.entity.ai.body.Motor;
 import net.mca.entity.ai.relationship.AgeState;
+import net.mca.entity.ai.sense.Retina;
+import net.mca.entity.ai.sense.VisualMemory;
 import net.mca.util.InventoryUtils;
-import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
-import net.minecraft.entity.EquipmentSlot;
-import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleState;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.registry.Registries;
-import net.minecraft.registry.RegistryKeys;
-import net.minecraft.registry.tag.BlockTags;
-import net.minecraft.registry.tag.TagKey;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Hand;
-import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 
-import java.util.HashMap;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Iterator;
-import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 /**
- * Continuous miner. Looks for ore, then caves, then digs a shaft and keeps going.
- * In danger they wall themselves in, call out their coordinates, or dig down and cap the hole.
+ * Mining by sight. The miner only goes for ore its eye has actually seen (the exact block, as Jade would
+ * name it) and only hits it once the crosshair can land on it within a player's reach. To get there it
+ * walks, tunnels, digs stairs, bridges gaps and pillars up, all through {@link Motor}. With nothing in view it
+ * goes down a staircase to diamond depth and branch mines, so every wall it opens passes in front of its eyes.
+ * In danger it walls itself in, calls out its coordinates, or digs down and caps the hole (from the earlier
+ * version of this chore).
  */
 public class ProspectingTask extends AbstractChoreTask {
-    private static final TagKey<Block> C_ORES = blockTag("c", "ores");
-    private static final TagKey<Block> FORGE_ORES = blockTag("forge", "ores");
-    private static final TagKey<Block> C_STONES = blockTag("c", "stones");
-    private static final TagKey<Block> C_COBBLESTONES = blockTag("c", "cobblestones");
-    private static final TagKey<Block> C_GRAVELS = blockTag("c", "gravels");
-    private static final TagKey<Block> C_SANDS = blockTag("c", "sands");
-    private static final TagKey<Block> C_SANDSTONES = blockTag("c", "sandstones");
-    private static final TagKey<Block> C_NETHERRACKS = blockTag("c", "netherracks");
-    private static final TagKey<Block> C_DIRTS = blockTag("c", "dirts");
-    private static final TagKey<Block> C_DEEPSLATES = blockTag("c", "deepslate");
-    private static final TagKey<Block> FORGE_STONE = blockTag("forge", "stone");
-    private static final TagKey<Block> FORGE_COBBLESTONE = blockTag("forge", "cobblestone");
-    private static final TagKey<Block> FORGE_GRAVEL = blockTag("forge", "gravel");
-    private static final TagKey<Block> FORGE_SAND = blockTag("forge", "sand");
-    private static final TagKey<Block> FORGE_DIRT = blockTag("forge", "dirt");
-    private static final TagKey<Block> FORGE_NETHERRACK = blockTag("forge", "netherrack");
-
     private enum Phase {
-        SEEK, DIG, SHELTER_DIG, SHELTER_ENTER, SHELTER_SEAL, ESCAPE, RECOVER
+        SEEK, SHELTER_DIG, SHELTER_ENTER, SHELTER_SEAL, ESCAPE, RECOVER
     }
 
+    /** Below this the deepslate lava lakes start. */
+    public static final int DEEPSLATE_DEPTH = -50;
+    private static final int ORE_SEARCH_RADIUS = 32;
+
+    private final Motor motor = new Motor();
+    private final Deque<BlockPos> plan = new ArrayDeque<>();
+    private final Map<Long, Long> ignored = new LinkedHashMap<>();
     private Phase phase = Phase.SEEK;
-    private BlockPos digTarget;
+    private BlockPos ore;
+    private int oreFails;
+    private int tunnelDir;
+    private boolean branchLeft;
     private BlockPos pocket;
     private BlockPos sealPos;
     private BlockPos escapeOrigin;
-    private int digTicks;
-    private int digTicksNeeded = 12;
-    private int tunnelLeft;
-    private int tunnelDir;
     private int escapeLeft;
     private int calmTicks;
-    private int scanCooldown;
     private long lastCry;
     private long lastOreAnnounce;
     private boolean announcedAny;
-    private int stillTicks;
-    private BlockPos lastFeet;
-    private long lastLookTick = -1000L;
-    private BlockPos lastLookFeet;
-    private final Map<Long, Seen> eyes = new HashMap<>();
-    private final Set<Long> visited = new LinkedHashSet<>();
-    private final Set<Long> ignored = new LinkedHashSet<>();
+    private boolean warnedFull;
 
     public ProspectingTask() {
         super(ImmutableMap.of(
@@ -119,11 +99,16 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         if (!equipPick(villager)) {
             abandonJobWithMessage("chore.mining.nopick");
+            return;
         }
+        tunnelDir = villager.getHorizontalFacing().getHorizontal();
+        Retina.lookAll(world, villager);
     }
 
     @Override
     protected void finishRunning(ServerWorld world, VillagerEntityMCA villager, long time) {
+        motor.reset(world, villager);
+        plan.clear();
         ItemStack stack = villager.getMainHandStack();
         if (WorkTools.isPickaxe(stack)) {
             villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
@@ -139,13 +124,23 @@ public class ProspectingTask extends AbstractChoreTask {
         if (villager.getVillagerBrain().getCurrentJob() != Chore.PROSPECT) {
             return;
         }
-        noteMotion(villager);
         if (!equipPick(villager)) {
             abandonJobWithMessage("chore.mining.nopick");
             return;
         }
+        if ((villager.age & 1) == 0) {
+            Retina.look(world, villager);
+        }
+        if (bagFull(villager)) {
+            if (!warnedFull) {
+                warnedFull = true;
+                abandonJobWithMessage("chore.mining.full");
+            }
+            return;
+        }
+        warnedFull = false;
 
-        if (phase == Phase.SEEK || phase == Phase.DIG) {
+        if (phase == Phase.SEEK) {
             MobEntity threat = Threats.nearest(world, villager.getBlockPos(), 10, villager, null);
             if (threat != null) {
                 beginDanger(world, threat);
@@ -154,7 +149,6 @@ public class ProspectingTask extends AbstractChoreTask {
 
         switch (phase) {
             case SEEK -> seek(world, villager);
-            case DIG -> dig(world, villager);
             case SHELTER_DIG -> shelterDig(world, villager);
             case SHELTER_ENTER -> shelterEnter(world, villager);
             case SHELTER_SEAL -> shelterSeal(world, villager);
@@ -163,8 +157,189 @@ public class ProspectingTask extends AbstractChoreTask {
         }
     }
 
+    // ------------------------------------------------------------------ mining
+
+    private void seek(ServerWorld world, VillagerEntityMCA villager) {
+        VisualMemory memory = Retina.memory(villager);
+        long now = world.getTime();
+        maybePlaceTorch(world, villager);
+
+        if (ore == null || !stillOre(memory, ore)) {
+            ore = chooseOre(world, villager, memory);
+            oreFails = 0;
+        }
+        if (ore != null) {
+            BlockState state = memory.stateAt(ore);
+            String name = state == null ? "?" : state.getBlock().getName().getString();
+            BlockPos feet = villager.getBlockPos();
+            boolean underFeet = ore.equals(feet.down());
+            if (!underFeet && Retina.visibleFace(world, villager, ore, Retina.BLOCK_REACH) != null) {
+                memory.doing(String.format("picando %s a %.1f bloques", name, Math.sqrt(villager.getEyePos().squaredDistanceTo(ore.toCenterPos()))), now);
+                villager.getNavigation().stop();
+                int r = motor.breaker().tick(world, villager, ore);
+                if (r == Hands.Breaker.DONE) {
+                    Hands.collect(world, villager, ore, 2.5);
+                    if (state != null) {
+                        announceOre(world, state);
+                    }
+                    Retina.peek(world, villager, ore);
+                    ore = null;
+                } else if (r == Hands.Breaker.FAILED) {
+                    ignore(ore, now);
+                    ore = null;
+                }
+                return;
+            }
+            memory.doing(String.format("yendo hacia %s en %d %d %d", name, ore.getX(), ore.getY(), ore.getZ()), now);
+            Motor.Result result = motor.step(world, villager, ore, true, true);
+            if (result == Motor.Result.BLOCKED) {
+                if (++oreFails > 3) {
+                    ignore(ore, now);
+                    ore = null;
+                }
+            }
+            return;
+        }
+
+        // nothing seen: open rock in front of the eyes
+        if (plan.isEmpty()) {
+            planExploration(world, villager);
+        }
+        BlockPos goal = plan.peekFirst();
+        if (goal == null) {
+            return;
+        }
+        memory.doing(villager.getY() > targetDepth(world) + 2 ? "bajando en escalera a buscar minerales" : "minando en ramas", now);
+        Motor.Result result = motor.step(world, villager, goal, true, true);
+        if (result == Motor.Result.ARRIVED) {
+            plan.pollFirst();
+        } else if (result == Motor.Result.BLOCKED) {
+            plan.clear();
+            motor.reset(world, villager);
+            tunnelDir = (tunnelDir + (villager.getRandom().nextBoolean() ? 1 : 3)) & 3;
+        }
+    }
+
+    private int targetDepth(ServerWorld world) {
+        int bottom = world.getBottomY();
+        return bottom < 0 ? DEEPSLATE_DEPTH : bottom + 12;
+    }
+
+    /** Next stretch: a staircase down to depth, then a corridor with side branches every third block. */
+    private void planExploration(ServerWorld world, VillagerEntityMCA villager) {
+        BlockPos feet = villager.getBlockPos();
+        Direction forward = Direction.fromHorizontal(tunnelDir);
+        int depth = targetDepth(world);
+        if (feet.getY() > depth + 2) {
+            int steps = Math.min(4, feet.getY() - depth);
+            plan.add(feet.offset(forward, steps).down(steps));
+            return;
+        }
+        for (int k = 1; k <= 3; k++) {
+            plan.add(feet.offset(forward, k));
+        }
+        BlockPos junction = feet.offset(forward, 3);
+        Direction side = branchLeft ? forward.rotateYCounterclockwise() : forward.rotateYClockwise();
+        branchLeft = !branchLeft;
+        for (int j = 1; j <= 5; j++) {
+            plan.add(junction.offset(side, j));
+        }
+        plan.add(junction);
+    }
+
+    private boolean stillOre(VisualMemory memory, BlockPos pos) {
+        BlockState state = memory.stateAt(pos);
+        return state != null && Mining.isOre(state);
+    }
+
+    private BlockPos chooseOre(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory) {
+        ItemStack tool = villager.getMainHandStack();
+        long now = world.getTime();
+        BlockPos feet = villager.getBlockPos();
+        BlockPos best = null;
+        double bestScore = Double.MAX_VALUE;
+        for (VisualMemory.SeenBlock seen : memory.blocks(s -> Mining.isOre(s.state))) {
+            if (isIgnored(seen.pos, now) || !tool.isSuitableFor(seen.state)) {
+                continue;
+            }
+            double distance = Math.sqrt(seen.pos.getSquaredDistance(feet));
+            if (distance > ORE_SEARCH_RADIUS) {
+                continue;
+            }
+            double score = distance - Mining.oreValue(seen.state) / 10.0;
+            if (score < bestScore) {
+                bestScore = score;
+                best = seen.pos;
+            }
+        }
+        return best;
+    }
+
+    private void ignore(BlockPos pos, long now) {
+        ignored.put(pos.asLong(), now + 6000);
+        if (ignored.size() > 512) {
+            Iterator<Long> it = ignored.keySet().iterator();
+            it.next();
+            it.remove();
+        }
+    }
+
+    private boolean isIgnored(BlockPos pos, long now) {
+        Long until = ignored.get(pos.asLong());
+        if (until == null) {
+            return false;
+        }
+        if (until < now) {
+            ignored.remove(pos.asLong());
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean bagFull(VillagerEntityMCA villager) {
+        for (int i = 0; i < villager.getInventory().size(); i++) {
+            if (villager.getInventory().getStack(i).isEmpty()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void maybePlaceTorch(ServerWorld world, VillagerEntityMCA villager) {
+        if ((villager.age & 31) != 0) {
+            return;
+        }
+        BlockPos feet = villager.getBlockPos();
+        if (world.getLightLevel(feet) > 7) {
+            return;
+        }
+        int slot = InventoryUtils.getFirstSlotContainingItem(villager.getInventory(), stack -> stack.isOf(Items.TORCH));
+        if (slot < 0 || !world.getBlockState(feet).isAir() || !Blocks.TORCH.getDefaultState().canPlaceAt(world, feet)) {
+            return;
+        }
+        Hands.place(world, villager, feet, villager.getInventory().getStack(slot));
+    }
+
+    private void announceOre(ServerWorld world, BlockState state) {
+        int value = Mining.oreValue(state);
+        long now = world.getTime();
+        if (value < 30 && announcedAny) {
+            return;
+        }
+        if (now - lastOreAnnounce < 200) {
+            return;
+        }
+        lastOreAnnounce = now;
+        announcedAny = true;
+        getAssigningPlayer().ifPresent(player -> villager.sendChatMessage(player, "chore.mining.orenotify", state.getBlock().getName()));
+    }
+
+    // ------------------------------------------------------------------ danger (walls, calls, escape)
+
     private void beginDanger(ServerWorld world, MobEntity threat) {
         cryForHelp(world);
+        motor.reset(world, villager);
+        plan.clear();
         villager.getBrain().forget(MemoryModuleType.ATTACK_TARGET);
         if (tryBeginShelter(world, threat)) {
             return;
@@ -178,15 +353,12 @@ public class ProspectingTask extends AbstractChoreTask {
         BlockPos retreat = feet.offset(away);
         pocket = retreat;
         sealPos = feet;
-        if (world.isAir(retreat) && world.isAir(retreat.up()) && !Threats.lavaNear(world, retreat)) {
+        if (Mining.passable(world, retreat) && Mining.passable(world, retreat.up()) && !Mining.heat(world, retreat)) {
             phase = Phase.SHELTER_ENTER;
             return true;
         }
-        if (isDiggable(world, retreat, false) && !Threats.lavaNear(world, retreat)) {
+        if (Mining.mayDig(world, retreat, world.getBlockState(retreat)) && !Mining.heat(world, retreat)) {
             phase = Phase.SHELTER_DIG;
-            digTarget = retreat;
-            digTicks = 0;
-            digTicksNeeded = ticksFor(world.getBlockState(retreat));
             return true;
         }
         return false;
@@ -196,144 +368,6 @@ public class ProspectingTask extends AbstractChoreTask {
         escapeOrigin = villager.getBlockPos();
         escapeLeft = 5;
         phase = Phase.ESCAPE;
-        digTicks = 0;
-    }
-
-    private void seek(ServerWorld world, VillagerEntityMCA villager) {
-        maybePlaceTorch(world, villager);
-        refreshEyes(world, villager);
-        BlockPos head = villager.getBlockPos().up();
-        if (!world.isAir(head) && isDiggable(world, head, false)) {
-            digTarget = head;
-            phase = Phase.DIG;
-            digTicks = 0;
-            digTicksNeeded = ticksFor(world.getBlockState(head));
-            return;
-        }
-        if (stillTicks > 40) {
-            BlockPos front = villager.getBlockPos().offset(villager.getHorizontalFacing());
-            if (isDiggable(world, front, true)) {
-                digTarget = front;
-                phase = Phase.DIG;
-                digTicks = 0;
-                digTicksNeeded = ticksFor(world.getBlockState(front));
-                stillTicks = 0;
-                return;
-            }
-        }
-        if (scanCooldown-- > 0 && digTarget != null) {
-            phase = Phase.DIG;
-            return;
-        }
-        scanCooldown = 12;
-        BlockPos ore = findOre(world, villager.getBlockPos());
-        if (ore != null) {
-            digTarget = nextSolidToward(world, villager.getBlockPos(), ore);
-            if (digTarget == null) {
-                remember(ignored, ore.asLong(), 256);
-                return;
-            }
-            phase = Phase.DIG;
-            digTicks = 0;
-            digTicksNeeded = ticksFor(world.getBlockState(digTarget));
-            return;
-        }
-
-        BlockPos cave = findCave(world, villager.getBlockPos());
-        if (cave != null) {
-            if (villager.getBlockPos().getSquaredDistance(cave) <= 4) {
-                remember(visited, cave.asLong(), 512);
-                return;
-            }
-            villager.moveTowards(cave, speed(villager), 1);
-            stepToward(villager, cave, speed(villager));
-            return;
-        }
-
-        if (tunnelLeft <= 0) {
-            tunnelLeft = 8 + villager.getRandom().nextInt(6);
-            if (villager.getRandom().nextFloat() < 0.4F) {
-                tunnelDir = villager.getRandom().nextInt(4);
-            }
-        }
-        Direction facing = Direction.fromHorizontal(tunnelDir);
-        boolean descend = villager.getY() > 16 && villager.getRandom().nextFloat() < (villager.getY() > 40 ? 0.75F : 0.35F);
-        BlockPos ahead = villager.getBlockPos().offset(facing);
-        BlockPos step = descend ? ahead.down() : ahead;
-        if (Threats.lavaNear(world, step) || Threats.lavaNear(world, ahead)) {
-            tunnelDir = (tunnelDir + 1) & 3;
-            tunnelLeft = 6;
-            return;
-        }
-        if (world.isAir(step) && world.isAir(step.up())) {
-            tunnelLeft--;
-            remember(visited, step.asLong(), 512);
-            villager.moveTowards(step, speed(villager), 0);
-            stepToward(villager, step, speed(villager));
-            return;
-        }
-        digTarget = !world.isAir(step) ? step : step.up();
-        if (!isDiggable(world, digTarget, false)) {
-            tunnelDir = (tunnelDir + 1) & 3;
-            tunnelLeft = 6;
-            digTarget = null;
-            return;
-        }
-        phase = Phase.DIG;
-        digTicks = 0;
-        digTicksNeeded = ticksFor(world.getBlockState(digTarget));
-    }
-
-    private void dig(ServerWorld world, VillagerEntityMCA villager) {
-        if (digTarget == null || world.isAir(digTarget)) {
-            if (digTarget != null && !world.isAir(digTarget.up()) && isDiggable(world, digTarget.up(), false)) {
-                digTarget = digTarget.up();
-                digTicks = 0;
-                digTicksNeeded = ticksFor(world.getBlockState(digTarget));
-            } else {
-                digTarget = null;
-                phase = Phase.SEEK;
-                tunnelLeft = Math.max(0, tunnelLeft - 1);
-            }
-            return;
-        }
-        if (villager.getBlockPos().getSquaredDistance(digTarget) > 6.25) {
-            walk(villager, digTarget, speed(villager));
-            if (stillTicks > 25) {
-                BlockPos wall = nextSolidToward(world, villager.getBlockPos(), digTarget);
-                if (wall != null && villager.getBlockPos().getSquaredDistance(wall) <= 6.25) {
-                    digTarget = wall;
-                    digTicks = 0;
-                    digTicksNeeded = ticksFor(world.getBlockState(wall));
-                    stillTicks = 0;
-                }
-            }
-            return;
-        }
-        BlockState state = world.getBlockState(digTarget);
-        if (oreValue(state) > 0 && !tool().isSuitableFor(state)) {
-            remember(ignored, digTarget.asLong(), 256);
-            digTarget = null;
-            phase = Phase.SEEK;
-            return;
-        }
-        villager.swingHand(Hand.MAIN_HAND);
-        villager.lookAt(digTarget);
-        if (++digTicks < digTicksNeeded) {
-            return;
-        }
-        boolean ore = oreValue(state) > 0;
-        if (breakBlock(world, digTarget)) {
-            if (ore) {
-                announceOre(world, state);
-            }
-            vacuum(world, digTarget);
-        } else {
-            remember(ignored, digTarget.asLong(), 256);
-        }
-        digTicks = 0;
-        digTarget = null;
-        phase = Phase.SEEK;
     }
 
     private void shelterDig(ServerWorld world, VillagerEntityMCA villager) {
@@ -341,10 +375,14 @@ public class ProspectingTask extends AbstractChoreTask {
             beginEscape();
             return;
         }
-        boolean open = world.isAir(pocket) && world.isAir(pocket.up());
-        if (!open) {
-            BlockPos next = !world.isAir(pocket) ? pocket : pocket.up();
-            if (!breakProgress(world, villager, next)) {
+        for (BlockPos cell : new BlockPos[]{pocket.up(), pocket}) {
+            if (!Mining.passable(world, cell)) {
+                int r = motor.breaker().tick(world, villager, cell);
+                if (r == Hands.Breaker.FAILED) {
+                    beginEscape();
+                } else if (r == Hands.Breaker.DONE) {
+                    Hands.collect(world, villager, cell, 2.5);
+                }
                 return;
             }
         }
@@ -356,8 +394,8 @@ public class ProspectingTask extends AbstractChoreTask {
             beginEscape();
             return;
         }
-        villager.moveTowards(pocket, 0.8F, 0);
-        if (villager.getBlockPos().getSquaredDistance(pocket) <= 2.25) {
+        villager.getMoveControl().moveTo(pocket.getX() + 0.5, pocket.getY(), pocket.getZ() + 0.5, 0.8);
+        if (villager.getBlockPos().equals(pocket)) {
             phase = Phase.SHELTER_SEAL;
             cryForHelp(world);
             getAssigningPlayer().ifPresent(player -> villager.sendChatMessage(player, "chore.mining.shelter"));
@@ -371,12 +409,9 @@ public class ProspectingTask extends AbstractChoreTask {
             calmTicks = 0;
             return;
         }
-        boolean closed = !world.isAir(sealPos) && !world.isAir(sealPos.up());
-        if (!closed) {
-            BlockPos spot = world.isAir(sealPos) ? sealPos : sealPos.up();
-            if (!placeSolid(world, spot)) {
-                BlockPos donor = findDonor(world, villager.getBlockPos());
-                if (donor == null || !breakProgress(world, villager, donor)) {
+        for (BlockPos spot : new BlockPos[]{sealPos, sealPos.up()}) {
+            if (Mining.passable(world, spot)) {
+                if (!placeSolid(world, spot)) {
                     beginEscape();
                 }
                 return;
@@ -391,18 +426,21 @@ public class ProspectingTask extends AbstractChoreTask {
         villager.getBrain().forget(MemoryModuleType.WALK_TARGET);
         if (escapeLeft > 0) {
             BlockPos below = villager.getBlockPos().down();
-            if (Threats.lavaNear(world, below) || !isDiggable(world, below, false)) {
+            if (Mining.heat(world, below) || !Mining.mayDig(world, below, world.getBlockState(below))) {
                 escapeLeft = 0;
                 return;
             }
-            if (!world.isAir(below) && !breakProgress(world, villager, below)) {
-                return;
+            int r = motor.breaker().tick(world, villager, below);
+            if (r == Hands.Breaker.DONE) {
+                Hands.collect(world, villager, below, 2.5);
+                escapeLeft--;
+            } else if (r == Hands.Breaker.FAILED) {
+                escapeLeft = 0;
             }
-            escapeLeft--;
             return;
         }
-        if (escapeOrigin != null && world.isAir(escapeOrigin)) {
-            placeSolid(world, escapeOrigin);
+        if (escapeOrigin != null && Mining.passable(world, escapeOrigin) && villager.getBlockPos().getY() < escapeOrigin.getY()) {
+            placeSolid(world, escapeOrigin.getY() - villager.getBlockPos().getY() > 2 ? villager.getBlockPos().up(2) : escapeOrigin);
         }
         getAssigningPlayer().ifPresent(player -> villager.sendChatMessage(player, "chore.mining.escape",
                 villager.getBlockPos().getX(), villager.getBlockPos().getY(), villager.getBlockPos().getZ()));
@@ -415,7 +453,7 @@ public class ProspectingTask extends AbstractChoreTask {
         if (threat != null) {
             calmTicks = 0;
             keepDistressAlive(world);
-            if (sealPos != null && world.isAir(sealPos)) {
+            if (sealPos != null && Mining.passable(world, sealPos)) {
                 beginDanger(world, threat);
             }
             return;
@@ -423,310 +461,32 @@ public class ProspectingTask extends AbstractChoreTask {
         if (++calmTicks > 80) {
             getAssigningPlayer().ifPresent(player -> villager.sendChatMessage(player, "chore.mining.safe"));
             phase = Phase.SEEK;
-            digTarget = null;
+            ore = null;
             calmTicks = 0;
         }
     }
 
-    private boolean breakProgress(ServerWorld world, VillagerEntityMCA villager, BlockPos pos) {
-        if (world.isAir(pos)) {
-            digTicks = 0;
+    /** A wall block from the bag, placed like a player; if the face is out of sight in the rush, it is set directly. */
+    private boolean placeSolid(ServerWorld world, BlockPos pos) {
+        if (!world.getBlockState(pos).isReplaceable() || Mining.heat(world, pos)) {
+            return !world.getBlockState(pos).isReplaceable();
+        }
+        if (!world.isInBuildLimit(pos) || !world.getWorldBorder().contains(pos)) {
+            return false;
+        }
+        ItemStack block = Hands.buildingBlock(villager);
+        if (block.isEmpty()) {
+            return false;
+        }
+        if (Hands.place(world, villager, pos, block)) {
             return true;
         }
-        if (digTarget == null || !digTarget.equals(pos)) {
-            digTarget = pos;
-            digTicks = 0;
-            digTicksNeeded = ticksFor(world.getBlockState(pos));
-        }
-        villager.swingHand(Hand.MAIN_HAND);
-        villager.lookAt(pos);
-        if (++digTicks < digTicksNeeded) {
+        if (!world.getOtherEntities(null, new net.minecraft.util.math.Box(pos)).isEmpty()) {
             return false;
         }
-        digTicks = 0;
-        boolean broken = breakBlock(world, pos);
-        vacuum(world, pos);
-        return broken || world.isAir(pos);
-    }
-
-    private boolean breakBlock(ServerWorld world, BlockPos pos) {
-        BlockState state = world.getBlockState(pos);
-        if (state.hasBlockEntity() || state.getHardness(world, pos) < 0 || state.isAir()) {
-            return false;
-        }
-        ItemStack tool = tool();
-        if (oreValue(state) > 0 && !tool.isSuitableFor(state)) {
-            return false;
-        }
-        if (!canBreak(world, pos)) {
-            remember(ignored, pos.asLong(), 512);
-            return false;
-        }
-        boolean broken = world.breakBlock(pos, true, villager);
-        if (broken) {
-            tool.damage(1, villager, e -> e.sendEquipmentBreakStatus(EquipmentSlot.MAINHAND));
-        }
-        return broken;
-    }
-
-    private void vacuum(ServerWorld world, BlockPos pos) {
-        for (ItemEntity item : world.getNonSpectatingEntities(ItemEntity.class, new Box(pos).expand(2.5))) {
-            item.setPickupDelay(0);
-            ItemStack leftover = villager.getInventory().addStack(item.getStack().copy());
-            if (leftover.isEmpty()) {
-                item.discard();
-            } else {
-                item.setStack(leftover);
-            }
-        }
-    }
-
-    private boolean placeSolid(ServerWorld world, BlockPos pos) {
-        if (!world.getBlockState(pos).isReplaceable() || Threats.lavaNear(world, pos)) {
-            return !world.isAir(pos);
-        }
-        if (!canBreak(world, pos)) {
-            return false;
-        }
-        int slot = InventoryUtils.getFirstSlotContainingItem(villager.getInventory(), stack -> {
-            if (!(stack.getItem() instanceof BlockItem blockItem)) {
-                return false;
-            }
-            Block block = blockItem.getBlock();
-            return block != Blocks.TORCH && block.getDefaultState().blocksMovement();
-        });
-        if (slot < 0) {
-            return false;
-        }
-        ItemStack stack = villager.getInventory().getStack(slot);
-        BlockState state = ((BlockItem) stack.getItem()).getBlock().getDefaultState();
-        world.setBlockState(pos, state, 3);
-        stack.decrement(1);
+        world.setBlockState(pos, ((net.minecraft.item.BlockItem) block.getItem()).getBlock().getDefaultState(), 3);
+        block.decrement(1);
         return true;
-    }
-
-    private BlockPos findDonor(ServerWorld world, BlockPos origin) {
-        for (BlockPos pos : BlockPos.iterate(origin.add(-2, -1, -2), origin.add(2, 2, 2))) {
-            if (pos.equals(pocket) || pos.equals(pocket == null ? origin : pocket.up())) {
-                continue;
-            }
-            BlockPos frozen = pos.toImmutable();
-            if (isDiggable(world, frozen, false) && !Threats.lavaNear(world, frozen)) {
-                return frozen;
-            }
-        }
-        return null;
-    }
-
-    private BlockPos findOre(ServerWorld world, BlockPos origin) {
-        BlockPos best = null;
-        int bestValue = 0;
-        float bestConfidence = -1.0F;
-        double bestDistance = Double.MAX_VALUE;
-        ItemStack tool = tool();
-        Iterator<Seen> marks = eyes.values().iterator();
-        while (marks.hasNext()) {
-            Seen seen = marks.next();
-            if (seen.value <= 0 || seen.confidence < VillagerEyes.FORGET_CONFIDENCE) {
-                continue;
-            }
-            if (ignored.contains(seen.pos.asLong())) {
-                marks.remove();
-                continue;
-            }
-            BlockState state = world.getBlockState(seen.pos);
-            int value = oreValue(state);
-            if (value == 0 || !tool.isSuitableFor(state)) {
-                marks.remove();
-                continue;
-            }
-            double distance = seen.pos.getSquaredDistance(origin);
-            if (value > bestValue || (value == bestValue && seen.confidence > bestConfidence) || (value == bestValue && seen.confidence == bestConfidence && distance < bestDistance)) {
-                bestValue = value;
-                bestConfidence = seen.confidence;
-                bestDistance = distance;
-                best = seen.pos;
-            }
-        }
-        return best;
-    }
-
-    private BlockPos findCave(ServerWorld world, BlockPos origin) {
-        BlockPos best = null;
-        double bestScore = Double.MAX_VALUE;
-        for (Seen seen : eyes.values()) {
-            if (seen.value != 0 || seen.confidence < 0.12F || visited.contains(seen.pos.asLong())) {
-                continue;
-            }
-            if (!isCaveCell(world, seen.pos)) {
-                continue;
-            }
-            double score = seen.pos.getSquaredDistance(origin) + seen.pos.getY() * 3.0 - seen.confidence;
-            if (score < bestScore) {
-                bestScore = score;
-                best = seen.pos;
-            }
-        }
-        return best;
-    }
-
-    private void refreshEyes(ServerWorld world, VillagerEntityMCA villager) {
-        BlockPos feet = villager.getBlockPos();
-        boolean moved = lastLookFeet == null || !lastLookFeet.equals(feet);
-        long now = world.getTime();
-        if (!VillagerEyes.shouldScan(now, lastLookTick, moved)) {
-            return;
-        }
-        long gap = Math.max(1L, now - lastLookTick);
-        lastLookTick = now;
-        lastLookFeet = feet.toImmutable();
-        Set<Long> visible = new LinkedHashSet<>();
-        VillagerEyes.trace(world, villager, new VillagerEyes.Look() {
-            @Override
-            public void open(BlockPos pos, BlockState state) {
-                if (!isCaveCell(world, pos)) {
-                    return;
-                }
-                double distance = Math.sqrt(pos.getSquaredDistance(villager.getPos()));
-                mark(pos, 0, VillagerEyes.confidence(villager, distance), now, visible);
-            }
-
-            @Override
-            public void solid(BlockPos pos, BlockState state) {
-                int value = oreValue(state);
-                if (value <= 0 || !tool().isSuitableFor(state)) {
-                    return;
-                }
-                double distance = Math.sqrt(pos.getSquaredDistance(villager.getPos()));
-                mark(pos, value, VillagerEyes.confidence(villager, distance), now, visible);
-            }
-        });
-        Iterator<Map.Entry<Long, Seen>> it = eyes.entrySet().iterator();
-        while (it.hasNext()) {
-            Seen seen = it.next().getValue();
-            if (visible.contains(seen.pos.asLong())) {
-                continue;
-            }
-            long age = Math.max(1L, now - seen.lastSeen);
-            seen.confidence = VillagerEyes.refresh(seen.confidence, 0.0F, false, gap);
-            if (VillagerEyes.forgotten(seen.confidence, age)) {
-                it.remove();
-                continue;
-            }
-            if (seen.value > 0 && oreValue(world.getBlockState(seen.pos)) == 0) {
-                it.remove();
-            }
-        }
-        pruneEyes();
-    }
-
-    private void mark(BlockPos pos, int value, float confidence, long now, Set<Long> visible) {
-        if (ignored.contains(pos.asLong())) {
-            return;
-        }
-        long id = pos.asLong();
-        visible.add(id);
-        Seen previous = eyes.get(id);
-        Seen seen = previous == null ? new Seen(pos.toImmutable()) : previous;
-        seen.value = value;
-        seen.lastSeen = now;
-        seen.confidence = VillagerEyes.refresh(previous == null ? 0.0F : previous.confidence, confidence, true, 0L);
-        eyes.put(id, seen);
-    }
-
-    private void pruneEyes() {
-        if (eyes.size() <= 24) {
-            return;
-        }
-        eyes.entrySet().stream()
-                .sorted((a, b) -> {
-                    int value = Integer.compare(a.getValue().value > 0 ? 1 : 0, b.getValue().value > 0 ? 1 : 0);
-                    if (value != 0) {
-                        return value;
-                    }
-                    return Float.compare(a.getValue().confidence, b.getValue().confidence);
-                })
-                .limit(eyes.size() - 24L)
-                .map(Map.Entry::getKey)
-                .toList()
-                .forEach(eyes::remove);
-    }
-
-    private boolean isCaveCell(ServerWorld world, BlockPos pos) {
-        if (!world.isAir(pos) || !world.isAir(pos.up())) {
-            return false;
-        }
-        if (!world.getBlockState(pos.down()).blocksMovement()) {
-            return false;
-        }
-        return !(world.isAir(pos.up(3)) && world.isAir(pos.up(4)));
-    }
-
-    private static final class Seen {
-        private final BlockPos pos;
-        private int value;
-        private float confidence;
-        private long lastSeen;
-
-        private Seen(BlockPos pos) {
-            this.pos = pos;
-        }
-    }
-
-    private BlockPos nextSolidToward(ServerWorld world, BlockPos from, BlockPos ore) {
-        if (from.getSquaredDistance(ore) <= 9 && !world.isAir(ore)) {
-            return ore;
-        }
-        BlockPos.Mutable cursor = from.mutableCopy();
-        for (int step = 0; step < 16 && !cursor.equals(ore); step++) {
-            int dx = Integer.signum(ore.getX() - cursor.getX());
-            int dy = Integer.signum(ore.getY() - cursor.getY());
-            int dz = Integer.signum(ore.getZ() - cursor.getZ());
-            cursor.move(dx, dy, dz);
-            BlockState state = world.getBlockState(cursor);
-            if (!state.isAir() && !state.isReplaceable()) {
-                BlockPos frozen = cursor.toImmutable();
-                if (!isDiggable(world, frozen, true) || Threats.lavaNear(world, frozen)) {
-                    return null;
-                }
-                return frozen;
-            }
-        }
-        return world.isAir(ore) ? null : ore;
-    }
-
-    private void maybePlaceTorch(ServerWorld world, VillagerEntityMCA villager) {
-        if ((villager.age & 31) != 0) {
-            return;
-        }
-        BlockPos feet = villager.getBlockPos();
-        if (world.getLightLevel(feet) > 7) {
-            return;
-        }
-        int slot = InventoryUtils.getFirstSlotContainingItem(villager.getInventory(), stack -> stack.isOf(Items.TORCH));
-        if (slot < 0 || !world.getBlockState(feet).isReplaceable() || !canBreak(world, feet)) {
-            return;
-        }
-        BlockState torch = Blocks.TORCH.getDefaultState();
-        if (!torch.canPlaceAt(world, feet)) {
-            return;
-        }
-        world.setBlockState(feet, torch, 3);
-        villager.getInventory().getStack(slot).decrement(1);
-    }
-
-    private void announceOre(ServerWorld world, BlockState state) {
-        int value = oreValue(state);
-        long now = world.getTime();
-        if (value < 30 && announcedAny) {
-            return;
-        }
-        if (now - lastOreAnnounce < 200) {
-            return;
-        }
-        lastOreAnnounce = now;
-        announcedAny = true;
-        getAssigningPlayer().ifPresent(player -> villager.sendChatMessage(player, "chore.mining.orenotify", state.getBlock().getName()));
     }
 
     private void cryForHelp(ServerWorld world) {
@@ -753,130 +513,8 @@ public class ProspectingTask extends AbstractChoreTask {
         return InventoryUtils.holdMain(villager, WorkTools::isPickaxe);
     }
 
-    private ItemStack tool() {
-        return villager.getMainHandStack();
-    }
-
-    private void walk(VillagerEntityMCA villager, BlockPos pos, float speed) {
-        villager.moveTowards(pos, speed, 0);
-        stepToward(villager, pos, speed);
-    }
-
-    private void stepToward(VillagerEntityMCA villager, BlockPos pos, float speed) {
-        if ((villager.age & 3) == 0) {
-            villager.getNavigation().startMovingTo(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5, Math.max(0.7F, speed));
-        }
-    }
-
-    private void noteMotion(VillagerEntityMCA villager) {
-        BlockPos now = villager.getBlockPos();
-        if (lastFeet != null && lastFeet.equals(now)) {
-            stillTicks++;
-        } else {
-            stillTicks = 0;
-            lastFeet = now.toImmutable();
-        }
-    }
-
-    private int ticksFor(BlockState state) {
-        float speed = Math.max(1.0F, tool().getMiningSpeedMultiplier(state));
-        int ticks = Math.max(6, (int) (28.0F / speed));
-        if (villager.getAgeState().ordinal() < AgeState.ADULT.ordinal()) {
-            ticks = (int) (ticks * 1.45F);
-        }
-        return ticks;
-    }
-
-    private float speed(VillagerEntityMCA villager) {
-        return villager.getAgeState().ordinal() < AgeState.ADULT.ordinal() ? 0.55F : 0.7F;
-    }
-
     private boolean tooYoung(VillagerEntityMCA villager) {
         return villager.getAgeState().ordinal() <= AgeState.TODDLER.ordinal();
-    }
-
-    private boolean isDiggable(ServerWorld world, BlockPos pos, boolean allowOre) {
-        BlockState state = world.getBlockState(pos);
-        if (state.isAir() || state.getHardness(world, pos) < 0) {
-            return false;
-        }
-        if (!allowOre && oreValue(state) > 0) {
-            return false;
-        }
-        if (state.hasBlockEntity()) {
-            return false;
-        }
-        return state.isIn(BlockTags.BASE_STONE_OVERWORLD)
-                || state.isIn(BlockTags.BASE_STONE_NETHER)
-                || state.isIn(BlockTags.STONE_ORE_REPLACEABLES)
-                || state.isIn(BlockTags.DEEPSLATE_ORE_REPLACEABLES)
-                || state.isIn(BlockTags.DIRT)
-                || state.isIn(BlockTags.SAND)
-                || state.isOf(Blocks.GRAVEL)
-                || state.isOf(Blocks.NETHERRACK)
-                || state.isOf(Blocks.SOUL_SAND)
-                || state.isOf(Blocks.SOUL_SOIL)
-                || state.isOf(Blocks.CALCITE)
-                || state.isOf(Blocks.TUFF)
-                || state.isOf(Blocks.SMOOTH_BASALT)
-                || state.isOf(Blocks.COBBLESTONE)
-                || state.isOf(Blocks.COBBLED_DEEPSLATE)
-                || state.isOf(Blocks.SANDSTONE)
-                || state.isIn(C_STONES)
-                || state.isIn(C_COBBLESTONES)
-                || state.isIn(C_GRAVELS)
-                || state.isIn(C_SANDS)
-                || state.isIn(C_SANDSTONES)
-                || state.isIn(C_NETHERRACKS)
-                || state.isIn(C_DIRTS)
-                || state.isIn(C_DEEPSLATES)
-                || state.isIn(FORGE_STONE)
-                || state.isIn(FORGE_COBBLESTONE)
-                || state.isIn(FORGE_GRAVEL)
-                || state.isIn(FORGE_SAND)
-                || state.isIn(FORGE_DIRT)
-                || state.isIn(FORGE_NETHERRACK)
-                || (allowOre && oreValue(state) > 0);
-    }
-
-    private int oreValue(BlockState state) {
-        if (state.isOf(Blocks.ANCIENT_DEBRIS)) {
-            return 100;
-        }
-        if (state.isIn(BlockTags.DIAMOND_ORES) || state.isIn(BlockTags.EMERALD_ORES)) {
-            return 80;
-        }
-        if (state.isIn(BlockTags.GOLD_ORES)) {
-            return 50;
-        }
-        if (state.isIn(BlockTags.LAPIS_ORES) || state.isIn(BlockTags.REDSTONE_ORES)) {
-            return 40;
-        }
-        if (state.isIn(BlockTags.IRON_ORES)) {
-            return 30;
-        }
-        if (state.isIn(BlockTags.COPPER_ORES)) {
-            return 20;
-        }
-        if (state.isIn(BlockTags.COAL_ORES) || state.isOf(Blocks.NETHER_QUARTZ_ORE)) {
-            return 10;
-        }
-        if (state.isIn(C_ORES) || state.isIn(FORGE_ORES)) {
-            return 25;
-        }
-        String path = Registries.BLOCK.getId(state.getBlock()).getPath();
-        if (path.endsWith("_ore") || path.contains("_ore_") || path.startsWith("ore_")) {
-            return 25;
-        }
-        return 0;
-    }
-
-    private boolean canBreak(ServerWorld world, BlockPos pos) {
-        return world.isInBuildLimit(pos) && world.getWorldBorder().contains(pos);
-    }
-
-    private static TagKey<Block> blockTag(String namespace, String path) {
-        return TagKey.of(RegistryKeys.BLOCK, new Identifier(namespace, path));
     }
 
     private static Direction awayFrom(VillagerEntityMCA villager, MobEntity threat) {
@@ -886,15 +524,5 @@ public class ProspectingTask extends AbstractChoreTask {
             return dx > 0 ? Direction.EAST : Direction.WEST;
         }
         return dz > 0 ? Direction.SOUTH : Direction.NORTH;
-    }
-
-    private static void remember(Set<Long> set, long value, int cap) {
-        set.add(value);
-        if (set.size() <= cap) {
-            return;
-        }
-        Iterator<Long> iterator = set.iterator();
-        iterator.next();
-        iterator.remove();
     }
 }

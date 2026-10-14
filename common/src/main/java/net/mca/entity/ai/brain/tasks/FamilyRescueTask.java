@@ -5,6 +5,7 @@ import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.DistressCalls;
 import net.mca.entity.ai.Threats;
 import net.mca.entity.ai.WorkTools;
+import net.mca.entity.ai.body.CombatMind;
 import net.mca.entity.ai.relationship.AgeState;
 import net.mca.util.InventoryUtils;
 import net.minecraft.entity.EquipmentSlot;
@@ -96,22 +97,6 @@ public class FamilyRescueTask extends MultiTickTask<VillagerEntityMCA> {
     }
 
     private void fight(ServerWorld world, VillagerEntityMCA villager, MobEntity threat) {
-        InventoryUtils.holdMain(villager, WorkTools::isWeapon);
-        villager.getBrain().remember(MemoryModuleType.LOOK_TARGET, new EntityLookTarget(threat, true));
-        villager.getBrain().remember(MemoryModuleType.WALK_TARGET, new WalkTarget(new EntityLookTarget(threat, false), 1.05F, 1));
-        villager.getBrain().remember(MemoryModuleType.ATTACK_TARGET, threat);
-        if ((villager.age & 3) == 0) {
-            villager.getNavigation().startMovingTo(threat, 1.05);
-        }
-        if (villager.squaredDistanceTo(threat) > 6.25F || attackCooldown-- > 0) {
-            return;
-        }
-        attackCooldown = 12;
-        villager.swingHand(Hand.MAIN_HAND);
-        villager.tryAttack(threat);
-        ItemStack weapon = villager.getMainHandStack();
-        if (WorkTools.isWeapon(weapon)) {
-            weapon.damage(1, villager, e -> e.sendEquipmentBreakStatus(EquipmentSlot.MAINHAND));
-        }
+        CombatMind.fight(world, villager, null, threat);
     }
 }

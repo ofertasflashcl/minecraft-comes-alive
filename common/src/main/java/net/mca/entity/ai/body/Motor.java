@@ -1,0 +1,339 @@
+package net.mca.entity.ai.body;
+
+import net.mca.entity.VillagerEntityMCA;
+import net.mca.entity.ai.sense.Retina;
+import net.mca.entity.ai.sense.VisualMemory;
+import net.minecraft.item.ItemStack;
+import net.minecraft.registry.tag.FluidTags;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+import org.jetbrains.annotations.Nullable;
+
+import java.util.ArrayDeque;
+import java.util.Deque;
+
+/**
+ * Moves a villager one block at a time the way a player gets through terrain: walks when the way is
+ * open, cuts a two-high tunnel through rock, digs stairs down and up, bridges a gap by placing a block
+ * against the side of the one it stands on (edging out like a sneaking player), and pillars straight
+ * up by jumping and placing under its feet. Every block it breaks or places goes through {@link Hands},
+ * so it only touches what its eye can put a crosshair on within reach.
+ */
+public final class Motor {
+    public enum Result {RUNNING, ARRIVED, BLOCKED}
+
+    private static final int STEP_TIMEOUT = 240;
+
+    private final Hands.Breaker breaker = new Hands.Breaker();
+    private final Deque<BlockPos> safeTrail = new ArrayDeque<>();
+    @Nullable
+    private BlockPos stand;
+    @Nullable
+    private Direction dir;
+    private Kind kind = Kind.LEVEL;
+    private int stepTicks;
+    @Nullable
+    private BlockPos pillarFrom;
+    @Nullable
+    private BlockPos justBroken;
+    private int plugTicks;
+    private String doing = "";
+
+    private enum Kind {LEVEL, DOWN, UP, PILLAR}
+
+    public String doing() {
+        return doing;
+    }
+
+    public Hands.Breaker breaker() {
+        return breaker;
+    }
+
+    public void reset(ServerWorld world, VillagerEntityMCA villager) {
+        breaker.reset(world, villager);
+        stand = null;
+        dir = null;
+        stepTicks = 0;
+        pillarFrom = null;
+        villager.setSneaking(false);
+    }
+
+    /**
+     * One tick of getting to {@code goal}. With {@code dig} it may cut natural rock; with {@code build} it may
+     * spend building blocks from the bag on bridges and pillars.
+     */
+    public Result step(ServerWorld world, VillagerEntityMCA villager, BlockPos goal, boolean dig, boolean build) {
+        villager.getBrain().forget(net.minecraft.entity.ai.brain.MemoryModuleType.WALK_TARGET);
+        BlockPos feet = villager.getBlockPos();
+        if (villager.isOnGround() && Mining.passable(world, feet) && !Mining.heat(world, feet)) {
+            if (safeTrail.isEmpty() || !safeTrail.peekLast().equals(feet)) {
+                safeTrail.addLast(feet.toImmutable());
+                if (safeTrail.size() > 16) {
+                    safeTrail.removeFirst();
+                }
+            }
+        }
+        if (villager.isInLava() || villager.isOnFire() && Mining.heat(world, feet)) {
+            return retreat(world, villager);
+        }
+        if (plugLava(world, villager)) {
+            return Result.RUNNING;
+        }
+        if (villager.isInsideWall() && dig) {
+            BlockPos head = BlockPos.ofFloored(villager.getEyePos());
+            if (!Mining.passable(world, head) && Mining.mayDig(world, head, world.getBlockState(head))) {
+                int r = breaker.tick(world, villager, head);
+                if (r == Hands.Breaker.DONE) {
+                    afterBreak(world, villager, head);
+                }
+                return Result.RUNNING;
+            }
+        }
+        if (feet.equals(goal) || feet.isWithinDistance(goal, 0.5)) {
+            villager.setSneaking(false);
+            return Result.ARRIVED;
+        }
+
+        if (stand == null || feet.equals(stand) && villager.isOnGround() && kind != Kind.PILLAR
+                || kind == Kind.PILLAR && pillarFrom != null && feet.getY() > pillarFrom.getY() && villager.isOnGround()) {
+            plan(world, villager, feet, goal, build);
+            stepTicks = 0;
+            if (stand == null) {
+                return Result.BLOCKED;
+            }
+        }
+        if (++stepTicks > STEP_TIMEOUT) {
+            reset(world, villager);
+            return Result.BLOCKED;
+        }
+
+        // 1. clear the cells the body will pass through, top first so each lower one comes into view
+        for (BlockPos cell : clearance(feet)) {
+            if (Mining.passable(world, cell)) {
+                continue;
+            }
+            if (!dig) {
+                return Result.BLOCKED;
+            }
+            if (!Mining.mayDig(world, cell, world.getBlockState(cell)) || Mining.lavaSeen(Retina.memory(villager), cell)) {
+                reset(world, villager);
+                return Result.BLOCKED;
+            }
+            doing = "cavando";
+            int r = breaker.tick(world, villager, cell);
+            if (r == Hands.Breaker.FAILED) {
+                // not in reach or not visible from here: get closer by the way already open
+                reset(world, villager);
+                return Result.BLOCKED;
+            }
+            if (r == Hands.Breaker.DONE) {
+                afterBreak(world, villager, cell);
+            }
+            return Result.RUNNING;
+        }
+
+        // 2. make sure there is something to stand on
+        if (kind == Kind.PILLAR) {
+            return pillar(world, villager, feet, build);
+        }
+        BlockPos floor = stand.down();
+        if (!Mining.standable(world, floor)) {
+            boolean lavaBelow = world.getFluidState(floor).isIn(FluidTags.LAVA) || Mining.lavaSeen(Retina.memory(villager), floor);
+            ItemStack block = build ? Hands.buildingBlock(villager) : ItemStack.EMPTY;
+            if (!block.isEmpty()) {
+                doing = "haciendo un puente";
+                if (Hands.place(world, villager, floor, block)) {
+                    villager.setSneaking(false);
+                    return Result.RUNNING;
+                }
+                // the side face is not in sight yet: edge out like a sneaking player
+                edgeToward(villager, feet, dir);
+                return Result.RUNNING;
+            }
+            if (lavaBelow || dropDepth(world, floor) > 2) {
+                reset(world, villager);
+                return Result.BLOCKED;
+            }
+        }
+
+        // 3. walk onto the prepared cell
+        villager.setSneaking(false);
+        villager.getNavigation().stop();
+        doing = switch (kind) {
+            case DOWN -> "bajando por la escalera";
+            case UP -> "subiendo";
+            default -> "caminando";
+        };
+        Vec3d target = Vec3d.ofBottomCenter(stand);
+        villager.getMoveControl().moveTo(target.x, target.y, target.z, 0.6);
+        if (kind == Kind.UP && villager.isOnGround() && villager.horizontalCollision) {
+            villager.getJumpControl().setActive();
+        }
+        return Result.RUNNING;
+    }
+
+    private void plan(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, BlockPos goal, boolean build) {
+        int dx = goal.getX() - feet.getX();
+        int dy = goal.getY() - feet.getY();
+        int dz = goal.getZ() - feet.getZ();
+        Direction horizontal = null;
+        if (Math.abs(dx) >= Math.abs(dz) && dx != 0) {
+            horizontal = dx > 0 ? Direction.EAST : Direction.WEST;
+        } else if (dz != 0) {
+            horizontal = dz > 0 ? Direction.SOUTH : Direction.NORTH;
+        }
+        pillarFrom = null;
+        if (horizontal == null) {
+            if (dy > 0) {
+                kind = Kind.PILLAR;
+                dir = villager.getHorizontalFacing();
+                stand = feet.up();
+                return;
+            }
+            // straight below: never dig under your own feet, go down a staircase instead
+            horizontal = villager.getHorizontalFacing();
+        }
+        dir = horizontal;
+        if (dy < 0) {
+            kind = Kind.DOWN;
+            stand = feet.offset(horizontal).down();
+        } else if (dy > 0 && Math.abs(dx) + Math.abs(dz) <= 1 && !Mining.standable(world, feet.offset(horizontal))) {
+            kind = Kind.PILLAR;
+            stand = feet.up();
+        } else if (dy > 0) {
+            kind = Kind.UP;
+            stand = feet.offset(horizontal).up();
+        } else {
+            kind = Kind.LEVEL;
+            stand = feet.offset(horizontal);
+        }
+    }
+
+    private BlockPos[] clearance(BlockPos feet) {
+        return switch (kind) {
+            case LEVEL -> new BlockPos[]{stand.up(), stand};
+            case DOWN -> new BlockPos[]{stand.up(2), stand.up(), stand};
+            case UP -> new BlockPos[]{feet.up(2), stand.up(), stand};
+            case PILLAR -> new BlockPos[]{feet.up(2)};
+        };
+    }
+
+    private Result pillar(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, boolean build) {
+        ItemStack block = build ? Hands.buildingBlock(villager) : ItemStack.EMPTY;
+        if (block.isEmpty()) {
+            reset(world, villager);
+            return Result.BLOCKED;
+        }
+        doing = "subiendo con bloques bajo los pies";
+        villager.getNavigation().stop();
+        if (pillarFrom == null) {
+            if (!villager.isOnGround()) {
+                return Result.RUNNING;
+            }
+            pillarFrom = feet.toImmutable();
+            Vec3d center = Vec3d.ofBottomCenter(feet);
+            villager.getMoveControl().moveTo(center.x, center.y, center.z, 0.3);
+            villager.getJumpControl().setActive();
+            return Result.RUNNING;
+        }
+        if (villager.getY() >= pillarFrom.getY() + 1.0 && Mining.passable(world, pillarFrom)) {
+            Hands.aim(villager, Vec3d.ofCenter(pillarFrom.down()).add(0, 0.5, 0));
+            if (Hands.place(world, villager, pillarFrom, block)) {
+                stand = pillarFrom.up();
+            }
+            return Result.RUNNING;
+        }
+        if (villager.isOnGround() && villager.getBlockPos().equals(pillarFrom)) {
+            // landed without placing: jump again
+            villager.getJumpControl().setActive();
+        }
+        return Result.RUNNING;
+    }
+
+    /** Moves the body toward the edge of the block it stands on and holds it there, the edge guard of sneaking. */
+    private void edgeToward(VillagerEntityMCA villager, BlockPos feet, @Nullable Direction direction) {
+        if (direction == null) {
+            return;
+        }
+        villager.setSneaking(true);
+        villager.getNavigation().stop();
+        Vec3d center = Vec3d.ofBottomCenter(feet);
+        Vec3d edge = center.add(Vec3d.of(direction.getVector()).multiply(0.72));
+        villager.getMoveControl().moveTo(edge.x, edge.y, edge.z, 0.2);
+        double along = villager.getPos().subtract(center).dotProduct(Vec3d.of(direction.getVector()));
+        if (along > 0.78) {
+            Vec3d v = villager.getVelocity();
+            Vec3d axis = Vec3d.of(direction.getVector());
+            double out = v.dotProduct(axis);
+            if (out > 0) {
+                villager.setVelocity(v.subtract(axis.multiply(out)));
+            }
+            Vec3d back = villager.getPos().subtract(axis.multiply(along - 0.78));
+            villager.setPosition(back.x, villager.getY(), back.z);
+        }
+    }
+
+    private void afterBreak(ServerWorld world, VillagerEntityMCA villager, BlockPos cell) {
+        Hands.collect(world, villager, cell, 2.5);
+        justBroken = cell.toImmutable();
+        plugTicks = 6;
+        // look into the hole: what was behind it is now in view
+        Retina.peek(world, villager, cell);
+    }
+
+    /** Right after opening a hole the eye checks it; lava pouring in gets a block slapped on it. */
+    private boolean plugLava(ServerWorld world, VillagerEntityMCA villager) {
+        if (justBroken == null) {
+            return false;
+        }
+        if (plugTicks-- <= 0) {
+            justBroken = null;
+            return false;
+        }
+        VisualMemory memory = Retina.memory(villager);
+        BlockPos hole = justBroken;
+        boolean lava = world.getFluidState(hole).isIn(FluidTags.LAVA) || Mining.lavaSeen(memory, hole);
+        if (!lava) {
+            return false;
+        }
+        doing = "tapando lava";
+        ItemStack block = Hands.buildingBlock(villager);
+        BlockPos plug = world.getFluidState(hole).isIn(FluidTags.LAVA) || Mining.passable(world, hole) ? hole : null;
+        if (plug != null && !block.isEmpty() && Hands.place(world, villager, plug, block)) {
+            justBroken = null;
+            reset(world, villager);
+            return true;
+        }
+        // could not plug it: step back the way it came
+        retreat(world, villager);
+        justBroken = null;
+        return true;
+    }
+
+    private Result retreat(ServerWorld world, VillagerEntityMCA villager) {
+        doing = "retrocediendo";
+        reset(world, villager);
+        BlockPos feet = villager.getBlockPos();
+        while (!safeTrail.isEmpty() && safeTrail.peekLast().equals(feet)) {
+            safeTrail.removeLast();
+        }
+        BlockPos back = safeTrail.peekLast();
+        if (back != null) {
+            Vec3d target = Vec3d.ofBottomCenter(back);
+            villager.getMoveControl().moveTo(target.x, target.y, target.z, 0.9);
+        }
+        return Result.BLOCKED;
+    }
+
+    private static int dropDepth(ServerWorld world, BlockPos floor) {
+        int depth = 0;
+        BlockPos cursor = floor;
+        while (depth < 6 && !Mining.standable(world, cursor)) {
+            cursor = cursor.down();
+            depth++;
+        }
+        return depth;
+    }
+}
