@@ -4,7 +4,7 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import net.mca.MCA;
-import net.mca.entity.Gender;
+import net.mca.entity.ai.relationship.Gender;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.VillagerFactory;
 import net.mca.entity.ai.MoveState;
