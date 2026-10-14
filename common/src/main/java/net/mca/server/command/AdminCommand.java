@@ -41,6 +41,8 @@ public class AdminCommand {
     private static final List<NbtCompound> storedVillagers = new ArrayList<>();
 
     public static void register(CommandDispatcher<ServerCommandSource> dispatcher) {
+        OjoCommand.register(dispatcher);
+        Pruebas.register(dispatcher);
         dispatcher.register(CommandManager.literal("mca-admin")
                 .then(register("help", AdminCommand::displayHelp))
                 .then(register("clearLoadedVillagers", AdminCommand::clearLoadedVillagers))

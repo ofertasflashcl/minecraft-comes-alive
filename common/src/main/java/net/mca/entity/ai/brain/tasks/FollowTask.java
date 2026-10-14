@@ -67,7 +67,8 @@ public class FollowTask extends MultiTickTask<VillagerEntityMCA> {
             Retina.look(world, villager);
         }
 
-        LivingEntity threat = CombatMind.pickTarget(world, villager, ward, 16);
+        // an archer covers more ground than a swordsman
+        LivingEntity threat = CombatMind.pickTarget(world, villager, ward, CombatMind.hasRanged(villager) ? 24 : 16);
         if (threat != null && threat.isAlive()) {
             if (!warned && ward instanceof PlayerEntity player) {
                 warned = true;

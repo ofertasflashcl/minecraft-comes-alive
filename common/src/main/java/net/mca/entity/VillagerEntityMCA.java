@@ -231,12 +231,12 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
         return relations;
     }
 
-    @Override
     /** What this villager's eyes have seen, see {@link net.mca.entity.ai.sense.Retina}. */
     public net.mca.entity.ai.sense.VisualMemory getVisualMemory() {
         return visualMemory;
     }
 
+    @Override
     public VillagerBrain<?> getVillagerBrain() {
         return mcaBrain;
     }

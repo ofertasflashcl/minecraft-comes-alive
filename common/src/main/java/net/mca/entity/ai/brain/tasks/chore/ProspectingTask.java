@@ -157,6 +157,16 @@ public class ProspectingTask extends AbstractChoreTask {
         }
     }
 
+    /** One tick of the mining loop on its own, without a job assigner; used by the in-game checks. */
+    public void practice(ServerWorld world, VillagerEntityMCA villager) {
+        this.villager = villager;
+        if (!equipPick(villager)) {
+            return;
+        }
+        Retina.look(world, villager);
+        seek(world, villager);
+    }
+
     // ------------------------------------------------------------------ mining
 
     private void seek(ServerWorld world, VillagerEntityMCA villager) {

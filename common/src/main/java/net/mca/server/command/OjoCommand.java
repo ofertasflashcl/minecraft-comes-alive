@@ -1,0 +1,126 @@
+package net.mca.server.command;
+
+import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.context.CommandContext;
+import net.mca.entity.VillagerEntityMCA;
+import net.mca.entity.ai.body.Mining;
+import net.mca.entity.ai.sense.Retina;
+import net.mca.entity.ai.sense.VisualMemory;
+import net.minecraft.block.BlockState;
+import net.minecraft.server.command.CommandManager;
+import net.minecraft.server.command.ServerCommandSource;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Vec3d;
+
+import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
+
+/**
+ * {@code /mca-ojo}: what the nearest villager is seeing right now. The block under its crosshair with the
+ * exact state, face and distance (like Jade), the ore it remembers, the bodies in view, what it says it is
+ * doing, and with {@code vista} its whole retina drawn in characters.
+ */
+public final class OjoCommand {
+    private OjoCommand() {
+    }
+
+    public static void register(CommandDispatcher<ServerCommandSource> dispatcher) {
+        dispatcher.register(CommandManager.literal("mca-ojo")
+                .executes(ctx -> show(ctx, false))
+                .then(CommandManager.literal("vista").executes(ctx -> show(ctx, true))));
+    }
+
+    private static int show(CommandContext<ServerCommandSource> ctx, boolean view) {
+        ServerCommandSource source = ctx.getSource();
+        ServerWorld world = source.getWorld();
+        Vec3d from = source.getPosition();
+        List<VillagerEntityMCA> near = world.getEntitiesByClass(VillagerEntityMCA.class, new Box(from, from).expand(16), VillagerEntityMCA::isAlive);
+        VillagerEntityMCA villager = near.stream().min(Comparator.comparingDouble(v -> v.squaredDistanceTo(from))).orElse(null);
+        if (villager == null) {
+            source.sendError(Text.literal("No hay aldeanos a menos de 16 bloques."));
+            return 0;
+        }
+        long now = world.getTime();
+        VisualMemory memory = Retina.memory(villager);
+        Retina.Focus focus = Retina.focus(world, villager, memory, now);
+
+        say(source, Text.literal("Ojo de " + villager.getName().getString()).formatted(Formatting.GOLD));
+        say(source, Text.literal("Haciendo: " + (memory.doing() == null || memory.doing().isEmpty() ? "nada en particular" : memory.doing())));
+        if (focus == null) {
+            say(source, Text.literal("Mira: nada (cielo o demasiado oscuro)"));
+        } else if (focus.entity() != null) {
+            say(source, Text.literal(String.format(Locale.ROOT, "Mira: %s a %.2f bloques%s",
+                    focus.entity().getName().getString(), focus.distance(), focus.inReach() ? " (al alcance)" : "")));
+        } else if (focus.state() != null && focus.pos() != null) {
+            say(source, Text.literal(String.format(Locale.ROOT, "Mira: %s", focus.state().getBlock().getName().getString())).formatted(Formatting.AQUA));
+            say(source, Text.literal(String.format(Locale.ROOT, "  %s, cara %s, en %s, a %.2f bloques%s",
+                    focus.state(), focus.face(), focus.pos().toShortString(), focus.distance(), focus.inReach() ? " (al alcance)" : "")));
+        }
+
+        List<VisualMemory.SeenBlock> ores = memory.blocks(s -> Mining.isOre(s.state));
+        ores.sort(Comparator.comparingDouble(s -> s.pos.getSquaredDistance(villager.getBlockPos())));
+        say(source, Text.literal("Minerales vistos: " + ores.size() + " (" + memory.blockCount() + " bloques en memoria)"));
+        for (int i = 0; i < Math.min(6, ores.size()); i++) {
+            VisualMemory.SeenBlock ore = ores.get(i);
+            say(source, Text.literal(String.format(Locale.ROOT, "  %s en %s, hace %ds",
+                    ore.state.getBlock().getName().getString(), ore.pos.toShortString(), (now - ore.lastSeen) / 20)));
+        }
+        List<VisualMemory.SeenEntity> bodies = memory.entities(now, 40);
+        say(source, Text.literal("Cuerpos a la vista: " + bodies.size()));
+        for (int i = 0; i < Math.min(5, bodies.size()); i++) {
+            VisualMemory.SeenEntity body = bodies.get(i);
+            say(source, Text.literal(String.format(Locale.ROOT, "  %s a %.1f bloques", body.type.getName().getString(), body.distance)));
+        }
+
+        if (view) {
+            Retina.lookAll(world, villager);
+            Retina.Pixel[] frame = memory.frame();
+            if (frame != null) {
+                int w = memory.frameWidth();
+                for (int y = 0; y < memory.frameHeight(); y++) {
+                    StringBuilder row = new StringBuilder();
+                    for (int x = 0; x < w; x++) {
+                        row.append(glyph(frame[y * w + x]));
+                    }
+                    say(source, Text.literal(row.toString()).formatted(Formatting.GRAY));
+                }
+                say(source, Text.literal("# sólido  o mineral  ~ agua  L lava  E cuerpo  . oscuro  (espacio) cielo"));
+            }
+        }
+        return 1;
+    }
+
+    private static char glyph(Retina.Pixel pixel) {
+        if (pixel == null) {
+            return '?';
+        }
+        if (pixel.entity() != null) {
+            return 'E';
+        }
+        if (pixel.dark()) {
+            return '.';
+        }
+        BlockState state = pixel.state();
+        if (state == null) {
+            return pixel.water() ? '~' : ' ';
+        }
+        if (Mining.isOre(state)) {
+            return 'o';
+        }
+        if (!state.getFluidState().isEmpty()) {
+            return state.getFluidState().isIn(net.minecraft.registry.tag.FluidTags.LAVA) ? 'L' : '~';
+        }
+        if (pixel.water()) {
+            return '~';
+        }
+        return '#';
+    }
+
+    private static void say(ServerCommandSource source, Text text) {
+        source.sendFeedback(() -> text, false);
+    }
+}
