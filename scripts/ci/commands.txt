@@ -8,6 +8,6 @@ mca-prueba ojo
 mca-prueba minar
 mca-prueba espada
 mca-prueba arco
-sleep 90
+sleep 120
 mca-prueba resumen
 sleep 2

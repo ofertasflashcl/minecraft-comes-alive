@@ -1,3 +1,13 @@
+# TBD (Tropeles: eye, fighting and mining)
+
+* An exact eye. Each villager casts a 32x18 perspective retina (70° view) against the real outline of every block, so a slab, a stair or a fence is seen by its shape, not as a full cube. Glass, panes and bars let the look through; light under 3 hides what is farther than 6 blocks. What it sees goes into its own visual memory: block, state, face, exact distance and light, plus the bodies in view and how they move.
+* A crosshair like Jade's: the villager knows the exact block it is looking at, the face, and the distance to it, and uses a player's reach (4.5 blocks for blocks, 3 for bodies) to decide what it can touch.
+* Hands like a player's: breaking takes the vanilla time for that tool and block, shows cracks, drops with fortune or silk touch; placing goes against a face it can see.
+* Moving like a player through terrain: two-high tunnels, stairs down and up, bridges over gaps by edging out like a sneaking player, pillars by jumping, lava plugged and backed away from.
+* Mining by sight: the miner only goes for ore its eye has seen, walks, digs, bridges or pillars to reach it, and only hits it with a face in sight and in reach. With nothing in view it goes down a staircase to diamond depth and branch mines. It places torches when it is dark and stops when the bag is full.
+* Fighting while following: with a sword or axe it closes in and swings at the weapon's own speed; with a bow or crossbow it shoots from range with the angle solved against real arrow physics, the target's motion led by the flight time, and the shot held when a friend is in the way. Spread is a player's, much tighter than a skeleton's. Archer guards shoot the same way.
+* `/mca-ojo` (and `/mca-ojo vista`) shows what the nearest villager sees and is doing. `/mca-prueba` runs the in-game checks used by CI.
+
 # TBD
 
 * Prospecting mines for real: ores, caves, two-block tunnels, a sealed shelter, coordinates, or a dig-down escape. A blocked path is broken. The pick stays in the main hand so the ore drops, and a held item is put back in the bag instead of deleted.
