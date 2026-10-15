@@ -566,9 +566,6 @@ public final class Progreso {
         } else if (recipe.output() != Items.STICK) {
             say.accept("chore.mining.crafted", new Object[]{made.getName()});
         }
-        if (recipe == CHEST) {
-            wantChest = false;
-        }
         return true;
     }
 

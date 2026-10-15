@@ -62,7 +62,7 @@ public final class Cofres {
         TropelesMundo mundo = TropelesMundo.get(world);
         List<BlockPos> list = new ArrayList<>();
         for (BlockPos pos : mundo.chestsOf(villager.getUuid())) {
-            if (!world.isChunkLoaded(pos)) {
+            if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) {
                 continue;
             }
             if (world.getBlockState(pos).getBlock() instanceof ChestBlock) {
