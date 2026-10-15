@@ -330,14 +330,14 @@ public class ProspectingTask extends AbstractChoreTask {
         if (phase == Phase.HOME_WALK) {
             double dx = target.getX() + 0.5 - villager.getX();
             double dz = target.getZ() + 0.5 - villager.getZ();
-            if (dx * dx + dz * dz < 9 && Math.abs(target.getY() - villager.getY()) < 3) {
+            if (dx * dx + dz * dz < 9 && Math.abs(target.getY() - villager.getY()) < 1.5) {
                 villager.getNavigation().stop();
                 phase = Phase.HOME_STORE;
                 homeTicks = 0;
                 return;
             }
             memory.doing(String.format("volviendo a casa, a %.0f bloques", Math.sqrt(dx * dx + dz * dz)), now);
-            if (target.getY() - feet.getY() >= 2 && dx * dx + dz * dz < 64) {
+            if (target.getY() - feet.getY() >= 1 && dx * dx + dz * dz < 64) {
                 // home is up a ledge it cannot walk: climb to it the way it climbs out of a mine
                 villager.getNavigation().stop();
                 if (motor.step(world, villager, target, true, true) == Motor.Result.BLOCKED) {
@@ -383,7 +383,7 @@ public class ProspectingTask extends AbstractChoreTask {
             if (gearUp(world, villager)) {
                 return;
             }
-            if (homeTicks > 2400 || villager.getInventory().count(Items.CHEST) == 0 && progreso.idle() && homeTicks > 200 && !progreso.cooking()) {
+            if (homeTicks > 2400 || villager.getInventory().count(Items.CHEST) == 0 && !Progreso.canMakeChest(villager.getInventory()) && progreso.idle() && homeTicks > 200) {
                 say("chore.mining.nochest");
                 homeChest = null;
                 finishHome(world, villager, 0);

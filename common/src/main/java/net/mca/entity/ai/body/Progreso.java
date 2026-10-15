@@ -645,6 +645,11 @@ public final class Progreso {
         finishCrafting();
     }
 
+    /** Whether it has (or can saw from its logs) the planks for a chest. */
+    public static boolean canMakeChest(SimpleInventory inv) {
+        return affordableWithWood(inv, CHEST);
+    }
+
     private static boolean affordableWithWood(SimpleInventory inv, Recipe recipe) {
         return hasNonWood(inv, recipe) && shortLogs(inv, recipe, false) == 0;
     }
@@ -671,8 +676,22 @@ public final class Progreso {
         BlockPos feet = villager.getBlockPos();
         Direction facing = villager.getHorizontalFacing();
         List<Direction> order = new ArrayList<>(List.of(facing, facing.rotateYClockwise(), facing.rotateYCounterclockwise(), facing.getOpposite()));
+        List<BlockPos> cells = new ArrayList<>();
         for (Direction dir : order) {
-            BlockPos cell = feet.offset(dir);
+            cells.add(feet.offset(dir));
+        }
+        // nothing free right beside it (a narrow shaft, a ditch): anywhere within arm's reach, a step up or down
+        for (int dy : new int[]{1, 0, -1}) {
+            for (int dx = -2; dx <= 2; dx++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    BlockPos cell = feet.add(dx, dy, dz);
+                    if ((dx != 0 || dz != 0) && !cells.contains(cell)) {
+                        cells.add(cell);
+                    }
+                }
+            }
+        }
+        for (BlockPos cell : cells) {
             BlockState here = world.getBlockState(cell);
             if (!here.isReplaceable() || !here.getFluidState().isEmpty() || !Mining.standable(world, cell.down())) {
                 continue;
