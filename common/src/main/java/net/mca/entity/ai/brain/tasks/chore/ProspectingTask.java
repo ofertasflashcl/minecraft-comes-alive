@@ -307,7 +307,7 @@ public class ProspectingTask extends AbstractChoreTask {
         BlockPos feet = villager.getBlockPos();
         equipPick(villager);
         if (phase == Phase.HOME_UP) {
-            if (world.isSkyVisible(feet.up()) || feet.getY() >= target.getY() && feet.isWithinDistance(target, 24)) {
+            if (world.isSkyVisible(feet.up()) && feet.getY() >= target.getY() - 1 || feet.getY() >= target.getY() && feet.isWithinDistance(target, 24)) {
                 motor.reset(world, villager);
                 phase = Phase.HOME_WALK;
                 return;
@@ -337,6 +337,16 @@ public class ProspectingTask extends AbstractChoreTask {
                 return;
             }
             memory.doing(String.format("volviendo a casa, a %.0f bloques", Math.sqrt(dx * dx + dz * dz)), now);
+            if (target.getY() - feet.getY() >= 2 && dx * dx + dz * dz < 64) {
+                // home is up a ledge it cannot walk: climb to it the way it climbs out of a mine
+                villager.getNavigation().stop();
+                if (motor.step(world, villager, target, true, true) == Motor.Result.BLOCKED) {
+                    motor.reset(world, villager);
+                    phase = Phase.HOME_UP;
+                    plan.clear();
+                }
+                return;
+            }
             if ((homeTicks % 40) == 1 || villager.getNavigation().isIdle()) {
                 villager.getNavigation().startMovingTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.7);
             }
