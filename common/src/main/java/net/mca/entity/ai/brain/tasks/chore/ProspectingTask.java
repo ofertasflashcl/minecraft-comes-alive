@@ -305,6 +305,7 @@ public class ProspectingTask extends AbstractChoreTask {
             return;
         }
         BlockPos feet = villager.getBlockPos();
+        equipPick(villager);
         if (phase == Phase.HOME_UP) {
             if (world.isSkyVisible(feet.up()) || feet.getY() >= target.getY() && feet.isWithinDistance(target, 24)) {
                 motor.reset(world, villager);
@@ -521,8 +522,18 @@ public class ProspectingTask extends AbstractChoreTask {
     /** Next stretch: a staircase down to depth, then a corridor with side branches every third block. */
     private void planExploration(ServerWorld world, VillagerEntityMCA villager) {
         BlockPos feet = villager.getBlockPos();
-        Direction forward = Direction.fromHorizontal(tunnelDir);
         int depth = targetDepth(world);
+        BlockPos oven = progreso.cookingAt();
+        if (oven != null) {
+            // iron in the furnace: branch-mine at its level and stay within reach of it
+            depth = oven.getY();
+            int dx = oven.getX() - feet.getX();
+            int dz = oven.getZ() - feet.getZ();
+            if (dx * dx + dz * dz > 100) {
+                tunnelDir = Direction.getFacing(dx, 0, dz).getHorizontal();
+            }
+        }
+        Direction forward = Direction.fromHorizontal(tunnelDir);
         if (feet.getY() > depth + 2) {
             int steps = Math.min(4, feet.getY() - depth);
             plan.add(feet.offset(forward, steps).down(steps));

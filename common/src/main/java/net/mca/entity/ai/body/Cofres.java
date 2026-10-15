@@ -248,6 +248,11 @@ public final class Cofres {
         }
         Entity ownerEntity = world.getEntity(chest.owner);
         VillagerEntityMCA owner = ownerEntity instanceof VillagerEntityMCA v ? v : null;
+        if (owner == null) {
+            // not indexed yet (a chunk that just started ticking): look for it around its chest
+            owner = world.getEntitiesByClass(VillagerEntityMCA.class, new net.minecraft.util.math.Box(pos).expand(HOME_RANGE),
+                    v -> v.getUuid().equals(chest.owner)).stream().findFirst().orElse(null);
+        }
         if (owner != null && Relationship.IS_FAMILY.test(owner, player.getUuid())) {
             return 0; // family may take from the family chest
         }

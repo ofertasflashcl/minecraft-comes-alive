@@ -107,6 +107,9 @@ public final class Progreso {
     private boolean ownTable;
     @Nullable
     private BlockPos furnace;
+    /** Where it stood when it lit the furnace: the way back to it. */
+    private BlockPos furnaceStand;
+    private final Motor motor = new Motor();
     private long smeltUntil;
     private int craftDelay;
     private int nextCheck;
@@ -123,6 +126,12 @@ public final class Progreso {
     public void wantChest() {
         wantChest = true;
         nextCheck = 0;
+    }
+
+    /** The furnace it left cooking, or null. */
+    @org.jetbrains.annotations.Nullable
+    public BlockPos cookingAt() {
+        return cooking ? furnace : null;
     }
 
     public boolean cooking() {
@@ -344,10 +353,11 @@ public final class Progreso {
                 cooking = false;
                 furnace = null;
             } else if (oven.getStack(2).getCount() >= 3 || oven.getStack(0).isEmpty()
-                    || !villager.getBlockPos().isWithinDistance(furnace, FURNACE_LEASH)) {
+                    || tooFar(villager, furnace)) {
                 // the first ingots are out, or it went too far: back to the furnace
                 step = Step.COLLECT;
                 collectTicks = 0;
+                motor.reset(world, villager);
             }
         }
         if (step == Step.IDLE) {
@@ -733,6 +743,7 @@ public final class Progreso {
         if (furnace == null || !world.getBlockState(furnace).isOf(Blocks.FURNACE)) {
             memory.doing("poniendo un horno", now);
             furnace = placeBeside(world, villager, Mat.FURNACE);
+            furnaceStand = villager.getBlockPos().toImmutable();
             if (furnace == null) {
                 step = ownTable && table != null ? Step.PACK_UP : Step.IDLE;
                 nextCheck = 200;
@@ -817,6 +828,13 @@ public final class Progreso {
      * Back at the furnace: the ingots come out and go to the table at once. If it brought more raw iron, that
      * goes in to cook while it works; when nothing is left cooking (or it is leaving) the furnace comes along.
      */
+    /** Out of reach of its furnace: farther than the leash across, or more than a few blocks up or down. */
+    private static boolean tooFar(VillagerEntityMCA villager, BlockPos furnace) {
+        double dx = villager.getX() - (furnace.getX() + 0.5);
+        double dz = villager.getZ() - (furnace.getZ() + 0.5);
+        return dx * dx + dz * dz > FURNACE_LEASH * FURNACE_LEASH || Math.abs(villager.getY() - furnace.getY()) > 4;
+    }
+
     private void collect(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, BiConsumer<String, Object[]> say) {
         BlockEntity be = furnace == null ? null : world.getBlockEntity(furnace);
         if (!(be instanceof AbstractFurnaceBlockEntity oven)) {
@@ -834,12 +852,21 @@ public final class Progreso {
                 step = Step.IDLE;
                 return;
             }
-            if ((collectTicks % 20) == 1 || villager.getNavigation().isIdle()) {
-                villager.getNavigation().startMovingTo(furnace.getX() + 0.5, furnace.getY(), furnace.getZ() + 0.5, 0.7);
+            // back the way it dug, on its own feet: no walking off ledges
+            BlockPos back = furnaceStand != null ? furnaceStand : furnace.up();
+            Motor.Result result = motor.step(world, villager, back, true, true);
+            if (result == Motor.Result.BLOCKED) {
+                motor.reset(world, villager);
+                if ((collectTicks % 20) == 1) {
+                    villager.getNavigation().startMovingTo(back.getX() + 0.5, back.getY(), back.getZ() + 0.5, 0.6);
+                }
+            } else if (result == Motor.Result.ARRIVED) {
+                Hands.aim(villager, Vec3d.ofCenter(furnace));
             }
             return;
         }
         villager.getNavigation().stop();
+        motor.reset(world, villager);
         Hands.aim(villager, Vec3d.ofCenter(furnace));
         SimpleInventory inv = villager.getInventory();
         int ingots = oven.getStack(2).getCount();

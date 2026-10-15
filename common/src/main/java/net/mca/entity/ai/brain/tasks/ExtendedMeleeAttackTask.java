@@ -30,6 +30,11 @@ public class ExtendedMeleeAttackTask extends MultiTickTask<MobEntity> {
 
     @Override
     protected boolean shouldRun(ServerWorld serverWorld, MobEntity attacker) {
+        if (attacker instanceof net.mca.entity.VillagerEntityMCA v && (net.mca.entity.ai.body.CombatMind.busy(v)
+                || net.mca.entity.ai.body.CombatMind.hasRanged(v) && net.mca.entity.ai.body.Archery.hasAmmo(v))) {
+            // its own fighting mind has the hands, and an archer never walks up to punch
+            return false;
+        }
         LivingEntity target = getTarget(attacker);
         return LookTargetUtil.isVisibleInMemory(attacker, target) && withinRange(attacker, target);
     }

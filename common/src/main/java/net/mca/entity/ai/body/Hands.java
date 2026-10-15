@@ -169,6 +169,7 @@ public final class Hands {
                     return FAILED;
                 }
                 pos = target.toImmutable();
+                holdBestTool(miner, state);
             }
             BlockHitResult face = Retina.visibleFace(world, miner, target, Retina.BLOCK_REACH);
             if (face == null) {
@@ -202,6 +203,41 @@ public final class Hands {
             reset(world, miner);
             return DONE;
         }
+    }
+
+    /** Like a player picking the hotbar slot: the tool from the bag that cuts this block fastest. */
+    public static void holdBestTool(VillagerEntityMCA miner, BlockState state) {
+        ItemStack held = miner.getMainHandStack();
+        float heldScore = toolScore(held, state);
+        ItemStack best = null;
+        float bestScore = heldScore;
+        var inv = miner.getInventory();
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack stack = inv.getStack(i);
+            if (stack.isEmpty() || stack == held) {
+                continue;
+            }
+            float score = toolScore(stack, state);
+            if (score > bestScore) {
+                best = stack;
+                bestScore = score;
+            }
+        }
+        if (best != null) {
+            ItemStack chosen = best;
+            net.mca.util.InventoryUtils.holdMain(miner, s -> s == chosen);
+        }
+    }
+
+    private static float toolScore(ItemStack stack, BlockState state) {
+        if (stack.isEmpty()) {
+            return 1.0F;
+        }
+        float speed = stack.getMiningSpeedMultiplier(state);
+        if (state.isToolRequired() && stack.isSuitableFor(state)) {
+            speed += 100.0F;
+        }
+        return speed;
     }
 
     private static void finish(ServerWorld world, VillagerEntityMCA miner, BlockPos pos, BlockState state, ItemStack tool) {

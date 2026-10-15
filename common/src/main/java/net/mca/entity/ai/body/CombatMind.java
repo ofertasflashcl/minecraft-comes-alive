@@ -385,6 +385,13 @@ public final class CombatMind {
             return;
         }
         if (distance < 8.0) {
+            if (state.strafeTicks > 0) {
+                // something in the line of fire: back away sideways to open it
+                state.strafeTicks--;
+                villager.getNavigation().stop();
+                villager.getMoveControl().strafeTo((float) (-0.7 * slow), state.strafe * (float) (0.7 * slow));
+                return;
+            }
             backOff(villager, target, ward, 5, 1.15 * slow);
             return;
         }
@@ -408,9 +415,15 @@ public final class CombatMind {
         Vec3d goal = villager.getPos().add(away.normalize().multiply(amount));
         if (ward != null && ward.squaredDistanceTo(goal) < ward.squaredDistanceTo(threat)) {
             // behind the ward is safest
-            Vec3d behind = ward.getPos().subtract(threat.getPos());
+            // behind the ward, but off to one side so the ward is never in the line of fire
+            Vec3d behind = ward.getPos().subtract(threat.getPos()).multiply(1, 0, 1);
             if (behind.lengthSquared() > 0.01) {
-                goal = ward.getPos().add(behind.normalize().multiply(2.0));
+                Vec3d back = behind.normalize();
+                Vec3d side = new Vec3d(-back.z, 0, back.x);
+                if (side.dotProduct(villager.getPos().subtract(ward.getPos())) < 0) {
+                    side = side.multiply(-1);
+                }
+                goal = ward.getPos().add(back.multiply(1.5)).add(side.multiply(2.5));
             }
         }
         villager.getNavigation().startMovingTo(goal.x, goal.y, goal.z, speed);

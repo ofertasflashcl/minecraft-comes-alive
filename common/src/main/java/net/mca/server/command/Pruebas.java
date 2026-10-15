@@ -76,7 +76,7 @@ public final class Pruebas {
                 case "progreso" -> start(new Progreso(world));
                 case "nombre" -> start(new Nombre(world));
                 case "obras" -> obras(world);
-                case "robo" -> robo(world);
+                case "robo" -> start(new Robo(world));
                 case "regalo" -> regalo(world);
                 case "arco-cerca" -> start(new ArcoCerca(world));
                 case "horno" -> start(new Horno(world));
@@ -666,34 +666,57 @@ public final class Pruebas {
         return pos;
     }
 
-    /** Someone who is not family takes from its chest next to it: it notices and the hearts go down. */
-    private static void robo(ServerWorld world) {
-        BlockPos o = new BlockPos(2700, 100, 0);
-        load(world, o, 8);
-        fill(world, o.add(-4, -1, -4), o.add(4, -1, 4), Blocks.STONE.getDefaultState());
-        fill(world, o.add(-4, 0, -4), o.add(4, 4, 4), Blocks.AIR.getDefaultState());
-        fill(world, o.add(-4, 5, -4), o.add(4, 5, 4), Blocks.GLOWSTONE.getDefaultState());
-        VillagerEntityMCA owner = villager(world, o, Direction.EAST);
-        try {
-            BlockPos chest = chestFor(world, owner, o.add(2, 0, 0));
+    /** Someone not of the family takes from its chest in front of it: it notices at once and the hearts drop. */
+    private static final class Robo extends Scenario {
+        private final VillagerEntityMCA owner;
+        private final BlockPos chest;
+
+        Robo(ServerWorld world) {
+            super("robo", world, 200);
+            BlockPos o = new BlockPos(2700, 100, 0);
+            load(world, o, 8);
+            fill(world, o.add(-4, -1, -4), o.add(4, -1, 4), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-4, 0, -4), o.add(4, 4, 4), Blocks.AIR.getDefaultState());
+            fill(world, o.add(-4, 5, -4), o.add(4, 5, 4), Blocks.GLOWSTONE.getDefaultState());
+            owner = villager(world, o, Direction.EAST);
+            owner.setAiDisabled(true);
+            chest = chestFor(world, owner, o.add(2, 0, 0));
+        }
+
+        @Override
+        Boolean step() {
+            // the owner must be in the world's entity index before the thief is put down to it
+            if (ticks < 40) {
+                return null;
+            }
             var inv = Cofres.inventory(world, chest);
             if (inv == null) {
-                fail("robo", "no hay cofre");
-                return;
+                fail(name, "no hay cofre");
+                return Boolean.FALSE;
             }
             inv.setStack(0, new ItemStack(Items.DIAMOND, 10));
             Cofres.remember(world, chest);
-            var thief = fakePlayer(world, "Ladron", Vec3d.ofBottomCenter(o.add(3, 0, 1)));
+            var thief = fakePlayer(world, "Ladron", Vec3d.ofBottomCenter(chest.add(1, 0, 1)));
             int before = owner.getVillagerBrain().getMemoriesForPlayer(thief).getHearts();
             inv.getStack(0).decrement(5);
             int missing = Cofres.check(world, chest, thief);
             int after = owner.getVillagerBrain().getMemoriesForPlayer(thief).getHearts();
             boolean pending = !net.mca.server.world.data.TropelesMundo.get(world).theftsAgainst(owner.getUuid()).isEmpty();
-            check("robo", missing == 5 && after < before && !pending, "le faltan " + missing + " diamantes, corazones " + before + " -> " + after
-                    + ", lo notó al momento: " + !pending);
+            boolean passed = missing == 5 && after < before && !pending;
+            check(name, passed, "le faltan " + missing + " diamantes, corazones " + before + " -> " + after
+                    + ", lo notó al momento: " + !pending + ", dueño en el mundo: " + (world.getEntity(owner.getUuid()) != null));
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "esperando";
+        }
+
+        @Override
+        void cleanup() {
             world.setBlockState(chest, Blocks.AIR.getDefaultState(), 3);
             net.mca.server.world.data.TropelesMundo.get(world).removed(chest);
-        } finally {
             owner.discard();
         }
     }
