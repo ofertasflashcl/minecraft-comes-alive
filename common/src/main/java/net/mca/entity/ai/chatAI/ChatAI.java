@@ -3,6 +3,11 @@ package net.mca.entity.ai.chatAI;
 import net.mca.Config;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.util.WorldUtils;
+import net.minecraft.entity.Entity;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.text.Text;
+import org.jetbrains.annotations.Nullable;
 import net.minecraft.server.network.ServerPlayerEntity;
 
 import java.text.Normalizer;
@@ -79,6 +84,12 @@ public class ChatAI {
      * @return {@code Optional.Empty} if no valid villager was found, Optional containing the VillagerEntityMCA object otherwise
      */
     public static Optional<VillagerEntityMCA> getVillagerForConversation(ServerPlayerEntity player, String msg) {
+        // Saying a villager's whole name reaches them wherever they are, as long as their chunk is loaded
+        Optional<VillagerEntityMCA> named = findByFullName(player.getServer(), msg, player);
+        if (named.isPresent()) {
+            return named;
+        }
+
         UUID playerUUID = player.getUuid();
         // Get nearby villagers
         List<VillagerEntityMCA> nearbyVillagers = WorldUtils.getCloseEntities(player.getWorld(), player, VILLAGER_SEARCH_RANGE, VillagerEntityMCA.class);
@@ -106,6 +117,50 @@ public class ChatAI {
         }
 
         return Optional.empty();
+    }
+
+    /**
+     * The villager whose full name (first and last, accents ignored) appears in the message as whole words, in any
+     * loaded world. With several, the longest name wins, then the one closest to {@code near}.
+     */
+    public static Optional<VillagerEntityMCA> findByFullName(MinecraftServer server, String msg, @Nullable Entity near) {
+        String normalizedMsg = normalizeString(msg);
+        VillagerEntityMCA best = null;
+        int bestLength = 0;
+        double bestDistance = Double.MAX_VALUE;
+        for (ServerWorld world : server.getWorlds()) {
+            for (Entity entity : world.iterateEntities()) {
+                if (!(entity instanceof VillagerEntityMCA villager) || !villager.isAlive()) {
+                    continue;
+                }
+                String name = normalizeString(villager.getTrackedValue(VILLAGER_NAME)).trim();
+                if (name.isEmpty() || !Pattern.compile("(?<![\\p{L}\\p{N}])" + Pattern.quote(name) + "(?![\\p{L}\\p{N}])").matcher(normalizedMsg).find()) {
+                    continue;
+                }
+                double distance = near != null && near.getWorld() == world ? villager.squaredDistanceTo(near) : Double.MAX_VALUE / 2;
+                if (name.length() > bestLength || name.length() == bestLength && distance < bestDistance) {
+                    best = villager;
+                    bestLength = name.length();
+                    bestDistance = distance;
+                }
+            }
+        }
+        return Optional.ofNullable(best);
+    }
+
+    /**
+     * Says the answer. Close by, the villager turns to the player as usual; from afar it answers straight into
+     * their chat, the way a far-away friend would on a server.
+     */
+    public static void deliver(ServerPlayerEntity player, VillagerEntityMCA villager, String answer) {
+        if (villager.isRemoved()) {
+            return;
+        }
+        if (villager.getWorld() == player.getWorld() && villager.distanceTo(player) < CONVERSATION_DISTANCE) {
+            villager.conversationManager.addMessage(player, Text.literal(answer));
+        } else {
+            villager.sendChatMessage(Text.literal(answer), player);
+        }
     }
 
     /**

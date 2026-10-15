@@ -9,6 +9,7 @@ import net.mca.entity.ai.WorkTools;
 import net.mca.entity.ai.body.Hands;
 import net.mca.entity.ai.body.Mining;
 import net.mca.entity.ai.body.Motor;
+import net.mca.entity.ai.body.Progreso;
 import net.mca.entity.ai.relationship.AgeState;
 import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
@@ -34,7 +35,9 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * Mining by sight. The miner only goes for ore its eye has actually seen (the exact block, as Jade would
+ * Mining by sight, starting from nothing. Without a pickaxe it gets its own (chop, planks, table, pickaxe) and
+ * keeps upgrading from what it digs up: stone, iron in a furnace, diamond, a sword, torches ({@link Progreso}).
+ * The miner only goes for ore its eye has actually seen (the exact block, as Jade would
  * name it) and only hits it once the crosshair can land on it within a player's reach. To get there it
  * walks, tunnels, digs stairs, bridges gaps and pillars up, all through {@link Motor}. With nothing in view it
  * goes down a staircase to diamond depth and branch mines, so every wall it opens passes in front of its eyes.
@@ -51,6 +54,8 @@ public class ProspectingTask extends AbstractChoreTask {
     private static final int ORE_SEARCH_RADIUS = 32;
 
     private final Motor motor = new Motor();
+    private final Progreso progreso = new Progreso();
+    private boolean wasGearing;
     private final Deque<BlockPos> plan = new ArrayDeque<>();
     private final Map<Long, Long> ignored = new LinkedHashMap<>();
     private Phase phase = Phase.SEEK;
@@ -97,10 +102,6 @@ public class ProspectingTask extends AbstractChoreTask {
             abandonJobWithMessage("chore.mining.tooyoung");
             return;
         }
-        if (!equipPick(villager)) {
-            abandonJobWithMessage("chore.mining.nopick");
-            return;
-        }
         tunnelDir = villager.getHorizontalFacing().getHorizontal();
         Retina.lookAll(world, villager);
     }
@@ -124,10 +125,6 @@ public class ProspectingTask extends AbstractChoreTask {
         if (villager.getVillagerBrain().getCurrentJob() != Chore.PROSPECT) {
             return;
         }
-        if (!equipPick(villager)) {
-            abandonJobWithMessage("chore.mining.nopick");
-            return;
-        }
         if ((villager.age & 1) == 0) {
             Retina.look(world, villager);
         }
@@ -147,6 +144,18 @@ public class ProspectingTask extends AbstractChoreTask {
             }
         }
 
+        if (phase == Phase.SEEK) {
+            if (gearUp(world, villager)) {
+                return;
+            }
+            if (!equipPick(villager)) {
+                if (progreso.gaveUp()) {
+                    abandonJobWithMessage("chore.mining.nowood");
+                }
+                return;
+            }
+        }
+
         switch (phase) {
             case SEEK -> seek(world, villager);
             case SHELTER_DIG -> shelterDig(world, villager);
@@ -160,11 +169,23 @@ public class ProspectingTask extends AbstractChoreTask {
     /** One tick of the mining loop on its own, without a job assigner; used by the in-game checks. */
     public void practice(ServerWorld world, VillagerEntityMCA villager) {
         this.villager = villager;
-        if (!equipPick(villager)) {
+        Retina.look(world, villager);
+        if (gearUp(world, villager) || !equipPick(villager)) {
             return;
         }
-        Retina.look(world, villager);
         seek(world, villager);
+    }
+
+    /** Making or upgrading its own tools comes before digging; true while that keeps it busy. */
+    private boolean gearUp(ServerWorld world, VillagerEntityMCA villager) {
+        boolean busy = progreso.tick(world, villager, (key, params) ->
+                getAssigningPlayer().ifPresent(player -> villager.sendChatMessage(player, key, params)));
+        if (busy && !wasGearing) {
+            motor.reset(world, villager);
+            plan.clear();
+        }
+        wasGearing = busy;
+        return busy;
     }
 
     // ------------------------------------------------------------------ mining
@@ -520,7 +541,7 @@ public class ProspectingTask extends AbstractChoreTask {
     }
 
     private boolean equipPick(VillagerEntityMCA villager) {
-        return InventoryUtils.holdMain(villager, WorkTools::isPickaxe);
+        return Progreso.holdBestPick(villager);
     }
 
     private boolean tooYoung(VillagerEntityMCA villager) {

@@ -2,6 +2,7 @@ package net.mca.entity.ai.chatAI;
 
 import com.google.common.collect.ImmutableList;
 import net.mca.entity.VillagerEntityMCA;
+import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.MoveState;
 import net.minecraft.server.network.ServerPlayerEntity;
 
@@ -29,8 +30,23 @@ public class TriggerCommandInfos {
                     (p, v) -> v.getResidency().goHome(p)),
             new TriggerCommandInfo("open-trade-window", "Open the trade menu when the player is interested in trading, wants to check your prices or your inventory.",
                     (p, v) -> v.beginTradeWith(p),
-                    (p, v) -> v.hasTradeOffers())
+                    (p, v) -> v.hasTradeOffers()),
+            job("start-mining", "Start prospecting and play on your own like a real player: chop trees, craft a table and your own tools, then mine for ores", Chore.PROSPECT),
+            job("start-chopping", "Start chopping trees", Chore.CHOP),
+            job("start-fishing", "Start fishing", Chore.FISH),
+            job("start-harvesting", "Start harvesting crops", Chore.HARVEST),
+            job("start-hunting", "Start hunting animals", Chore.HUNT),
+            job("start-escort", "Start escorting", Chore.ESCORT),
+            new TriggerCommandInfo("stop-working", "Stop the work you are doing",
+                    (p, v) -> v.getVillagerBrain().abandonJob(),
+                    (p, v) -> v.getVillagerBrain().getCurrentJob() != Chore.NONE)
     );
+
+    private static TriggerCommandInfo job(String command, String description, Chore chore) {
+        return new TriggerCommandInfo(command, description,
+                (p, v) -> v.getVillagerBrain().assignJob(chore, p),
+                (p, v) -> v.getVillagerBrain().getCurrentJob() != chore);
+    }
 
     public static Optional<TriggerCommandInfo> findCommand(String command, ServerPlayerEntity player, VillagerEntityMCA villagerEntityMCA) {
         for (TriggerCommandInfo commandInfo : TriggerCommandInfos.triggerCommands) {

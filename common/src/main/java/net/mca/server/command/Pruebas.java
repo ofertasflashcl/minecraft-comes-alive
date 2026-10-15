@@ -7,7 +7,9 @@ import net.mca.MCA;
 import net.mca.entity.ai.relationship.Gender;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.VillagerFactory;
+import net.mca.entity.ai.MemoryModuleTypeMCA;
 import net.mca.entity.ai.MoveState;
+import net.mca.entity.ai.chatAI.ChatAI;
 import net.mca.entity.ai.body.Archery;
 import net.mca.entity.ai.body.Mining;
 import net.mca.entity.ai.brain.tasks.FollowTask;
@@ -69,9 +71,11 @@ public final class Pruebas {
                 case "minar" -> start(new Minar(world));
                 case "espada" -> start(new Espada(world));
                 case "arco" -> start(new Arco(world));
+                case "progreso" -> start(new Progreso(world));
+                case "nombre" -> nombre(world);
                 case "resumen" -> resumen();
                 default -> {
-                    ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | resumen"));
+                    ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | progreso | nombre | resumen"));
                     return 0;
                 }
             }
@@ -152,10 +156,14 @@ public final class Pruebas {
     }
 
     private static VillagerEntityMCA villager(ServerWorld world, BlockPos feet, Direction facing) {
+        return villager(world, feet, facing, "Prueba");
+    }
+
+    private static VillagerEntityMCA villager(ServerWorld world, BlockPos feet, Direction facing, String name) {
         VillagerEntityMCA villager = VillagerFactory.newVillager(world)
                 .withGender(Gender.MALE)
                 .withAge(0)
-                .withName("Prueba")
+                .withName(name)
                 .withPosition(Vec3d.ofBottomCenter(feet))
                 .spawn(SpawnReason.COMMAND);
         villager.getInventory().clear();
@@ -272,6 +280,34 @@ public final class Pruebas {
             }
         } finally {
             v.discard();
+        }
+    }
+
+    // ------------------------------------------------------------------ calling a villager by name from afar
+
+    private static void nombre(ServerWorld world) {
+        BlockPos o = new BlockPos(2500, 100, 0);
+        load(world, o, 8);
+        fill(world, o.add(-3, -1, -3), o.add(3, -1, 3), Blocks.STONE.getDefaultState());
+        VillagerEntityMCA rosa = villager(world, o, Direction.EAST, "Rosa Pérez");
+        VillagerEntityMCA other = villager(world, o.east(2), Direction.EAST, "Rosalía Pérez");
+        // the one asking stands 2500 blocks away, at spawn
+        ArmorStandEntity far = EntityType.ARMOR_STAND.create(world);
+        try {
+            if (far != null) {
+                far.refreshPositionAndAngles(0.5, 100, 0.5, 0, 0);
+            }
+            var full = ChatAI.findByFullName(world.getServer(), "Hola rosa perez, ¿puedes venir?", far);
+            var exact = ChatAI.findByFullName(world.getServer(), "rosalía pérez ven", far);
+            var partial = ChatAI.findByFullName(world.getServer(), "hola rosa", far);
+            var glued = ChatAI.findByFullName(world.getServer(), "rosaperez", far);
+            check("nombre", full.orElse(null) == rosa && exact.orElse(null) == other && partial.isEmpty() && glued.isEmpty(),
+                    "nombre completo sin tildes a 2500 bloques: " + full.map(v -> v.getName().getString()).orElse("nadie")
+                            + ", el otro nombre: " + exact.map(v -> v.getName().getString()).orElse("nadie")
+                            + ", solo el primer nombre: " + partial.isPresent() + ", pegado: " + glued.isPresent());
+        } finally {
+            rosa.discard();
+            other.discard();
         }
     }
 
@@ -508,4 +544,69 @@ public final class Pruebas {
         }
     }
 
+    /**
+     * An empty-handed villager on grass with two bare trunks and solid stone below: it must chop, make a table,
+     * a wooden pickaxe, dig, and come back up with a stone pickaxe of its own making.
+     */
+    private static final class Progreso extends Scenario {
+        private final ProspectingTask task = new ProspectingTask();
+        private final VillagerEntityMCA player;
+        private final BlockPos origin;
+        private boolean wooden;
+        private int woodenAt;
+
+        Progreso(ServerWorld world) {
+            super("progreso", world, 2900);
+            origin = new BlockPos(2400, 100, 0);
+            load(world, origin, 32);
+            fill(world, origin.add(-14, -14, -14), origin.add(14, -2, 14), Blocks.STONE.getDefaultState());
+            fill(world, origin.add(-14, -1, -14), origin.add(14, -1, 14), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, origin.add(-14, 0, -14), origin.add(14, 12, 14), Blocks.AIR.getDefaultState());
+            fill(world, origin.add(4, 0, 1), origin.add(4, 4, 1), Blocks.OAK_LOG.getDefaultState());
+            fill(world, origin.add(3, 0, -4), origin.add(3, 2, -4), Blocks.OAK_LOG.getDefaultState());
+            player = villager(world, origin, Direction.EAST);
+            // free to walk: its own legs carry it to the trees, no "stay here"
+            player.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            face(player, -90.0F, 0.0F);
+            Retina.lookAll(world, player);
+        }
+
+        @Override
+        Boolean step() {
+            if (!player.isAlive()) {
+                fail(name, "el aldeano murió; " + state());
+                return Boolean.FALSE;
+            }
+            task.practice(world, player);
+            if (!wooden && owns(Items.WOODEN_PICKAXE)) {
+                wooden = true;
+                woodenAt = ticks;
+                MCA.LOGGER.info("PRUEBA progreso: pico de madera hecho en " + ticks + " ticks; " + state());
+            }
+            if (!owns(Items.STONE_PICKAXE)) {
+                return null;
+            }
+            boolean tableBack = player.getInventory().count(Items.CRAFTING_TABLE) > 0;
+            check(name, wooden, "con las manos vacías: pico de madera en " + woodenAt + " ticks, pico de piedra en " + ticks
+                    + ", mesa de vuelta en la mochila: " + tableBack + "; " + state());
+            return wooden;
+        }
+
+        private boolean owns(net.minecraft.item.Item item) {
+            return player.getMainHandStack().isOf(item) || player.getInventory().count(item) > 0;
+        }
+
+        @Override
+        String state() {
+            var inv = player.getInventory();
+            return "en " + player.getBlockPos().toShortString() + ", haciendo: " + Retina.memory(player).doing()
+                    + ", troncos " + inv.count(Items.OAK_LOG) + ", tablas " + inv.count(Items.OAK_PLANKS) + ", palos " + inv.count(Items.STICK)
+                    + ", roca " + inv.count(Items.COBBLESTONE) + ", mano " + player.getMainHandStack().getItem();
+        }
+
+        @Override
+        void cleanup() {
+            player.discard();
+        }
+    }
 }

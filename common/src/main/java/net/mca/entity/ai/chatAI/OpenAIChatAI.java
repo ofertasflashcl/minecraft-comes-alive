@@ -198,6 +198,13 @@ public class OpenAIChatAI implements ChatAIStrategy {
                 sb.append(s);
             }
 
+            // the player may be calling out from anywhere on the map
+            if (villager.getWorld() != player.getWorld()) {
+                sb.append("\n").append(playerName).append(" is in another dimension and is talking to you from afar, you cannot see them. ");
+            } else if (villager.distanceTo(player) > 16) {
+                sb.append("\n").append(playerName).append(" is about ").append((int) villager.distanceTo(player)).append(" blocks away and is talking to you from afar, you cannot see them. ");
+            }
+
             // try to match player language
             if (MCA.language != null) {
                 sb.append("Match the language of the player, and use ").append(MCA.language).append(" when unsure.");
@@ -205,7 +212,7 @@ public class OpenAIChatAI implements ChatAIStrategy {
 
             // structure and commands (if available)
             List<TriggerCommandInfo> validCommands;
-            if (config.villagerChatAIUseTools) {
+            if (true) { // Tropeles: orders by chat are always on
                 validCommands = TriggerCommandInfos.triggerCommands.stream()
                         .filter(c -> c.isActive == null || c.isActive.test(player, villager))
                         .toList();
@@ -266,7 +273,8 @@ public class OpenAIChatAI implements ChatAIStrategy {
                     // act
                     if (message.answer.optionalCommand() != null && !message.answer.optionalCommand().isEmpty()) {
                         Optional<TriggerCommandInfo> command = TriggerCommandInfos.findCommand(message.answer.optionalCommand(), player, villager);
-                        command.ifPresent(triggerCommandInfo -> triggerCommandInfo.call.accept(player, villager));
+                        // the answer arrives off the server thread; the order runs on it
+                        command.ifPresent(triggerCommandInfo -> player.getServer().execute(() -> triggerCommandInfo.call.accept(player, villager)));
                     }
                 }
 
