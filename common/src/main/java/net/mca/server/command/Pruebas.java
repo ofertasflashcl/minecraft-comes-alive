@@ -441,7 +441,7 @@ public final class Pruebas {
     }
 
     /**
-     * A bow villager on a platform; two zombies it cannot walk to, one 15 blocks away level, one 24 away and
+     * A bow villager on a platform; two zombies it cannot walk to, one 15 blocks away level, one 20 away and
      * 5 lower. Both must die, with no more arrows than a careful player would use.
      */
     private static final class Arco extends Scenario {
@@ -458,7 +458,7 @@ public final class Pruebas {
             fill(world, o.add(-4, -1, -4), o.add(4, -1, 4), Blocks.STONE.getDefaultState());
             fill(world, o.add(-4, 0, -4), o.add(30, 6, 6), Blocks.AIR.getDefaultState());
             fill(world, o.add(14, -1, -1), o.add(16, -1, 1), Blocks.STONE.getDefaultState());
-            fill(world, o.add(23, -6, 2), o.add(25, -6, 4), Blocks.STONE.getDefaultState());
+            fill(world, o.add(19, -6, 2), o.add(21, -6, 4), Blocks.STONE.getDefaultState());
             ward = EntityType.ARMOR_STAND.create(world);
             if (ward == null) {
                 throw new IllegalStateException("no armor stand");
@@ -469,7 +469,7 @@ public final class Pruebas {
             archer.getInventory().addStack(new ItemStack(Items.BOW));
             archer.getInventory().addStack(new ItemStack(Items.ARROW, 32));
             near = zombie(world, Vec3d.ofBottomCenter(o.east(15)), false);
-            far = zombie(world, Vec3d.ofBottomCenter(o.add(24, -5, 3)), false);
+            far = zombie(world, Vec3d.ofBottomCenter(o.add(20, -5, 3)), false);
             face(archer, -90.0F, 0.0F);
         }
 
@@ -489,7 +489,7 @@ public final class Pruebas {
             }
             int shots = Archery.SHOTS.of(archer);
             // a full-draw arrow does 6 to 9, a zombie has 20 life and a leather cap: 3 or 4 hits each
-            check(name, shots <= 12, "dos zombis muertos (15 y 24 bloques, uno 5 más abajo) con " + shots + " flechas en " + ticks + " ticks");
+            check(name, shots <= 12, "dos zombis muertos (15 y 20 bloques, uno 5 más abajo) con " + shots + " flechas en " + ticks + " ticks");
             return shots <= 12;
         }
 

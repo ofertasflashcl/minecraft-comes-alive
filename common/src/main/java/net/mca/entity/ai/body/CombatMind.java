@@ -124,7 +124,7 @@ public final class CombatMind {
         BlockPos around = ward != null ? ward.getBlockPos() : villager.getBlockPos();
         MobEntity threat = Threats.nearest(world, around, radius, villager, player);
         if (threat == null && ward != null) {
-            threat = Threats.nearest(world, villager.getBlockPos(), Math.min(8, radius), villager, player);
+            threat = Threats.nearest(world, villager.getBlockPos(), hasRanged(villager) ? radius : Math.min(8, radius), villager, player);
         }
         return threat;
     }
