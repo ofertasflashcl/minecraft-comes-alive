@@ -27,7 +27,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Build Forge jar
-        run: ./gradlew :forge:remapJar --console=plain --non-interactive
+        run: ./gradlew :forge:remapJar --console=plain --non-interactive -Pmod_version=7.6.28-tropeles.1
 
       - name: Pick jar
         id: jar

@@ -37,8 +37,15 @@ timeout 1200 bash run.sh nogui < in.fifo > console.log 2>&1 || true
 wait || true
 grep -q 'Done (' logs/latest.log || { echo "Server never finished starting"; tail -200 console.log; exit 1; }
 if ls crash-reports/*.txt >/dev/null 2>&1; then echo "Crash report:"; cat crash-reports/*.txt | head -200; exit 1; fi
+if grep -qE 'invalid mod file|Illegal version number' logs/latest.log; then echo "Forge rejected a mod file:"; grep -nE -A2 'invalid mod file|Illegal version' logs/latest.log; exit 1; fi
 if grep -q 'PRUEBA FALLA' logs/latest.log; then grep -n 'PRUEBA' logs/latest.log; exit 1; fi
 grep -n 'PRUEBA' logs/latest.log || true
+if [ -f ../scripts/ci/commands.txt ] && grep -q 'mca-prueba resumen' ../scripts/ci/commands.txt; then
+  line=$(grep -o 'PRUEBA RESUMEN [0-9]*/[0-9]*' logs/latest.log | tail -1)
+  [ -n "$line" ] || { echo "The in-game checks never reported"; exit 1; }
+  ok=${line#PRUEBA RESUMEN }; ok_n=${ok%/*}; all_n=${ok#*/}
+  [ "$ok_n" = "$all_n" ] && [ "$all_n" -ge 8 ] || { echo "Checks passed: $ok"; exit 1; }
+fi
 grep -nE 'Exception in server tick|Encountered an unexpected exception' logs/latest.log && exit 1
 echo "Server booted and stopped cleanly with MCA loaded"
 grep -nE "Found valid mod file minecraft-comes-alive|mca" logs/latest.log | head -5 || true
