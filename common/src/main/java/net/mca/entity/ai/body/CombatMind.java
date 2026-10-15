@@ -268,7 +268,8 @@ public final class CombatMind {
         }
 
         double distance = Retina.distanceToBox(villager.getEyePos(), target.getBoundingBox());
-        boolean ranged = hasRanged(villager);
+        // a bow with arrows always wins: an archer keeps its distance and never walks up to hit
+        boolean ranged = hasRanged(villager) && Archery.hasAmmo(villager);
         boolean melee = hasMelee(villager);
 
         // children and the badly hurt step away; nobody stands next to a hissing creeper
@@ -277,7 +278,7 @@ public final class CombatMind {
         boolean creeperClose = target instanceof CreeperEntity && distance < 4.5;
         if (child || hurt && !ranged || creeperClose) {
             memory.doing("alejándose de " + target.getName().getString(), now);
-            backOff(villager, target, ward, 6);
+            backOff(villager, target, ward, 6, 1.15);
             if (creeperClose && ranged && !child) {
                 holdRanged(villager);
                 shoot(world, villager, ward, target, state, seen);
@@ -286,18 +287,12 @@ public final class CombatMind {
         }
 
         Style style;
-        if (ranged && (!melee || distance > 7.0 || flies(target) || target instanceof CreeperEntity || !reachableOnFoot(villager, target))) {
+        if (ranged) {
             style = Style.RANGED;
         } else if (melee) {
             style = Style.MELEE;
-        } else if (ranged) {
-            style = Style.RANGED;
         } else {
             style = Style.FISTS;
-        }
-        // do not flip weapons every tick around the threshold
-        if (state.style == Style.RANGED && style == Style.MELEE && distance > 5.0) {
-            style = Style.RANGED;
         }
         if (state.style != style) {
             state.draw = 0;
@@ -375,15 +370,22 @@ public final class CombatMind {
         }
     }
 
+    /**
+     * Where an archer stands: back off to a good range first (never closer than 8 blocks), close in when the
+     * target is out of sight or past 18, strafe in between. Drawing the bow slows it down the way it slows a
+     * player, but it keeps moving.
+     */
     private static void keepRange(VillagerEntityMCA villager, LivingEntity target, @Nullable LivingEntity ward, State state, double distance, boolean seen) {
-        if (!seen || distance > 20.0) {
+        boolean drawing = villager.isUsingItem() || state.draw > 0;
+        double slow = drawing ? 0.5 : 1.0;
+        if (!seen || distance > 18.0) {
             if ((villager.age & 3) == 0 || villager.getNavigation().isIdle()) {
-                villager.getNavigation().startMovingTo(target, 1.0);
+                villager.getNavigation().startMovingTo(target, 1.0 * slow);
             }
             return;
         }
-        if (distance < 5.0) {
-            backOff(villager, target, ward, 4);
+        if (distance < 8.0) {
+            backOff(villager, target, ward, 5, 1.15 * slow);
             return;
         }
         villager.getNavigation().stop();
@@ -392,11 +394,13 @@ public final class CombatMind {
             if (state.strafeTicks == 0) {
                 state.strafe = -state.strafe;
             }
-            villager.getMoveControl().strafeTo(0.0F, state.strafe * 0.5F);
+        } else if ((villager.age % 40) == 0) {
+            state.strafe = -state.strafe;
         }
+        villager.getMoveControl().strafeTo(0.0F, state.strafe * (float) (0.5 * slow));
     }
 
-    private static void backOff(VillagerEntityMCA villager, Entity threat, @Nullable LivingEntity ward, double amount) {
+    private static void backOff(VillagerEntityMCA villager, Entity threat, @Nullable LivingEntity ward, double amount, double speed) {
         Vec3d away = villager.getPos().subtract(threat.getPos());
         if (away.lengthSquared() < 0.01) {
             away = new Vec3d(1, 0, 0);
@@ -409,6 +413,6 @@ public final class CombatMind {
                 goal = ward.getPos().add(behind.normalize().multiply(2.0));
             }
         }
-        villager.getNavigation().startMovingTo(goal.x, goal.y, goal.z, 1.15);
+        villager.getNavigation().startMovingTo(goal.x, goal.y, goal.z, speed);
     }
 }

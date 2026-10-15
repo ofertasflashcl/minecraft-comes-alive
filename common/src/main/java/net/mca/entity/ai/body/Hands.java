@@ -1,6 +1,7 @@
 package net.mca.entity.ai.body;
 
 import net.mca.entity.VillagerEntityMCA;
+import net.mca.entity.ai.sense.Obras;
 import net.mca.entity.ai.sense.Retina;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
@@ -162,6 +163,11 @@ public final class Hands {
             }
             if (!target.equals(pos)) {
                 reset(world, miner);
+                // a tree, rock or its own block may go; a house, a player's build or a village wall never
+                if (!Obras.mayBreak(world, miner, target)) {
+                    Retina.memory(miner).doing("no rompe " + state.getBlock().getName().getString() + ": es " + Obras.kind(world, miner, target).label, world.getTime());
+                    return FAILED;
+                }
                 pos = target.toImmutable();
             }
             BlockHitResult face = Retina.visibleFace(world, miner, target, Retina.BLOCK_REACH);
@@ -205,6 +211,7 @@ public final class Hands {
         if (!world.breakBlock(pos, false, miner)) {
             return;
         }
+        Obras.broken(world, pos);
         if (!tool.isEmpty()) {
             tool.getItem().postMine(tool, world, state, pos, miner);
         }
@@ -287,6 +294,7 @@ public final class Hands {
         }
         ActionResult result = blockItem.place(context);
         if (result.isAccepted()) {
+            Obras.placedByVillager(world, villager, target);
             villager.swingHand(Hand.MAIN_HAND);
             Retina.memory(villager).see(target, world.getBlockState(target), support.getSide(), support.getPos(), villager.getEyePos().distanceTo(support.getPos()), world.getLightLevel(target), world.getTime());
             return true;

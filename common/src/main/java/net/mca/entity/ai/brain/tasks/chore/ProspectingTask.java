@@ -6,6 +6,7 @@ import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.DistressCalls;
 import net.mca.entity.ai.Threats;
 import net.mca.entity.ai.WorkTools;
+import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.body.Hands;
 import net.mca.entity.ai.body.Mining;
 import net.mca.entity.ai.body.Motor;
@@ -46,8 +47,14 @@ import java.util.Optional;
  */
 public class ProspectingTask extends AbstractChoreTask {
     private enum Phase {
-        SEEK, SHELTER_DIG, SHELTER_ENTER, SHELTER_SEAL, ESCAPE, RECOVER
+        SEEK, SHELTER_DIG, SHELTER_ENTER, SHELTER_SEAL, ESCAPE, RECOVER, HOME_UP, HOME_WALK, HOME_STORE
     }
+
+    /** Food points like a player's bar: one goes every minute of work, food in the bag brings them back. */
+    private static final int FOOD_MAX = 20;
+    private static final int FOOD_TICKS = 1200;
+    private static final int EAT_BELOW = 14;
+    private static final int GO_HOME_BELOW = 6;
 
     /** Below this the deepslate lava lakes start. */
     public static final int DEEPSLATE_DEPTH = -50;
@@ -72,6 +79,14 @@ public class ProspectingTask extends AbstractChoreTask {
     private long lastOreAnnounce;
     private boolean announcedAny;
     private boolean warnedFull;
+    private int food = FOOD_MAX;
+    private int foodTicks;
+    private BlockPos base;
+    private BlockPos home;
+    private int homeTicks;
+    private int homeDir;
+    private BlockPos homeChest;
+    private boolean hungryTrip;
 
     public ProspectingTask() {
         super(ImmutableMap.of(
@@ -103,6 +118,7 @@ public class ProspectingTask extends AbstractChoreTask {
             return;
         }
         tunnelDir = villager.getHorizontalFacing().getHorizontal();
+        base = villager.getBlockPos();
         Retina.lookAll(world, villager);
     }
 
@@ -128,14 +144,15 @@ public class ProspectingTask extends AbstractChoreTask {
         if ((villager.age & 1) == 0) {
             Retina.look(world, villager);
         }
-        if (bagFull(villager)) {
-            if (!warnedFull) {
-                warnedFull = true;
-                abandonJobWithMessage("chore.mining.full");
-            }
-            return;
+        if (phase == Phase.SEEK && bagFull(villager)) {
+            // a full bag goes home to the chest, then back to work
+            say("chore.mining.home");
+            beginHome(world, villager, false);
         }
-        warnedFull = false;
+        if (phase == Phase.SEEK && hunger(world, villager)) {
+            say("chore.mining.hungry");
+            beginHome(world, villager, true);
+        }
 
         if (phase == Phase.SEEK) {
             MobEntity threat = Threats.nearest(world, villager.getBlockPos(), 10, villager, null);
@@ -163,17 +180,262 @@ public class ProspectingTask extends AbstractChoreTask {
             case SHELTER_SEAL -> shelterSeal(world, villager);
             case ESCAPE -> escape(world, villager);
             case RECOVER -> recover(world, villager);
+            case HOME_UP, HOME_WALK, HOME_STORE -> homeTrip(world, villager);
         }
     }
 
     /** One tick of the mining loop on its own, without a job assigner; used by the in-game checks. */
     public void practice(ServerWorld world, VillagerEntityMCA villager) {
         this.villager = villager;
+        if (base == null) {
+            base = villager.getBlockPos();
+        }
         Retina.look(world, villager);
+        if (phase == Phase.SEEK && (bagFull(villager) || hunger(world, villager))) {
+            beginHome(world, villager, !bagFull(villager));
+        }
+        if (phase == Phase.HOME_UP || phase == Phase.HOME_WALK || phase == Phase.HOME_STORE) {
+            homeTrip(world, villager);
+            return;
+        }
         if (gearUp(world, villager) || !equipPick(villager)) {
             return;
         }
         seek(world, villager);
+    }
+
+    /** For the in-game checks: how full its food bar is, and where home is. */
+    public void setFood(int points) {
+        food = points;
+    }
+
+    public int food() {
+        return food;
+    }
+
+    public boolean atWork() {
+        return phase == Phase.SEEK;
+    }
+
+    /** Raw iron in its furnace right now. */
+    public boolean cooking() {
+        return progreso.cooking();
+    }
+
+    /** Not chopping, crafting, smelting or packing up. */
+    public boolean gearIdle() {
+        return progreso.idle();
+    }
+
+    public void setHome(BlockPos pos) {
+        home = pos;
+    }
+
+    private void say(String key, Object... params) {
+        getAssigningPlayer().ifPresent(player -> villager.sendChatMessage(player, key, params));
+    }
+
+    // ------------------------------------------------------------------ food and home
+
+    /** Works up an appetite; eats from the bag when it can. True when it is hungry with nothing left to eat. */
+    private boolean hunger(ServerWorld world, VillagerEntityMCA villager) {
+        if (++foodTicks >= FOOD_TICKS) {
+            foodTicks = 0;
+            food = Math.max(0, food - 1);
+        }
+        if (food < EAT_BELOW) {
+            int slot = Hands.findSlot(villager.getInventory(), ProspectingTask::edible);
+            if (slot >= 0) {
+                ItemStack meal = villager.getInventory().getStack(slot);
+                food = Math.min(FOOD_MAX, food + Math.max(1, meal.getItem().getFoodComponent().getHunger()));
+                villager.eatFood(world, meal.split(1));
+                Retina.memory(villager).doing("comiendo " + meal.getName().getString(), world.getTime());
+            }
+        }
+        return food <= GO_HOME_BELOW && Hands.findSlot(villager.getInventory(), ProspectingTask::edible) < 0;
+    }
+
+    private static boolean edible(ItemStack stack) {
+        return stack.isFood() && stack.getItem().getFoodComponent() != null && stack.getItem().getFoodComponent().getHunger() > 0
+                && !stack.isOf(Items.ROTTEN_FLESH) && !stack.isOf(Items.SPIDER_EYE) && !stack.isOf(Items.POISONOUS_POTATO);
+    }
+
+    private BlockPos homePos(ServerWorld world, VillagerEntityMCA villager) {
+        if (home != null) {
+            return home;
+        }
+        var registered = villager.getResidency().getHome();
+        if (registered.isPresent() && registered.get().getDimension() == world.getRegistryKey()) {
+            return registered.get().getPos();
+        }
+        return base != null ? base : villager.getBlockPos();
+    }
+
+    private void beginHome(ServerWorld world, VillagerEntityMCA villager, boolean hungry) {
+        hungryTrip = hungry;
+        progreso.leaving();
+        motor.reset(world, villager);
+        plan.clear();
+        ore = null;
+        homeTicks = 0;
+        homeChest = null;
+        BlockPos target = homePos(world, villager);
+        homeDir = Direction.getFacing(target.getX() - villager.getX(), 0, target.getZ() - villager.getZ()).getHorizontal();
+        phase = Phase.HOME_UP;
+    }
+
+    /**
+     * Going home: up to the surface any way it can (stairs dug toward home, pillars, bridges), then walking,
+     * then the chest: what it does not need goes in, food comes out.
+     */
+    private void homeTrip(ServerWorld world, VillagerEntityMCA villager) {
+        VisualMemory memory = Retina.memory(villager);
+        long now = world.getTime();
+        // first its iron: back to the furnace, out with everything, furnace in the bag
+        if (!progreso.idle()) {
+            memory.doing("recogiendo su horno antes de irse", now);
+            progreso.leaving();
+            gearUp(world, villager);
+            return;
+        }
+        BlockPos target = homePos(world, villager);
+        if (++homeTicks > 12000) {
+            phase = Phase.SEEK;
+            abandonJobWithMessage("chore.mining.lost");
+            return;
+        }
+        BlockPos feet = villager.getBlockPos();
+        if (phase == Phase.HOME_UP) {
+            if (world.isSkyVisible(feet.up()) || feet.getY() >= target.getY() && feet.isWithinDistance(target, 24)) {
+                motor.reset(world, villager);
+                phase = Phase.HOME_WALK;
+                return;
+            }
+            memory.doing("subiendo a la superficie para volver a casa", now);
+            if (plan.isEmpty()) {
+                Direction toward = Direction.fromHorizontal(homeDir);
+                plan.add(feet.offset(toward, 3).up(3));
+            }
+            Motor.Result result = motor.step(world, villager, plan.peekFirst(), true, true);
+            if (result == Motor.Result.ARRIVED) {
+                plan.clear();
+            } else if (result == Motor.Result.BLOCKED) {
+                plan.clear();
+                motor.reset(world, villager);
+                homeDir = (homeDir + (villager.getRandom().nextBoolean() ? 1 : 3)) & 3;
+            }
+            return;
+        }
+        if (phase == Phase.HOME_WALK) {
+            double dx = target.getX() + 0.5 - villager.getX();
+            double dz = target.getZ() + 0.5 - villager.getZ();
+            if (dx * dx + dz * dz < 9 && Math.abs(target.getY() - villager.getY()) < 3) {
+                villager.getNavigation().stop();
+                phase = Phase.HOME_STORE;
+                homeTicks = 0;
+                return;
+            }
+            memory.doing(String.format("volviendo a casa, a %.0f bloques", Math.sqrt(dx * dx + dz * dz)), now);
+            if ((homeTicks % 40) == 1 || villager.getNavigation().isIdle()) {
+                villager.getNavigation().startMovingTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.7);
+            }
+            if (villager.getNavigation().isIdle() && homeTicks > 100) {
+                // no path on foot: make one, the way it got out
+                BlockPos goal = feet.offset(Direction.getFacing(dx, 0, dz), 2);
+                Motor.Result result = motor.step(world, villager, world.isSkyVisible(goal) ? goal : goal.up(), true, true);
+                if (result == Motor.Result.BLOCKED) {
+                    motor.reset(world, villager);
+                }
+            }
+            return;
+        }
+        store(world, villager, target, memory, now);
+    }
+
+    private void store(ServerWorld world, VillagerEntityMCA villager, BlockPos target, VisualMemory memory, long now) {
+        if (homeChest == null || !(world.getBlockState(homeChest).getBlock() instanceof net.minecraft.block.ChestBlock)) {
+            homeChest = Cofres.own(world, villager, target).stream()
+                    .filter(pos -> pos.isWithinDistance(target, Cofres.HOME_RANGE)).findFirst().orElse(null);
+        }
+        if (homeChest == null) {
+            // no chest of its own here yet: one from the bag, or make one
+            if (villager.getInventory().count(Items.CHEST) > 0) {
+                memory.doing("poniendo su cofre", now);
+                BlockPos placed = Progreso.placeBeside(world, villager, Cofres::isChestItem);
+                if (placed != null) {
+                    Cofres.claim(world, villager, placed);
+                    homeChest = placed;
+                }
+                return;
+            }
+            progreso.wantChest();
+            if (gearUp(world, villager)) {
+                return;
+            }
+            if (homeTicks > 2400 || villager.getInventory().count(Items.CHEST) == 0 && progreso.idle() && homeTicks > 200 && !progreso.cooking()) {
+                say("chore.mining.nochest");
+                homeChest = null;
+                finishHome(world, villager, 0);
+            }
+            return;
+        }
+        if (Retina.visibleFace(world, villager, homeChest, Retina.BLOCK_REACH) == null) {
+            memory.doing("yendo a su cofre", now);
+            if ((homeTicks % 20) == 1 || villager.getNavigation().isIdle()) {
+                villager.getNavigation().startMovingTo(homeChest.getX() + 0.5, homeChest.getY(), homeChest.getZ() + 0.5, 0.6);
+            }
+            if (homeTicks > 1200) {
+                homeChest = null;
+                finishHome(world, villager, 0);
+            }
+            return;
+        }
+        villager.getNavigation().stop();
+        int[] buildingStacks = {0};
+        int stored = Cofres.store(world, villager, homeChest, stack -> keep(stack, buildingStacks));
+        Cofres.take(world, villager, homeChest, ProspectingTask::edible, 8);
+        memory.doing("guardó " + stored + " cosas en su cofre", now);
+        finishHome(world, villager, stored);
+    }
+
+    private void finishHome(ServerWorld world, VillagerEntityMCA villager, int stored) {
+        if (stored > 0) {
+            say("chore.mining.stored", stored);
+        }
+        // eat what it found before going back down
+        while (food < FOOD_MAX - 2) {
+            int slot = Hands.findSlot(villager.getInventory(), ProspectingTask::edible);
+            if (slot < 0) {
+                break;
+            }
+            ItemStack meal = villager.getInventory().getStack(slot);
+            food = Math.min(FOOD_MAX, food + Math.max(1, meal.getItem().getFoodComponent().getHunger()));
+            villager.eatFood(world, meal.split(1));
+        }
+        motor.reset(world, villager);
+        plan.clear();
+        phase = Phase.SEEK;
+        if (hungryTrip && food <= GO_HOME_BELOW) {
+            // nothing to eat at home either: it stays
+            abandonJobWithMessage("chore.mining.nofood");
+        }
+    }
+
+    /** What a miner keeps on it: tools, weapons, arrows, light, food, crafting stuff, fuel, iron to smelt and some blocks. */
+    private static boolean keep(ItemStack stack, int[] buildingStacks) {
+        if (stack.getItem() instanceof net.minecraft.item.ToolItem || stack.getItem() instanceof net.minecraft.item.RangedWeaponItem
+                || stack.getItem() instanceof net.minecraft.item.ArmorItem || stack.getItem() instanceof net.minecraft.item.ArrowItem
+                || stack.isOf(Items.TORCH) || edible(stack) || stack.isOf(Items.CRAFTING_TABLE) || stack.isOf(Items.FURNACE)
+                || stack.isOf(Items.CHEST) || stack.isOf(Items.STICK) || stack.isIn(net.minecraft.registry.tag.ItemTags.PLANKS)
+                || stack.isIn(net.minecraft.registry.tag.ItemTags.LOGS) || stack.isOf(Items.COAL) || stack.isOf(Items.CHARCOAL)
+                || stack.isOf(Items.RAW_IRON) || stack.isOf(Items.IRON_INGOT) || stack.isOf(Items.DIAMOND)) {
+            return true;
+        }
+        if (Hands.isBuildingBlock(stack) && buildingStacks[0] < 2) {
+            buildingStacks[0]++;
+            return true;
+        }
+        return false;
     }
 
     /** Making or upgrading its own tools comes before digging; true while that keeps it busy. */
@@ -289,6 +551,7 @@ public class ProspectingTask extends AbstractChoreTask {
         BlockPos feet = villager.getBlockPos();
         BlockPos best = null;
         double bestScore = Double.MAX_VALUE;
+        boolean needsCoal = villager.getInventory().count(Items.TORCH) < 4 && villager.getInventory().count(Items.COAL) + villager.getInventory().count(Items.CHARCOAL) == 0;
         for (VisualMemory.SeenBlock seen : memory.blocks(s -> Mining.isOre(s.state))) {
             if (isIgnored(seen.pos, now) || !tool.isSuitableFor(seen.state)) {
                 continue;
@@ -298,6 +561,9 @@ public class ProspectingTask extends AbstractChoreTask {
                 continue;
             }
             double score = distance - Mining.oreValue(seen.state) / 10.0;
+            if (needsCoal && (seen.state.isOf(Blocks.COAL_ORE) || seen.state.isOf(Blocks.DEEPSLATE_COAL_ORE))) {
+                score -= 12; // no torches and no coal: coal first, a player would
+            }
             if (score < bestScore) {
                 bestScore = score;
                 best = seen.pos;

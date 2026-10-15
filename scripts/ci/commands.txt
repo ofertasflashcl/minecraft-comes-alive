@@ -10,6 +10,12 @@ mca-prueba espada
 mca-prueba arco
 mca-prueba progreso
 mca-prueba nombre
-sleep 155
+mca-prueba obras
+mca-prueba robo
+mca-prueba regalo
+mca-prueba arco-cerca
+mca-prueba horno
+mca-prueba hogar
+sleep 185
 mca-prueba resumen
 sleep 2

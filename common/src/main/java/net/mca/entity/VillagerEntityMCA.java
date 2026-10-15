@@ -741,6 +741,9 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
 
             residency.tick();
 
+            // someone emptied its chest? it finds out once it is by the chest or sees them
+            net.mca.entity.ai.body.Cofres.tick((ServerWorld) getWorld(), this);
+
             relations.tick(age);
 
             inventory.update(this);

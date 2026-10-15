@@ -4,6 +4,7 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.body.Mining;
+import net.mca.entity.ai.sense.Obras;
 import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
 import net.minecraft.block.BlockState;
@@ -59,6 +60,9 @@ public final class OjoCommand {
             say(source, Text.literal(String.format(Locale.ROOT, "Mira: %s", focus.state().getBlock().getName().getString())).formatted(Formatting.AQUA));
             say(source, Text.literal(String.format(Locale.ROOT, "  %s, cara %s, en %s, a %.2f bloques%s",
                     focus.state(), focus.face(), focus.pos().toShortString(), focus.distance(), focus.inReach() ? " (al alcance)" : "")));
+            Obras.Kind kind = Obras.kind(world, villager, focus.pos());
+            say(source, Text.literal("  Lo reconoce como: " + kind.label + (Obras.mayBreak(world, villager, focus.pos()) ? " (lo puede romper)" : " (no lo rompe)"))
+                    .formatted(kind == Obras.Kind.NATURE || kind == Obras.Kind.TREE ? Formatting.GREEN : Formatting.YELLOW));
         }
 
         List<VisualMemory.SeenBlock> ores = memory.blocks(s -> Mining.isOre(s.state));

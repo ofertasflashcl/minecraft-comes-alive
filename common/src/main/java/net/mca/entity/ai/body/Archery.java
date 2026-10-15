@@ -173,15 +173,29 @@ public final class Archery {
         return false;
     }
 
-    /** Arrows in the bag, or a plain one the way MCA's archers always had. */
+    /** Arrows in the bag. */
     private static int arrowSlot(VillagerEntityMCA shooter) {
         return Hands.findSlot(shooter.getInventory(), s -> s.getItem() instanceof ArrowItem);
+    }
+
+    /** Guards and archers draw from the village armoury, as MCA's always did; everyone else needs real arrows. */
+    public static boolean armoury(VillagerEntityMCA shooter) {
+        var profession = shooter.getVillagerData().getProfession();
+        return profession == net.mca.ProfessionsMCA.GUARD.get() || profession == net.mca.ProfessionsMCA.ARCHER.get();
+    }
+
+    /** Something to shoot: arrows in the bag, or the armoury. */
+    public static boolean hasAmmo(VillagerEntityMCA shooter) {
+        return arrowSlot(shooter) >= 0 || armoury(shooter);
     }
 
     /** Lets an arrow go along {@code solution}. {@code pull} is the bow draw, 0 to 1. */
     public static void fire(ServerWorld world, VillagerEntityMCA shooter, ItemStack weapon, Solution solution, float pull) {
         boolean crossbow = weapon.getItem() instanceof CrossbowItem;
         int slot = arrowSlot(shooter);
+        if (slot < 0 && !armoury(shooter)) {
+            return; // no arrow, no shot
+        }
         ItemStack ammo = slot >= 0 ? shooter.getInventory().getStack(slot) : new ItemStack(Items.ARROW);
         boolean infinite = slot < 0 || !crossbow && ammo.isOf(Items.ARROW) && EnchantmentHelper.getLevel(Enchantments.INFINITY, weapon) > 0;
 

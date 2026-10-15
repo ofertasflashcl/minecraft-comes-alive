@@ -11,9 +11,11 @@ import net.mca.entity.ai.MemoryModuleTypeMCA;
 import net.mca.entity.ai.MoveState;
 import net.mca.entity.ai.chatAI.ChatAI;
 import net.mca.entity.ai.body.Archery;
+import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.body.Mining;
 import net.mca.entity.ai.brain.tasks.FollowTask;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
+import net.mca.entity.ai.sense.Obras;
 import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
 import net.minecraft.block.BlockState;
@@ -73,9 +75,15 @@ public final class Pruebas {
                 case "arco" -> start(new Arco(world));
                 case "progreso" -> start(new Progreso(world));
                 case "nombre" -> start(new Nombre(world));
+                case "obras" -> obras(world);
+                case "robo" -> robo(world);
+                case "regalo" -> regalo(world);
+                case "arco-cerca" -> start(new ArcoCerca(world));
+                case "horno" -> start(new Horno(world));
+                case "hogar" -> start(new Hogar(world));
                 case "resumen" -> resumen();
                 default -> {
-                    ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | progreso | nombre | resumen"));
+                    ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | progreso | nombre | obras | robo | regalo | arco-cerca | horno | hogar | resumen"));
                     return 0;
                 }
             }
@@ -565,6 +573,157 @@ public final class Pruebas {
         }
     }
 
+    // ------------------------------------------------------------------ trees and buildings
+
+    /** A natural tree: a trunk on grass with leaves the world grew around its top. */
+    private static void tree(ServerWorld world, BlockPos base, int height) {
+        fill(world, base, base.up(height - 1), Blocks.OAK_LOG.getDefaultState());
+        BlockState leaves = Blocks.OAK_LEAVES.getDefaultState().with(net.minecraft.block.LeavesBlock.DISTANCE, 1);
+        BlockPos top = base.up(height - 1);
+        for (Direction dir : Direction.Type.HORIZONTAL) {
+            world.setBlockState(top.offset(dir), leaves, 2);
+            world.setBlockState(top.offset(dir).down(), leaves, 2);
+        }
+        world.setBlockState(top.up(), leaves, 2);
+    }
+
+    /** A 3x3 log cabin: logs at the four corners, planks walls, a glass window and a planks roof. */
+    private static void cabin(ServerWorld world, BlockPos corner) {
+        fill(world, corner, corner.add(2, 2, 2), Blocks.OAK_PLANKS.getDefaultState());
+        fill(world, corner.add(1, 0, 1), corner.add(1, 1, 1), Blocks.AIR.getDefaultState());
+        for (BlockPos c : new BlockPos[]{corner, corner.add(2, 0, 0), corner.add(0, 0, 2), corner.add(2, 0, 2)}) {
+            fill(world, c, c.up(2), Blocks.OAK_LOG.getDefaultState());
+        }
+        world.setBlockState(corner.add(1, 1, 0), Blocks.GLASS.getDefaultState(), 2);
+        fill(world, corner.add(0, 3, 0), corner.add(2, 3, 2), Blocks.OAK_PLANKS.getDefaultState());
+    }
+
+    private static int cabinLogs(ServerWorld world, BlockPos corner) {
+        int n = 0;
+        for (BlockPos c : new BlockPos[]{corner, corner.add(2, 0, 0), corner.add(0, 0, 2), corner.add(2, 0, 2)}) {
+            for (int y = 0; y < 3; y++) {
+                if (world.getBlockState(c.up(y)).isOf(Blocks.OAK_LOG)) {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    /** The eye tells the tree from the cabin, the player's block from nature, its own block from another's. */
+    private static void obras(ServerWorld world) {
+        BlockPos o = new BlockPos(2600, 100, 0);
+        load(world, o, 16);
+        fill(world, o.add(-8, -4, -8), o.add(8, -2, 8), Blocks.STONE.getDefaultState());
+        fill(world, o.add(-8, -1, -8), o.add(8, -1, 8), Blocks.GRASS_BLOCK.getDefaultState());
+        fill(world, o.add(-8, 0, -8), o.add(8, 8, 8), Blocks.AIR.getDefaultState());
+        BlockPos trunk = o.add(4, 0, 0);
+        tree(world, trunk, 4);
+        BlockPos corner = o.add(-5, 0, -1);
+        cabin(world, corner);
+        // dirt under the cabin floor, among planks
+        world.setBlockState(corner.add(1, -1, 1), Blocks.DIRT.getDefaultState(), 2);
+        BlockPos stone = o.add(0, -3, 6);
+        BlockPos byPlayer = o.add(0, -1, -6);
+        BlockPos byVillager = o.add(2, -1, -6);
+        VillagerEntityMCA v = villager(world, o, Direction.EAST);
+        try {
+            net.mca.server.world.data.TropelesMundo mundo = net.mca.server.world.data.TropelesMundo.get(world);
+            mundo.placedByPlayer(byPlayer);
+            Obras.placedByVillager(world, v, byVillager);
+            Obras.Kind treeKind = Obras.kind(world, v, trunk.up());
+            Obras.Kind cabinKind = Obras.kind(world, v, corner.up());
+            Obras.Kind planks = Obras.kind(world, v, corner.add(1, 2, 0));
+            Obras.Kind dirt = Obras.kind(world, v, corner.add(1, -1, 1));
+            Obras.Kind rock = Obras.kind(world, v, stone);
+            Obras.Kind player = Obras.kind(world, v, byPlayer);
+            Obras.Kind own = Obras.kind(world, v, byVillager);
+            boolean passed = treeKind == Obras.Kind.TREE && cabinKind == Obras.Kind.BUILDING && planks == Obras.Kind.BUILDING
+                    && dirt == Obras.Kind.BUILDING && rock == Obras.Kind.NATURE && player == Obras.Kind.PLAYER_BUILT && own == Obras.Kind.OWN
+                    && Obras.mayBreak(world, v, trunk) && !Obras.mayBreak(world, v, corner) && !Obras.mayBreak(world, v, byPlayer)
+                    && Obras.mayBreak(world, v, byVillager);
+            check("obras", passed, "árbol: " + treeKind.label + ", tronco de la cabaña: " + cabinKind.label + ", tablas: " + planks.label
+                    + ", tierra bajo el piso: " + dirt.label + ", roca: " + rock.label + ", bloque de jugador: " + player.label + ", bloque suyo: " + own.label);
+            mundo.removed(byPlayer);
+            mundo.removed(byVillager);
+        } finally {
+            v.discard();
+        }
+    }
+
+    // ------------------------------------------------------------------ chests: theft and gifts
+
+    private static net.minecraft.server.network.ServerPlayerEntity fakePlayer(ServerWorld world, String name, Vec3d at) {
+        var player = new net.minecraft.server.network.ServerPlayerEntity(world.getServer(), world,
+                new com.mojang.authlib.GameProfile(java.util.UUID.nameUUIDFromBytes(("mca-prueba-" + name).getBytes()), name));
+        player.refreshPositionAndAngles(at.x, at.y, at.z, 0, 0);
+        return player;
+    }
+
+    private static BlockPos chestFor(ServerWorld world, VillagerEntityMCA owner, BlockPos pos) {
+        world.setBlockState(pos, Blocks.CHEST.getDefaultState(), 3);
+        Cofres.claim(world, owner, pos);
+        return pos;
+    }
+
+    /** Someone who is not family takes from its chest next to it: it notices and the hearts go down. */
+    private static void robo(ServerWorld world) {
+        BlockPos o = new BlockPos(2700, 100, 0);
+        load(world, o, 8);
+        fill(world, o.add(-4, -1, -4), o.add(4, -1, 4), Blocks.STONE.getDefaultState());
+        fill(world, o.add(-4, 0, -4), o.add(4, 4, 4), Blocks.AIR.getDefaultState());
+        fill(world, o.add(-4, 5, -4), o.add(4, 5, 4), Blocks.GLOWSTONE.getDefaultState());
+        VillagerEntityMCA owner = villager(world, o, Direction.EAST);
+        try {
+            BlockPos chest = chestFor(world, owner, o.add(2, 0, 0));
+            var inv = Cofres.inventory(world, chest);
+            if (inv == null) {
+                fail("robo", "no hay cofre");
+                return;
+            }
+            inv.setStack(0, new ItemStack(Items.DIAMOND, 10));
+            Cofres.remember(world, chest);
+            var thief = fakePlayer(world, "Ladron", Vec3d.ofBottomCenter(o.add(3, 0, 1)));
+            int before = owner.getVillagerBrain().getMemoriesForPlayer(thief).getHearts();
+            inv.getStack(0).decrement(5);
+            int missing = Cofres.check(world, chest, thief);
+            int after = owner.getVillagerBrain().getMemoriesForPlayer(thief).getHearts();
+            boolean pending = !net.mca.server.world.data.TropelesMundo.get(world).theftsAgainst(owner.getUuid()).isEmpty();
+            check("robo", missing == 5 && after < before && !pending, "le faltan " + missing + " diamantes, corazones " + before + " -> " + after
+                    + ", lo notó al momento: " + !pending);
+            world.setBlockState(chest, Blocks.AIR.getDefaultState(), 3);
+            net.mca.server.world.data.TropelesMundo.get(world).removed(chest);
+        } finally {
+            owner.discard();
+        }
+    }
+
+    /** A gift with the bag full goes into its chest, and the hearts still go up for it. */
+    private static void regalo(ServerWorld world) {
+        BlockPos o = new BlockPos(2800, 100, 0);
+        load(world, o, 8);
+        fill(world, o.add(-4, -1, -4), o.add(4, -1, 4), Blocks.STONE.getDefaultState());
+        fill(world, o.add(-4, 0, -4), o.add(4, 4, 4), Blocks.AIR.getDefaultState());
+        VillagerEntityMCA owner = villager(world, o, Direction.EAST);
+        try {
+            BlockPos chest = chestFor(world, owner, o.add(2, 0, 0));
+            for (int i = 0; i < owner.getInventory().size(); i++) {
+                owner.getInventory().setStack(i, new ItemStack(Items.DIRT, 64));
+            }
+            ItemStack gift = new ItemStack(Items.DIAMOND);
+            boolean full = !owner.getInventory().canInsert(gift);
+            boolean room = Cofres.hasRoom(world, owner, gift);
+            boolean stored = Cofres.storeGift(world, owner, gift.copy());
+            var inv = Cofres.inventory(world, chest);
+            int inChest = inv == null ? 0 : Cofres.contents(inv).getOrDefault("minecraft:diamond", 0);
+            check("regalo", full && room && stored && inChest == 1, "mochila llena: " + full + ", lugar en su cofre: " + room + ", diamante guardado en el cofre: " + inChest);
+            world.setBlockState(chest, Blocks.AIR.getDefaultState(), 3);
+            net.mca.server.world.data.TropelesMundo.get(world).removed(chest);
+        } finally {
+            owner.discard();
+        }
+    }
+
     /**
      * An empty-handed villager on grass with two bare trunks and solid stone below: it must chop, make a table,
      * a wooden pickaxe, dig, and come back up with a stone pickaxe of its own making.
@@ -575,6 +734,7 @@ public final class Pruebas {
         private final BlockPos origin;
         private boolean wooden;
         private int woodenAt;
+        private final BlockPos cabin;
 
         Progreso(ServerWorld world) {
             super("progreso", world, 2900);
@@ -583,8 +743,11 @@ public final class Pruebas {
             fill(world, origin.add(-14, -14, -14), origin.add(14, -2, 14), Blocks.STONE.getDefaultState());
             fill(world, origin.add(-14, -1, -14), origin.add(14, -1, 14), Blocks.GRASS_BLOCK.getDefaultState());
             fill(world, origin.add(-14, 0, -14), origin.add(14, 12, 14), Blocks.AIR.getDefaultState());
-            fill(world, origin.add(4, 0, 1), origin.add(4, 4, 1), Blocks.OAK_LOG.getDefaultState());
-            fill(world, origin.add(3, 0, -4), origin.add(3, 2, -4), Blocks.OAK_LOG.getDefaultState());
+            tree(world, origin.add(4, 0, 1), 5);
+            tree(world, origin.add(3, 0, -4), 3);
+            // a log cabin on the other side: its logs are walls, not firewood
+            cabin = origin.add(-7, 0, -1);
+            cabin(world, cabin);
             player = villager(world, origin, Direction.EAST);
             // free to walk: its own legs carry it to the trees, no "stay here"
             player.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
@@ -608,9 +771,11 @@ public final class Pruebas {
                 return null;
             }
             boolean tableBack = player.getInventory().count(Items.CRAFTING_TABLE) > 0;
-            check(name, wooden, "con las manos vacías: pico de madera en " + woodenAt + " ticks, pico de piedra en " + ticks
-                    + ", mesa de vuelta en la mochila: " + tableBack + "; " + state());
-            return wooden;
+            int cabinLogs = cabinLogs(world, cabin);
+            boolean passed = wooden && cabinLogs == 12;
+            check(name, passed, "con las manos vacías: pico de madera en " + woodenAt + " ticks, pico de piedra en " + ticks
+                    + ", mesa de vuelta en la mochila: " + tableBack + ", troncos de la cabaña intactos " + cabinLogs + "/12; " + state());
+            return passed;
         }
 
         private boolean owns(net.minecraft.item.Item item) {
@@ -628,6 +793,230 @@ public final class Pruebas {
         @Override
         void cleanup() {
             player.discard();
+        }
+    }
+
+    /**
+     * A zombie three blocks from an archer who also carries a sword: it must back off and shoot, never swap to
+     * the sword, and kill it with arrows.
+     */
+    private static final class ArcoCerca extends Scenario {
+        private final FollowTask follow = new FollowTask();
+        private final VillagerEntityMCA archer;
+        private final ArmorStandEntity ward;
+        private final ZombieEntity zombie;
+        private final Vec3d start;
+        private boolean swapped;
+        private double farthest;
+
+        ArcoCerca(ServerWorld world) {
+            super("arco-cerca", world, 1400);
+            BlockPos o = new BlockPos(2900, 100, 0);
+            load(world, o, 32);
+            fill(world, o.add(-16, -1, -16), o.add(16, -1, 16), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-16, 0, -16), o.add(16, 4, 16), Blocks.AIR.getDefaultState());
+            fill(world, o.add(-16, 5, -16), o.add(16, 5, 16), Blocks.GLOWSTONE.getDefaultState());
+            ward = EntityType.ARMOR_STAND.create(world);
+            if (ward == null) {
+                throw new IllegalStateException("no armor stand");
+            }
+            ward.refreshPositionAndAngles(o.getX() - 1.5, o.getY(), o.getZ() + 0.5, 0, 0);
+            world.spawnEntity(ward);
+            archer = villager(world, o, Direction.EAST);
+            archer.getInventory().addStack(new ItemStack(Items.BOW));
+            archer.getInventory().addStack(new ItemStack(Items.IRON_SWORD));
+            archer.getInventory().addStack(new ItemStack(Items.ARROW, 32));
+            start = archer.getPos();
+            zombie = zombie(world, Vec3d.ofBottomCenter(o.east(3)), true);
+            zombie.setTarget(archer);
+            face(archer, -90.0F, 0.0F);
+        }
+
+        @Override
+        Boolean step() {
+            if (!archer.isAlive()) {
+                fail(name, "el arquero murió; " + state());
+                return Boolean.FALSE;
+            }
+            follow.guard(world, archer, ward);
+            if (archer.getMainHandStack().isOf(Items.IRON_SWORD)) {
+                swapped = true;
+            }
+            farthest = Math.max(farthest, archer.distanceTo(zombie));
+            if (zombie.isAlive()) {
+                return null;
+            }
+            int shots = Archery.SHOTS.of(archer);
+            boolean passed = !swapped && shots > 0;
+            check(name, passed, "zombi muerto a flechazos (" + shots + " flechas) en " + ticks + " ticks, sacó la espada: " + swapped
+                    + ", se alejó hasta " + String.format(Locale.ROOT, "%.1f", farthest) + " bloques, vida " + archer.getHealth());
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "zombi " + zombie.getHealth() + " a " + String.format(Locale.ROOT, "%.1f", archer.distanceTo(zombie)) + ", flechas " + Archery.SHOTS.of(archer)
+                    + ", mano " + archer.getMainHandStack().getItem() + ", espada: " + swapped + ", " + Retina.memory(archer).doing();
+        }
+
+        @Override
+        void cleanup() {
+            archer.discard();
+            ward.discard();
+            zombie.discard();
+        }
+    }
+
+    /**
+     * Raw iron, one coal, cobblestone and planks: it makes a table and a furnace, leaves the iron cooking while it
+     * digs, comes back for the ingots, makes an iron pickaxe and takes its furnace with it at the end.
+     */
+    private static final class Horno extends Scenario {
+        private final ProspectingTask task = new ProspectingTask();
+        private final VillagerEntityMCA miner;
+        private final BlockPos origin;
+        private boolean sawCooking;
+        private boolean minedWhileCooking;
+        private int brokenAtCook = -1;
+
+        Horno(ServerWorld world) {
+            super("horno", world, 3200);
+            origin = new BlockPos(3000, 100, 0);
+            load(world, origin, 32);
+            fill(world, origin.add(-12, -8, -12), origin.add(12, 6, 12), Blocks.STONE.getDefaultState());
+            fill(world, origin.add(-2, 0, -2), origin.add(2, 2, 2), Blocks.AIR.getDefaultState());
+            world.setBlockState(origin.add(0, 3, 0), Blocks.GLOWSTONE.getDefaultState(), 2);
+            miner = villager(world, origin, Direction.EAST);
+            miner.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            miner.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+            miner.getInventory().addStack(new ItemStack(Items.RAW_IRON, 6));
+            miner.getInventory().addStack(new ItemStack(Items.COAL, 1));
+            miner.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 8));
+            miner.getInventory().addStack(new ItemStack(Items.OAK_PLANKS, 4));
+            miner.getInventory().addStack(new ItemStack(Items.STICK, 4));
+            face(miner, -90.0F, 0.0F);
+            Retina.lookAll(world, miner);
+        }
+
+        private int stoneMined() {
+            return miner.getInventory().count(Items.COBBLESTONE);
+        }
+
+        @Override
+        Boolean step() {
+            if (!miner.isAlive()) {
+                fail(name, "el minero murió; " + state());
+                return Boolean.FALSE;
+            }
+            task.practice(world, miner);
+            if (task.cooking()) {
+                if (!sawCooking) {
+                    sawCooking = true;
+                    brokenAtCook = stoneMined();
+                    MCA.LOGGER.info("PRUEBA horno: hierro en el horno a los " + ticks + " ticks; " + state());
+                } else if (stoneMined() > brokenAtCook) {
+                    minedWhileCooking = true;
+                }
+            }
+            boolean pick = miner.getMainHandStack().isOf(Items.IRON_PICKAXE) || miner.getInventory().count(Items.IRON_PICKAXE) > 0;
+            if (!pick || task.cooking() || !task.gearIdle()) {
+                return null;
+            }
+            boolean furnaceBack = miner.getInventory().count(Items.FURNACE) > 0;
+            boolean passed = sawCooking && minedWhileCooking && furnaceBack;
+            check(name, passed, "pico de hierro en " + ticks + " ticks, el hierro se fundió mientras minaba: " + minedWhileCooking
+                    + ", horno de vuelta en la mochila: " + furnaceBack + "; " + state());
+            return passed;
+        }
+
+        @Override
+        String state() {
+            var inv = miner.getInventory();
+            return "en " + miner.getBlockPos().toShortString() + ", haciendo: " + Retina.memory(miner).doing() + ", crudo " + inv.count(Items.RAW_IRON)
+                    + ", lingotes " + inv.count(Items.IRON_INGOT) + ", carbón " + inv.count(Items.COAL) + ", roca " + inv.count(Items.COBBLESTONE)
+                    + ", horno " + inv.count(Items.FURNACE) + ", fundiendo " + task.cooking() + ", mano " + miner.getMainHandStack().getItem();
+        }
+
+        @Override
+        void cleanup() {
+            miner.discard();
+        }
+    }
+
+    /**
+     * Hungry with nothing to eat ten blocks underground: it digs its way up, walks home, makes a chest there
+     * from its planks and stores its gold in it.
+     */
+    private static final class Hogar extends Scenario {
+        private final ProspectingTask task = new ProspectingTask();
+        private final VillagerEntityMCA miner;
+        private final BlockPos home;
+
+        Hogar(ServerWorld world) {
+            super("hogar", world, 3400);
+            BlockPos o = new BlockPos(3100, 100, 0);
+            load(world, o, 32);
+            fill(world, o.add(-12, -14, -12), o.add(12, -2, 12), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-12, -1, -12), o.add(12, -1, 12), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-12, 0, -12), o.add(12, 10, 12), Blocks.AIR.getDefaultState());
+            home = o.add(6, 0, 0);
+            BlockPos pocket = o.add(0, -11, 0);
+            fill(world, pocket, pocket.up(), Blocks.AIR.getDefaultState());
+            miner = villager(world, pocket, Direction.EAST);
+            miner.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            miner.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+            miner.getInventory().addStack(new ItemStack(Items.RAW_GOLD, 20));
+            miner.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 32));
+            miner.getInventory().addStack(new ItemStack(Items.OAK_PLANKS, 12));
+            miner.getInventory().addStack(new ItemStack(Items.STICK, 4));
+            miner.getInventory().addStack(new ItemStack(Items.WOODEN_SWORD));
+            task.setHome(home);
+            task.setFood(3);
+            face(miner, -90.0F, 0.0F);
+        }
+
+        @Override
+        Boolean step() {
+            if (!miner.isAlive()) {
+                fail(name, "el minero murió; " + state());
+                return Boolean.FALSE;
+            }
+            if (!task.atWork() || ticks < 20) {
+                task.practice(world, miner);
+                return null;
+            }
+            // back at work (or it gave up): what is in its chest at home?
+            int gold = 0;
+            BlockPos chestAt = null;
+            for (BlockPos pos : Cofres.own(world, miner, home)) {
+                var inv = Cofres.inventory(world, pos);
+                if (inv != null && pos.isWithinDistance(home, Cofres.HOME_RANGE)) {
+                    gold += Cofres.contents(inv).getOrDefault("minecraft:raw_gold", 0);
+                    chestAt = pos;
+                }
+            }
+            boolean surface = world.isSkyVisible(miner.getBlockPos().up());
+            boolean passed = gold == 20 && surface;
+            check(name, passed, "subió desde 11 bloques bajo tierra a la superficie: " + surface + ", cofre hecho y puesto en "
+                    + (chestAt == null ? "ningún lado" : chestAt.toShortString()) + " con " + gold + " de oro crudo, en " + ticks + " ticks; " + state());
+            if (chestAt != null) {
+                world.setBlockState(chestAt, Blocks.AIR.getDefaultState(), 3);
+                net.mca.server.world.data.TropelesMundo.get(world).removed(chestAt);
+            }
+            return passed;
+        }
+
+        @Override
+        String state() {
+            var inv = miner.getInventory();
+            return "en " + miner.getBlockPos().toShortString() + ", haciendo: " + Retina.memory(miner).doing() + ", comida " + task.food()
+                    + ", oro " + inv.count(Items.RAW_GOLD) + ", tablas " + inv.count(Items.OAK_PLANKS) + ", cofres " + inv.count(Items.CHEST)
+                    + ", mesas " + inv.count(Items.CRAFTING_TABLE);
+        }
+
+        @Override
+        void cleanup() {
+            miner.discard();
         }
     }
 }

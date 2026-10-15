@@ -2,6 +2,7 @@ package net.mca.entity.ai.body;
 
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.WorkTools;
+import net.mca.entity.ai.sense.Obras;
 import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
 import net.mca.util.InventoryUtils;
@@ -86,8 +87,11 @@ public final class Progreso {
     private static final Recipe STONE_SWORD = new Recipe(Items.STONE_SWORD, 1, true, Map.of(Mat.STONE, 2, Mat.STICK, 1));
     private static final Recipe IRON_SWORD = new Recipe(Items.IRON_SWORD, 1, true, Map.of(Mat.IRON, 2, Mat.STICK, 1));
     private static final Recipe DIAMOND_SWORD = new Recipe(Items.DIAMOND_SWORD, 1, true, Map.of(Mat.DIAMOND, 2, Mat.STICK, 1));
+    private static final Recipe CHEST = new Recipe(Items.CHEST, 1, true, Map.of(Mat.PLANKS, 8));
+    /** How far it may wander off while its iron cooks before it goes back for it. */
+    private static final int FURNACE_LEASH = 20;
 
-    private enum Step {IDLE, WOOD, TABLE, SMELT, PACK_UP}
+    private enum Step {IDLE, WOOD, TABLE, SMELT, COLLECT, PACK_UP}
 
     private final Hands.Breaker breaker = new Hands.Breaker();
     private final Map<Long, Long> ignored = new HashMap<>();
@@ -108,6 +112,35 @@ public final class Progreso {
     private int nextCheck;
     private boolean gaveUp;
     private boolean warnedNoWood;
+    /** Raw iron is in its furnace and it is off doing other things meanwhile. */
+    private boolean cooking;
+    /** When collecting, take everything and the furnace too: it is leaving. */
+    private boolean packFurnace;
+    private int collectTicks;
+    private boolean wantChest;
+
+    /** Asks for a chest to be made (from 8 planks at a table) next time it gears up. */
+    public void wantChest() {
+        wantChest = true;
+        nextCheck = 0;
+    }
+
+    public boolean cooking() {
+        return cooking;
+    }
+
+    /** It is going away: fetch whatever is in the furnace and pick the furnace up first. */
+    public void leaving() {
+        if (cooking && furnace != null) {
+            packFurnace = true;
+            step = Step.COLLECT;
+            collectTicks = 0;
+        }
+    }
+
+    public boolean idle() {
+        return step == Step.IDLE && !cooking;
+    }
 
     /** True once it has looked everywhere it could walk and found no tree for its first pickaxe. */
     public boolean gaveUp() {
@@ -244,6 +277,12 @@ public final class Progreso {
         int pick = Math.max(pickTier(villager.getMainHandStack()), best(inv, Progreso::pickTier));
         int sword = Math.max(swordTier(villager.getMainHandStack()), best(inv, Progreso::swordTier));
         List<Recipe> wanted = new ArrayList<>();
+        if (wantChest && count(inv, Items.CHEST) > 0) {
+            wantChest = false;
+        }
+        if (wantChest && pick > 0) {
+            wanted.add(CHEST);
+        }
         if (pick == 0) {
             wanted.add(WOODEN_PICKAXE);
         }
@@ -268,7 +307,9 @@ public final class Progreso {
         if (pick >= 1 && sword < 1 && count(inv, Mat.PLANKS) + 4 * count(inv, Mat.LOG) >= 2 + 2 + 4) {
             wanted.add(WOODEN_SWORD);
         }
-        if (count(inv, Mat.COAL) >= 1 && count(inv, Items.TORCH) < 16) {
+        // coal for the furnace comes first: one lump smelts eight raw iron
+        int coalForIron = (int) Math.ceil(count(inv, Items.RAW_IRON) / 8.0);
+        if (count(inv, Mat.COAL) > coalForIron && count(inv, Items.TORCH) < 16) {
             wanted.add(TORCHES);
         }
         for (Recipe recipe : wanted) {
@@ -281,7 +322,7 @@ public final class Progreso {
                 return recipe;
             }
         }
-        if (pick < 3 && count(inv, Mat.IRON) < 3 && count(inv, Items.RAW_IRON) + count(inv, Mat.IRON) >= 3 && fuelFor(inv, 1) != null
+        if (!cooking && pick < 3 && count(inv, Mat.IRON) < 3 && count(inv, Items.RAW_IRON) + count(inv, Mat.IRON) >= 3 && fuelFor(inv, 1) != null
                 && (count(inv, Mat.FURNACE) > 0 || count(inv, Mat.STONE) >= 8)) {
             return FURNACE; // stands for "smelt": a furnace is needed first
         }
@@ -297,6 +338,18 @@ public final class Progreso {
     public boolean tick(ServerWorld world, VillagerEntityMCA villager, BiConsumer<String, Object[]> say) {
         VisualMemory memory = Retina.memory(villager);
         long now = world.getTime();
+        if (step == Step.IDLE && cooking) {
+            BlockEntity be = furnace == null ? null : world.getBlockEntity(furnace);
+            if (!(be instanceof AbstractFurnaceBlockEntity oven)) {
+                cooking = false;
+                furnace = null;
+            } else if (oven.getStack(2).getCount() >= 3 || oven.getStack(0).isEmpty()
+                    || !villager.getBlockPos().isWithinDistance(furnace, FURNACE_LEASH)) {
+                // the first ingots are out, or it went too far: back to the furnace
+                step = Step.COLLECT;
+                collectTicks = 0;
+            }
+        }
         if (step == Step.IDLE) {
             if (--nextCheck > 0) {
                 return false;
@@ -323,6 +376,7 @@ public final class Progreso {
             case WOOD -> wood(world, villager, memory, now, say);
             case TABLE -> atTable(world, villager, memory, now, say);
             case SMELT -> smelt(world, villager, memory, now, say);
+            case COLLECT -> collect(world, villager, memory, now, say);
             case PACK_UP -> packUp(world, villager);
             default -> {
             }
@@ -403,6 +457,11 @@ public final class Progreso {
         double bestScore = Double.MAX_VALUE;
         for (VisualMemory.SeenBlock seen : memory.blocks(s -> s.state.isIn(BlockTags.LOGS))) {
             if (ignored.getOrDefault(seen.pos.asLong(), 0L) > now || !world.getBlockState(seen.pos).isIn(BlockTags.LOGS)) {
+                continue;
+            }
+            // a tree the world grew; the log walls and beams of a house are not firewood
+            if (!Obras.tree(world, seen.pos) || Obras.inVillageBuilding(world, seen.pos)) {
+                ignored.put(seen.pos.asLong(), now + 600);
                 continue;
             }
             double distance = Math.sqrt(seen.pos.getSquaredDistance(feet));
@@ -502,8 +561,13 @@ public final class Progreso {
         give(villager, made.copy());
         villager.swingHand(Hand.MAIN_HAND);
         Retina.memory(villager).doing("fabricó " + made.getName().getString(), world.getTime());
-        if (recipe.output() != Items.TORCH && recipe.output() != Items.STICK) {
+        if (recipe == TORCHES) {
+            say.accept("chore.mining.torches", new Object[]{made.getCount()});
+        } else if (recipe.output() != Items.STICK) {
             say.accept("chore.mining.crafted", new Object[]{made.getName()});
+        }
+        if (recipe == CHEST) {
+            wantChest = false;
         }
         return true;
     }
@@ -583,11 +647,16 @@ public final class Progreso {
         nextCheck = 20;
     }
 
-    /** Sets a carried table or furnace down on the floor next to it, against the top of the block below. */
     @Nullable
     private static BlockPos placeBeside(ServerWorld world, VillagerEntityMCA villager, Mat what) {
+        return placeBeside(world, villager, what.match);
+    }
+
+    /** Sets a carried block (table, furnace, chest) down on the floor next to it, against the top of the block below. */
+    @Nullable
+    public static BlockPos placeBeside(ServerWorld world, VillagerEntityMCA villager, Predicate<ItemStack> what) {
         SimpleInventory inv = villager.getInventory();
-        int slot = Hands.findSlot(inv, what.match);
+        int slot = Hands.findSlot(inv, what);
         if (slot < 0) {
             return null;
         }
@@ -613,15 +682,15 @@ public final class Progreso {
 
     /** Breaks its own table or furnace back into the bag. */
     private void packUp(ServerWorld world, VillagerEntityMCA villager) {
-        BlockPos target = furnace != null ? furnace : table;
+        BlockPos target = furnace != null && !cooking ? furnace : table;
         if (target == null || world.getBlockState(target).isAir()) {
-            if (furnace != null) {
+            if (target == furnace && furnace != null) {
                 furnace = null;
             } else {
                 table = null;
                 ownTable = false;
             }
-            step = furnace != null || ownTable && table != null ? Step.PACK_UP : Step.IDLE;
+            step = furnace != null && !cooking || ownTable && table != null ? Step.PACK_UP : Step.IDLE;
             return;
         }
         if (target.equals(furnace)) {
@@ -635,7 +704,7 @@ public final class Progreso {
             Hands.collect(world, villager, target, 2.5);
         } else if (r == Hands.Breaker.FAILED) {
             // out of reach now; leave it where it stands
-            if (target.equals(furnace)) {
+            if (target.equals(furnace) && !cooking) {
                 furnace = null;
             } else {
                 table = null;
@@ -660,6 +729,7 @@ public final class Progreso {
         return count(inv, Mat.COAL) > 0 ? Mat.COAL : count(inv, Mat.PLANKS) > 0 ? Mat.PLANKS : count(inv, Mat.LOG) > 0 ? Mat.LOG : null;
     }
 
+    /** Puts a furnace down, loads it with the raw iron and fuel from the bag, and goes on with its day. */
     private void smelt(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, BiConsumer<String, Object[]> say) {
         villager.getNavigation().stop();
         SimpleInventory inv = villager.getInventory();
@@ -671,63 +741,134 @@ public final class Progreso {
                 nextCheck = 200;
                 return;
             }
-            BlockEntity be = world.getBlockEntity(furnace);
-            if (!(be instanceof AbstractFurnaceBlockEntity oven)) {
-                step = Step.PACK_UP;
-                return;
-            }
-            int raw = Math.min(64, count(inv, Items.RAW_IRON));
-            Mat fuel = fuelFor(inv, raw);
-            if (fuel == null || raw == 0) {
-                step = Step.PACK_UP;
-                return;
-            }
-            int fuelItems = switch (fuel) {
-                case COAL -> (int) Math.ceil(raw / 8.0);
-                default -> (int) Math.ceil(raw / 1.5);
-            };
-            fuelItems = Math.min(fuelItems, count(inv, fuel));
-            int fuelSlot = Hands.findSlot(inv, fuel.match);
-            ItemStack fuelStack = inv.getStack(fuelSlot).split(Math.min(fuelItems, inv.getStack(fuelSlot).getCount()));
-            int rawSlot = Hands.findSlot(inv, s -> s.isOf(Items.RAW_IRON));
-            ItemStack rawStack = inv.getStack(rawSlot).split(Math.min(raw, inv.getStack(rawSlot).getCount()));
-            Hands.aim(villager, Vec3d.ofCenter(furnace));
-            oven.setStack(0, rawStack);
-            oven.setStack(1, fuelStack);
-            oven.markDirty();
-            smeltUntil = now + 200L * rawStack.getCount() + 60;
-            memory.doing("fundiendo " + rawStack.getCount() + " de hierro crudo", now);
-            return;
         }
-        Hands.aim(villager, Vec3d.ofCenter(furnace));
         BlockEntity be = world.getBlockEntity(furnace);
         if (!(be instanceof AbstractFurnaceBlockEntity oven)) {
             step = Step.PACK_UP;
             return;
         }
-        boolean done = oven.getStack(0).isEmpty() || now > smeltUntil;
-        if (!done) {
+        Hands.aim(villager, Vec3d.ofCenter(furnace));
+        if (!load(oven, inv)) {
+            step = Step.PACK_UP;
             return;
         }
-        int ingots = oven.getStack(2).getCount();
-        for (int slot : new int[]{2, 0, 1}) {
-            ItemStack s = oven.getStack(slot);
-            if (!s.isEmpty()) {
-                give(villager, s.copy());
-                oven.setStack(slot, ItemStack.EMPTY);
+        world.playSound(null, furnace, SoundEvents.BLOCK_STONE_PLACE, SoundCategory.BLOCKS, 0.5F, 1.0F);
+        memory.doing("fundiendo " + oven.getStack(0).getCount() + " de hierro crudo; sigue minando mientras", now);
+        say.accept("chore.mining.cooking", new Object[]{oven.getStack(0).getCount()});
+        cooking = true;
+        packFurnace = false;
+        // the table goes back in the bag; the furnace stays lit while it mines nearby
+        step = ownTable && table != null ? Step.PACK_UP : Step.IDLE;
+        nextCheck = 20;
+    }
+
+    /** Raw iron from the bag into the input, fuel for it into the fuel slot. False when there is nothing to smelt or burn. */
+    private static boolean load(AbstractFurnaceBlockEntity oven, SimpleInventory inv) {
+        ItemStack input = oven.getStack(0);
+        int rawSlot = Hands.findSlot(inv, s -> s.isOf(Items.RAW_IRON));
+        if (rawSlot >= 0 && (input.isEmpty() || input.isOf(Items.RAW_IRON) && input.getCount() < 64)) {
+            ItemStack raw = inv.getStack(rawSlot);
+            int add = Math.min(raw.getCount(), 64 - input.getCount());
+            if (input.isEmpty()) {
+                oven.setStack(0, raw.split(add));
+            } else {
+                raw.decrement(add);
+                input.increment(add);
+            }
+        }
+        int toSmelt = oven.getStack(0).getCount();
+        if (toSmelt == 0) {
+            return false;
+        }
+        ItemStack fuelNow = oven.getStack(1);
+        // fuel already in there and burning covers this many items
+        int covered = fuelNow.isEmpty() ? 0 : fuelNow.isOf(Items.COAL) || fuelNow.isOf(Items.CHARCOAL) ? fuelNow.getCount() * 8 : fuelNow.getCount() * 3 / 2;
+        if (covered < toSmelt) {
+            Mat fuel = fuelFor(inv, toSmelt - covered);
+            if (fuel == null && fuelNow.isEmpty()) {
+                // nothing to burn: give the iron back
+                giveBack(inv, oven, 0);
+                return false;
+            }
+            if (fuel != null) {
+                int need = toSmelt - covered;
+                int items = fuel == Mat.COAL ? (int) Math.ceil(need / 8.0) : (int) Math.ceil(need / 1.5);
+                int slot = Hands.findSlot(inv, fuel.match);
+                ItemStack fuelStack = inv.getStack(slot);
+                if (fuelNow.isEmpty()) {
+                    oven.setStack(1, fuelStack.split(Math.min(items, fuelStack.getCount())));
+                } else if (ItemStack.canCombine(fuelNow, fuelStack)) {
+                    int add = Math.min(Math.min(items, fuelStack.getCount()), fuelNow.getMaxCount() - fuelNow.getCount());
+                    fuelStack.decrement(add);
+                    fuelNow.increment(add);
+                }
             }
         }
         oven.markDirty();
+        return true;
+    }
+
+    private static void giveBack(SimpleInventory inv, AbstractFurnaceBlockEntity oven, int slot) {
+        ItemStack stack = oven.getStack(slot);
+        if (!stack.isEmpty()) {
+            ItemStack left = inv.addStack(stack.copy());
+            oven.setStack(slot, left);
+        }
+    }
+
+    /**
+     * Back at the furnace: the ingots come out and go to the table at once. If it brought more raw iron, that
+     * goes in to cook while it works; when nothing is left cooking (or it is leaving) the furnace comes along.
+     */
+    private void collect(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, BiConsumer<String, Object[]> say) {
+        BlockEntity be = furnace == null ? null : world.getBlockEntity(furnace);
+        if (!(be instanceof AbstractFurnaceBlockEntity oven)) {
+            cooking = false;
+            furnace = null;
+            step = Step.IDLE;
+            return;
+        }
+        if (Retina.visibleFace(world, villager, furnace, Retina.BLOCK_REACH) == null) {
+            memory.doing("volviendo al horno", now);
+            if (++collectTicks > 900) {
+                // cannot get back to it: it stays where it is, cooking for whoever passes by
+                cooking = false;
+                furnace = null;
+                step = Step.IDLE;
+                return;
+            }
+            if ((collectTicks % 20) == 1 || villager.getNavigation().isIdle()) {
+                villager.getNavigation().startMovingTo(furnace.getX() + 0.5, furnace.getY(), furnace.getZ() + 0.5, 0.7);
+            }
+            return;
+        }
+        villager.getNavigation().stop();
+        Hands.aim(villager, Vec3d.ofCenter(furnace));
+        SimpleInventory inv = villager.getInventory();
+        int ingots = oven.getStack(2).getCount();
+        giveBack(inv, oven, 2);
+        oven.markDirty();
+        world.playSound(null, furnace, SoundEvents.BLOCK_STONE_HIT, SoundCategory.BLOCKS, 0.5F, 1.0F);
         if (ingots > 0) {
             say.accept("chore.mining.smelted", new Object[]{ingots, new ItemStack(Items.IRON_INGOT).getName()});
         }
-        // with the ingots in hand, make the tools before packing up
+        boolean stillCooking = !packFurnace && load(oven, inv);
+        if (!stillCooking) {
+            giveBack(inv, oven, 0);
+            giveBack(inv, oven, 1);
+            oven.markDirty();
+            cooking = false;
+            packFurnace = false;
+        }
+        memory.doing(stillCooking ? "sacó " + ingots + " lingotes; el resto sigue en el horno" : "sacó " + ingots + " lingotes y recoge el horno", now);
+        // the ingots go straight to the table
         Recipe next = nextGoal(world, villager);
-        if (next != null && next != FURNACE && next.table() && tableInReach(world, villager) && affordableWithWood(inv, next)) {
+        if (next != null && next != FURNACE && next.table() && affordableWithWood(inv, next)) {
             goal = next;
             step = Step.TABLE;
             return;
         }
-        step = Step.PACK_UP;
+        step = cooking ? Step.IDLE : Step.PACK_UP;
+        nextCheck = 20;
     }
 }
