@@ -72,7 +72,7 @@ public final class Pruebas {
                 case "espada" -> start(new Espada(world));
                 case "arco" -> start(new Arco(world));
                 case "progreso" -> start(new Progreso(world));
-                case "nombre" -> nombre(world);
+                case "nombre" -> start(new Nombre(world));
                 case "resumen" -> resumen();
                 default -> {
                     ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | progreso | nombre | resumen"));
@@ -285,15 +285,27 @@ public final class Pruebas {
 
     // ------------------------------------------------------------------ calling a villager by name from afar
 
-    private static void nombre(ServerWorld world) {
-        BlockPos o = new BlockPos(2500, 100, 0);
-        load(world, o, 8);
-        fill(world, o.add(-3, -1, -3), o.add(3, -1, 3), Blocks.STONE.getDefaultState());
-        VillagerEntityMCA rosa = villager(world, o, Direction.EAST, "Rosa Pérez");
-        VillagerEntityMCA other = villager(world, o.east(2), Direction.EAST, "Rosalía Pérez");
-        // the one asking stands 2500 blocks away, at spawn
-        ArmorStandEntity far = EntityType.ARMOR_STAND.create(world);
-        try {
+    /** Two villagers 2500 blocks from the one asking, checked once their chunk has been ticking for a while. */
+    private static final class Nombre extends Scenario {
+        private final VillagerEntityMCA rosa;
+        private final VillagerEntityMCA other;
+
+        Nombre(ServerWorld world) {
+            super("nombre", world, 200);
+            BlockPos o = new BlockPos(2500, 100, 0);
+            load(world, o, 8);
+            fill(world, o.add(-3, -1, -3), o.add(3, -1, 3), Blocks.STONE.getDefaultState());
+            rosa = villager(world, o, Direction.EAST, "Rosa Pérez");
+            other = villager(world, o.east(2), Direction.EAST, "Rosalía Pérez");
+        }
+
+        @Override
+        Boolean step() {
+            if (ticks < 40) {
+                return null;
+            }
+            // the one asking stands 2500 blocks away, at spawn
+            ArmorStandEntity far = EntityType.ARMOR_STAND.create(world);
             if (far != null) {
                 far.refreshPositionAndAngles(0.5, 100, 0.5, 0, 0);
             }
@@ -301,11 +313,20 @@ public final class Pruebas {
             var exact = ChatAI.findByFullName(world.getServer(), "rosalía pérez ven", far);
             var partial = ChatAI.findByFullName(world.getServer(), "hola rosa", far);
             var glued = ChatAI.findByFullName(world.getServer(), "rosaperez", far);
-            check("nombre", full.orElse(null) == rosa && exact.orElse(null) == other && partial.isEmpty() && glued.isEmpty(),
-                    "nombre completo sin tildes a 2500 bloques: " + full.map(v -> v.getName().getString()).orElse("nadie")
-                            + ", el otro nombre: " + exact.map(v -> v.getName().getString()).orElse("nadie")
-                            + ", solo el primer nombre: " + partial.isPresent() + ", pegado: " + glued.isPresent());
-        } finally {
+            boolean passed = full.orElse(null) == rosa && exact.orElse(null) == other && partial.isEmpty() && glued.isEmpty();
+            check(name, passed, "nombre completo sin tildes a 2500 bloques: " + full.map(v -> v.getName().getString()).orElse("nadie")
+                    + ", el otro nombre: " + exact.map(v -> v.getName().getString()).orElse("nadie")
+                    + ", solo el primer nombre: " + partial.isPresent() + ", pegado: " + glued.isPresent());
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "rosa viva " + rosa.isAlive() + " con nombre '" + rosa.getName().getString() + "'";
+        }
+
+        @Override
+        void cleanup() {
             rosa.discard();
             other.discard();
         }
