@@ -1,0 +1,29 @@
+# Temporary: checks which free chat endpoints answer from a runner and the yarn names the mixins use.
+name: Sonda IA
+on:
+  push:
+    branches: [ 'sonda-ia' ]
+jobs:
+  sonda:
+    runs-on: ubuntu-latest
+    steps:
+      - name: yarn names
+        run: |
+          curl -sSL -o yarn.jar https://maven.fabricmc.net/net/fabricmc/yarn/1.20.1+build.10/yarn-1.20.1+build.10-v2.jar
+          unzip -o -q yarn.jar mappings/mappings.tiny
+          awk '/^c\t/{cls=$0} /FarmerVillagerTask/{p=1} p&&/^c\t/&&!/FarmerVillagerTask/{p=0} p' mappings/mappings.tiny | head -40
+          grep -n "onLandedUpon" mappings/mappings.tiny | head -3
+      - name: endpoints
+        run: |
+          SYS='Eres un aldeano de Minecraft. Responde SOLO con JSON {"message":"...","optionalCommand":"..."}. Comandos: follow-player, stay-here.'
+          BODY() { jq -nc --arg m "$1" --arg s "$SYS" '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:"Hola, sígueme por favor"}]}'; }
+          try() { echo "=== $1"; shift; start=$(date +%s%N); out=$(curl -sS -m 40 -w '\nHTTP %{http_code}' "$@" 2>&1); echo "$out" | head -c 900; echo; echo "ms $(( ($(date +%s%N)-start)/1000000 ))"; }
+          try pollinations-openai -H 'Content-Type: application/json' -d "$(BODY openai)" https://text.pollinations.ai/openai
+          try pollinations-models https://text.pollinations.ai/models
+          try gen-pollinations -H 'Content-Type: application/json' -d "$(BODY openai)" https://gen.pollinations.ai/v1/chat/completions
+          try llm7-models https://api.llm7.io/v1/models
+          try llm7-default -H 'Content-Type: application/json' -H 'Authorization: Bearer unused' -d "$(BODY default)" https://api.llm7.io/v1/chat/completions
+          try llm7-nano -H 'Content-Type: application/json' -H 'Authorization: Bearer unused' -d "$(BODY gpt-4.1-nano-2025-04-14)" https://api.llm7.io/v1/chat/completions
+          try chat-at -H 'Content-Type: application/json' -d "$(BODY gpt-4o)" https://ch.at/v1/chat/completions
+          try conczin -H 'Content-Type: application/json' -H 'Authorization: Bearer TropelesCI' -d "$(BODY default)" https://api.conczin.net/v1/mca/chat
+          try apifreellm -H 'Content-Type: application/json' -d '{"message":"Hola, sígueme por favor"}' https://apifreellm.com/api/chat
