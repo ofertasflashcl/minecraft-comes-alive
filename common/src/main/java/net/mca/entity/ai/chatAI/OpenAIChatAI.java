@@ -203,8 +203,8 @@ public class OpenAIChatAI implements ChatAIStrategy {
                 .toList();
         orders.append("Reply with exactly one JSON object and nothing else: {\"message\": \"what you say\", \"optionalCommand\": \"\", \"argument\": \"\"}\n");
         if (!valid.isEmpty()) {
-            orders.append("These are the things you can actually do. Put one in optionalCommand only when ").append(playerName)
-                    .append(" asks for it or clearly wants it, otherwise leave it empty:\n");
+            orders.append("These are the things you can actually do. When ").append(playerName)
+                    .append(" asks you for one of them or clearly wants it, do it gladly: put it in optionalCommand (a new request replaces an older order). Otherwise leave it empty:\n");
             for (TriggerCommandInfo command : valid) {
                 orders.append("  * ").append(command.command).append(": ").append(command.description);
                 if (command.argument != null) {

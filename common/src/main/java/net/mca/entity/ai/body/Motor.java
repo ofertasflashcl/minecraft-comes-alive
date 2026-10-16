@@ -348,9 +348,10 @@ public final class Motor {
         BlockPos hole = justBroken;
         boolean lava = world.getFluidState(hole).isIn(FluidTags.LAVA) || Mining.lavaSeen(memory, hole);
         // water pouring into the hole it just opened, underground: plug it like lava, it is only less deadly
-        // (a hole on its own way only when it filled up deep: shallow running water there is just walked through)
+        // (a hole on its own way only when a spring opened in it: running water there is just walked through,
+        // plugging it would only bring it back when the hole is dug again)
         boolean water = !lava && Agua.water(world, hole) && !world.isSkyVisible(hole) && !Agua.body(villager).contains(hole)
-                && (Agua.deep(world, hole) || !route(villager.getBlockPos()).contains(hole));
+                && (Agua.source(world, hole) || !route(villager.getBlockPos()).contains(hole));
         if (!lava && !water) {
             return false;
         }

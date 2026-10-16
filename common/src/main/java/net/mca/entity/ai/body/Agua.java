@@ -1,6 +1,7 @@
 package net.mca.entity.ai.body;
 
 import net.mca.entity.VillagerEntityMCA;
+import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
 import net.minecraft.block.BlockState;
 import net.minecraft.fluid.FluidState;
@@ -25,9 +26,9 @@ import java.util.WeakHashMap;
 /**
  * Water the way a miner deals with it: it does not wade on through a flooded tunnel, it shuts the water off.
  * The cells its body is in and the ones it is about to move into are watched: a spring next to the way gets a
- * block in it (a source keeps feeding the flow, so that is what a player shuts), water falling onto the way is
- * blocked above, water deep enough to drown in that stands in the next cell is filled so the cell can be dug
- * out dry, and shallow running water is simply walked through. Swimming in a shaft it fills the water under its
+ * block in it (a source keeps feeding the flow, so that is what a player shuts), and so does the spring a flood
+ * comes from when it is within reach; water falling onto the way is blocked above, a still source standing in
+ * the next cell is filled, and running water is simply walked through. Swimming in a shaft it fills the water under its
  * own feet to climb out, the way a player spams blocks while swimming up a flooded hole.
  * Out in the open (sky above, not under water) it leaves rivers and lakes alone.
  */
@@ -150,9 +151,44 @@ public final class Agua {
         return false;
     }
 
-    /** Water that would cover a body: a source, or water in the cell and the one above it. */
-    public static boolean deep(World world, BlockPos pos) {
-        return source(world, pos) || water(world, pos) && water(world, pos.up());
+    /**
+     * The spring feeding the water around {@code from}: the water is followed upstream (to cells as full or
+     * fuller, or falling from above) through at most {@code maxCells} cells. Null when none is found.
+     */
+    @org.jetbrains.annotations.Nullable
+    public static BlockPos feeder(World world, Collection<BlockPos> from, int maxCells) {
+        java.util.ArrayDeque<BlockPos> queue = new java.util.ArrayDeque<>();
+        Set<BlockPos> seen = new HashSet<>();
+        for (BlockPos start : from) {
+            for (Direction dir : Direction.values()) {
+                BlockPos cell = dir == Direction.DOWN ? start : start.offset(dir);
+                if (water(world, cell) && seen.add(cell)) {
+                    queue.add(cell);
+                }
+            }
+        }
+        while (!queue.isEmpty() && seen.size() <= maxCells) {
+            BlockPos cell = queue.poll();
+            if (source(world, cell)) {
+                return cell;
+            }
+            int level = world.getFluidState(cell).getLevel();
+            for (Direction dir : Direction.values()) {
+                if (dir == Direction.DOWN) {
+                    continue; // water runs down and sideways, so its spring is up or to the side
+                }
+                BlockPos near = cell.offset(dir);
+                if (seen.contains(near) || !water(world, near)) {
+                    continue;
+                }
+                FluidState fluid = world.getFluidState(near);
+                if (dir == Direction.UP || fluid.isStill() || fluid.getLevel() >= level) {
+                    seen.add(near);
+                    queue.add(near);
+                }
+            }
+        }
+        return null;
     }
 
     /** In water in a hole three or more sides walled. */
@@ -193,8 +229,9 @@ public final class Agua {
         List<BlockPos> flows = new ArrayList<>();
         Set<BlockPos> looked = new HashSet<>(targets);
         for (BlockPos cell : route) {
-            // shallow running water is walked through like a player does; only water deep enough to drown in is filled
-            if (!body.contains(cell) && looked.add(cell) && deep(world, cell)) {
+            // running water is walked through like a player does (filling it is no use while its spring runs, it
+            // only comes back when the cell is dug out); a still source in the way is filled for good
+            if (!body.contains(cell) && looked.add(cell) && source(world, cell)) {
                 inPath.add(cell);
             }
             for (Direction dir : Direction.values()) {
@@ -213,6 +250,13 @@ public final class Agua {
                 } else if (dir == Direction.UP) {
                     flows.add(near); // water falling onto the way from above
                 }
+            }
+        }
+        if (sources.isEmpty() && villager.isTouchingWater()) {
+            // wading in running water with no spring beside the way: where is it coming from? within reach, shut it
+            BlockPos spring = feeder(world, route, 64);
+            if (spring != null && villager.getEyePos().distanceTo(net.minecraft.util.math.Vec3d.ofCenter(spring)) <= Retina.BLOCK_REACH + 0.5) {
+                sources.add(spring);
             }
         }
         targets.addAll(sources);

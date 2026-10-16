@@ -655,6 +655,23 @@ public class ProspectingTask extends AbstractChoreTask {
                 }
             }
         }
+        if (villager.isTouchingWater() && !world.isSkyVisible(feet.up())) {
+            // standing in running water: a staircase down here would only fill up behind it; first walk out to dry rock
+            for (int turn = 0; turn < 4; turn++) {
+                Direction dir = Direction.fromHorizontal((tunnelDir + turn) & 3);
+                boolean dry = true;
+                for (int k = 1; k <= 3 && dry; k++) {
+                    dry = !Agua.water(world, feet.offset(dir, k)) && !Agua.water(world, feet.offset(dir, k).up());
+                }
+                if (dry) {
+                    tunnelDir = dir.getHorizontal();
+                    for (int k = 1; k <= 3; k++) {
+                        plan.add(feet.offset(dir, k));
+                    }
+                    return;
+                }
+            }
+        }
         if (feet.getY() > depth + 2) {
             int steps = Math.min(4, feet.getY() - depth);
             plan.add(feet.offset(forward, steps).down(steps));

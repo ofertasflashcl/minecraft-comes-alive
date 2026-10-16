@@ -49,7 +49,7 @@ public class PerceptionModule {
         if (move == MoveState.FOLLOW) {
             input.add("$villager is following $player. ");
         } else if (move == MoveState.STAY) {
-            input.add("$villager was told to stay in place. ");
+            input.add("$villager is waiting in place until told otherwise. ");
         }
 
         // its body and where it is

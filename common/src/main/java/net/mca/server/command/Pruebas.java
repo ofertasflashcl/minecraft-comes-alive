@@ -1168,6 +1168,8 @@ public final class Pruebas {
             miner.getInventory().addStack(new ItemStack(Items.DIAMOND_PICKAXE));
             miner.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 32));
             face(miner, -90.0F, 0.0F);
+            // it looks down the corridor and sees the diamond, like in "minar"
+            Retina.lookAll(world, miner);
         }
 
         @Override
@@ -1178,9 +1180,6 @@ public final class Pruebas {
             }
             if (ticks < 30) {
                 return null; // let the water run into the corridor first
-            }
-            if (ticks == 30) {
-                Retina.lookAll(world, miner);
             }
             if (miner.isSubmergedInWater()) {
                 wetTicks++;
