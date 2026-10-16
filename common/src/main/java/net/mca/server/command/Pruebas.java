@@ -1322,6 +1322,8 @@ public final class Pruebas {
                 boolean follows = v.getVillagerBrain().getMoveState() == MoveState.FOLLOW;
                 say("quédate aquí");
                 boolean stays = v.getVillagerBrain().getMoveState() == MoveState.STAY;
+                say("¿Te animas a acompañarme un rato por el bosque?");
+                boolean comes = v.getVillagerBrain().getMoveState() == MoveState.FOLLOW;
                 String gave = say("dame 2 lingotes de hierro");
                 boolean handed = v.getInventory().count(Items.IRON_INGOT) == 1;
                 String bag = say("¿qué tienes en la mochila?");
@@ -1335,9 +1337,9 @@ public final class Pruebas {
                 boolean inEnglish = english.contains("waiting") || english.contains("I'm") || english.contains("Nothing");
                 String lost = say("dime algo bonito");
                 boolean helps = lost.contains("Puedo seguirte");
-                boolean passed = !hello.isEmpty() && follows && stays && handed && gave.contains("hierro") && knowsBag && mining
+                boolean passed = !hello.isEmpty() && follows && stays && comes && handed && gave.contains("hierro") && knowsBag && mining
                         && !mine.isEmpty() && inEnglish && helps;
-                check(name, passed, "sin internet: me sigue " + follows + ", se queda " + stays + ", me dio 2 lingotes " + handed
+                check(name, passed, "sin internet: me sigue " + follows + ", se queda " + stays + ", me acompaña " + comes + ", me dio 2 lingotes " + handed
                         + " («" + gave + "»), sabe lo que lleva " + knowsBag + ", va a minar buscando diamantes " + mining
                         + ", contesta en inglés " + inEnglish + ", si no entiende dice lo que sabe hacer " + helps);
                 return passed;
@@ -1419,7 +1421,7 @@ public final class Pruebas {
             if (order == null) {
                 chatMind = net.mca.entity.ai.chatAI.Cerebros.last(v.getUuid());
                 MCA.LOGGER.info("PRUEBA ia-red charla con " + chatMind + ": «" + chat.join() + "»");
-                order = talk("¿Te animas a acompañarme un rato por el bosque?");
+                order = talk("Me da miedo cruzar el bosque solo esta noche, ¿me echas una mano y caminas a mi lado?");
                 return null;
             }
             if (!order.isDone()) {
@@ -1430,7 +1432,7 @@ public final class Pruebas {
             MCA.LOGGER.info("PRUEBA ia-red orden con " + orderMind + ": «" + order.join() + "», lo sigue: " + follows);
             boolean passed = !chat.join().isBlank() && !order.join().isBlank();
             check(name, passed, "mentes gratis que respondieron desde el servidor: " + minds + "; charla con " + chatMind
-                    + "; orden que solo entiende la IA («acompañarme») con " + orderMind + ", lo sigue: " + follows);
+                    + "; orden que solo entiende la IA («caminas a mi lado») con " + orderMind + ", lo sigue: " + follows);
             return passed;
         }
 

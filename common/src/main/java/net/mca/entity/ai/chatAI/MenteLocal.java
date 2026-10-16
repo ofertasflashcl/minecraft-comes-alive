@@ -53,8 +53,11 @@ public final class MenteLocal {
                     + "give me|hand me|can i have|toss me|throw me|pass me"),
             order("store-items", "guarda (tus|las|todas tus|todo|lo que)|guardalo|guardalas|guardalos|deja tus cosas|ve a guardar|anda a guardar|"
                     + "store (your|it|everything|the)|put (your|it|everything|the) .*chest|deposit"),
-            order("follow-player", "sigueme|seguime|siguenos|ven conmigo|vente conmigo|vamos juntos|acompaname|ven (aca|aqui|para aca|pa ca|para aqui)|"
-                    + "follow me|come with me|come along|come here|let'?s go together"),
+            order("follow-player", "sigueme|seguime|siguenos|seguirme|ven conmigo|vente conmigo|vienes conmigo|venir conmigo|vamos juntos|vamonos|"
+                    + "vamos a (explorar|caminar|pasear|dar una vuelta)|acompaname|acompanarme|acompaneme|me acompanas|me acompanarias|"
+                    + "quedate conmigo|camina conmigo|no te (alejes|separes|despegues) de mi|pegate a mi|ven (aca|aqui|para aca|pa ca|para aqui)|"
+                    + "follow me|come with me|come along|come here|tag along|walk with me|accompany me|join me|stick with me|stay (close|with me)|"
+                    + "let'?s go together"),
             order("stay-here", "quedate|esperame (aqui|aca|ahi)|espera (aqui|aca|ahi)|no te muevas|stay here|stay there|wait here|wait for me|don'?t move"),
             order("start-mining", "ve a minar|vete a minar|anda a minar|ponte a minar|ve a la mina|a minar|mina|minar|excava|"
                     + "go mine|go mining|start mining|mine for|dig for|"

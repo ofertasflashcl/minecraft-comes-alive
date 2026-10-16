@@ -87,7 +87,7 @@ public class OpenAIChatAI implements ChatAIStrategy {
                 StructuredResponse said = structured(reply.content(), prep.villagerName());
                 if (said.message() != null && !said.message().isBlank()) {
                     line = said.message();
-                    MCA.LOGGER.info("[Tropeles] {} pensó con {} en {} ms", prep.villagerName(), reply.mind(), reply.millis());
+                    MCA.LOGGER.info("[Tropeles] {} pensó con {} en {} ms (orden '{}')", prep.villagerName(), reply.mind(), reply.millis(), said.optionalCommand());
                     // an order only the language model understood
                     if (!prep.intent().order() && !prep.refused() && !said.optionalCommand().isBlank()) {
                         String extra = onServer(server, () -> act(player, villager, said, prep.intent().spanish()));
@@ -212,7 +212,11 @@ public class OpenAIChatAI implements ChatAIStrategy {
                 }
                 orders.append("\n");
             }
-            orders.append("Never claim to do something that is not on this list.");
+            orders.append("If your message says you will do one of these things, optionalCommand must hold it, or you will not really do it. ")
+                    .append("Never claim to do something that is not on this list.\n");
+            valid.stream().filter(c -> c.command.equals("follow-player")).findFirst().ifPresent(c ->
+                    orders.append("Example: ").append(playerName).append(" writes \"¿vienes conmigo al río?\" and you answer ")
+                            .append("{\"message\": \"¡Claro, vamos!\", \"optionalCommand\": \"follow-player\", \"argument\": \"\"}\n"));
         }
 
         // MCA's own service adds the persona itself; the others get one
