@@ -692,6 +692,9 @@ public final class Progreso {
             }
         }
         for (BlockPos cell : cells) {
+            if (net.mca.entity.ai.sense.Obras.cropAt(world, cell) || net.mca.entity.ai.sense.Obras.cropAt(world, cell.down())) {
+                continue; // never on a field
+            }
             BlockState here = world.getBlockState(cell);
             if (!here.isReplaceable() || !here.getFluidState().isEmpty() || !Mining.standable(world, cell.down())) {
                 continue;

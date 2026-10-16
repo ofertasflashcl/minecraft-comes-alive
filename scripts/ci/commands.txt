@@ -16,6 +16,11 @@ mca-prueba regalo
 mca-prueba arco-cerca
 mca-prueba horno
 mca-prueba hogar
-sleep 185
+mca-prueba cultivos
+mca-prueba agua-tunel
+mca-prueba agua-pozo
+mca-prueba ia-local
+mca-prueba ia-red
+sleep 200
 mca-prueba resumen
 sleep 2

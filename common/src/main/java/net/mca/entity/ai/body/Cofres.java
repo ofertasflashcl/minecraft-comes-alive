@@ -13,6 +13,7 @@ import net.minecraft.inventory.Inventory;
 import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -264,8 +265,96 @@ public final class Cofres {
         return missing;
     }
 
+    // ------------------------------------------------------------------ "store your things", asked in words
+
+    private record Pending(BlockPos chest, java.util.UUID player, long until, net.mca.entity.ai.MoveState before) {
+    }
+
+    private static final Map<VillagerEntityMCA, Pending> PENDING = new java.util.WeakHashMap<>();
+
+    /** How "store your things" went. */
+    public enum Store { WALKING, PLACED, NONE }
+
+    /**
+     * Asked to put its things away: it walks to its nearest chest (or sets down the one in its bag) and stores
+     * all but its tools, weapons, armour, torches and food.
+     */
+    public static Store orderStore(VillagerEntityMCA villager, ServerPlayerEntity player) {
+        if (!(villager.getWorld() instanceof ServerWorld world)) {
+            return Store.NONE;
+        }
+        BlockPos chest = own(world, villager, villager.getBlockPos()).stream()
+                .filter(pos -> pos.isWithinDistance(villager.getBlockPos(), HOME_RANGE))
+                .findFirst().orElse(null);
+        Store how = Store.WALKING;
+        if (chest == null && villager.getInventory().count(Items.CHEST) > 0) {
+            BlockPos placed = Progreso.placeBeside(world, villager, Cofres::isChestItem);
+            if (placed != null) {
+                claim(world, villager, placed);
+                chest = placed;
+                how = Store.PLACED;
+            }
+        }
+        if (chest == null) {
+            return Store.NONE;
+        }
+        // following or told to stay, it still has to walk to the chest; it goes back to that afterwards
+        net.mca.entity.ai.MoveState before = villager.getVillagerBrain().getMoveState();
+        if (before != net.mca.entity.ai.MoveState.MOVE) {
+            villager.getVillagerBrain().setMoveState(net.mca.entity.ai.MoveState.MOVE, null);
+        }
+        PENDING.put(villager, new Pending(chest, player.getUuid(), world.getTime() + 600, before));
+        return how;
+    }
+
+    /** Whether it is on its way to store its things. */
+    public static boolean storing(VillagerEntityMCA villager) {
+        return PENDING.containsKey(villager);
+    }
+
+    private static boolean keepOnYou(ItemStack stack) {
+        return stack.getItem() instanceof net.minecraft.item.ToolItem || stack.getItem() instanceof net.minecraft.item.RangedWeaponItem
+                || stack.getItem() instanceof net.minecraft.item.ArmorItem || stack.getItem() instanceof net.minecraft.item.ArrowItem
+                || stack.getItem() instanceof net.minecraft.item.ShieldItem || stack.isFood() || stack.isOf(Items.TORCH);
+    }
+
+    private static void storeTick(ServerWorld world, VillagerEntityMCA villager, Pending pending) {
+        ServerPlayerEntity player = world.getServer().getPlayerManager().getPlayer(pending.player());
+        if (world.getTime() > pending.until() || !(world.getBlockState(pending.chest()).getBlock() instanceof ChestBlock)) {
+            PENDING.remove(villager);
+            restore(villager, pending, player);
+            return;
+        }
+        if (Retina.visibleFace(world, villager, pending.chest(), Retina.BLOCK_REACH) == null) {
+            if ((villager.age % 20) == 0 || villager.getNavigation().isIdle()) {
+                villager.getNavigation().startMovingTo(pending.chest().getX() + 0.5, pending.chest().getY(), pending.chest().getZ() + 0.5, 0.6);
+            }
+            return;
+        }
+        villager.getNavigation().stop();
+        int stored = store(world, villager, pending.chest(), Cofres::keepOnYou);
+        PENDING.remove(villager);
+        Retina.memory(villager).doing("guardó " + stored + " cosas en su cofre", world.getTime());
+        if (player != null && stored > 0) {
+            net.mca.entity.ai.chatAI.Acciones.say(player, villager, "chore.mining.stored", stored);
+        }
+        restore(villager, pending, player);
+    }
+
+    private static void restore(VillagerEntityMCA villager, Pending pending, @Nullable ServerPlayerEntity player) {
+        if (pending.before() == net.mca.entity.ai.MoveState.FOLLOW && player != null) {
+            villager.getVillagerBrain().setMoveState(net.mca.entity.ai.MoveState.FOLLOW, player);
+        } else if (pending.before() == net.mca.entity.ai.MoveState.STAY) {
+            villager.getVillagerBrain().setMoveState(net.mca.entity.ai.MoveState.STAY, null);
+        }
+    }
+
     /** Every so often: the owner finds out about thefts once it is by the chest or sees the thief. */
     public static void tick(ServerWorld world, VillagerEntityMCA villager) {
+        Pending pending = PENDING.get(villager);
+        if (pending != null) {
+            storeTick(world, villager, pending);
+        }
         if ((villager.age % 40) != 7) {
             return;
         }

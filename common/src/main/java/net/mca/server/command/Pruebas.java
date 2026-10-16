@@ -81,9 +81,14 @@ public final class Pruebas {
                 case "arco-cerca" -> start(new ArcoCerca(world));
                 case "horno" -> start(new Horno(world));
                 case "hogar" -> start(new Hogar(world));
+                case "cultivos" -> start(new Cultivos(world));
+                case "agua-tunel" -> start(new AguaTunel(world));
+                case "agua-pozo" -> start(new AguaPozo(world));
+                case "ia-local" -> start(new IaLocal(world));
+                case "ia-red" -> start(new IaRed(world));
                 case "resumen" -> resumen();
                 default -> {
-                    ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | progreso | nombre | obras | robo | regalo | arco-cerca | horno | hogar | resumen"));
+                    ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | progreso | nombre | obras | robo | regalo | arco-cerca | horno | hogar | cultivos | agua-tunel | agua-pozo | ia-local | ia-red | resumen"));
                     return 0;
                 }
             }
@@ -1040,6 +1045,397 @@ public final class Pruebas {
         @Override
         void cleanup() {
             miner.discard();
+        }
+    }
+
+    // ------------------------------------------------------------------ fields
+
+    /**
+     * A small field: ripe wheat on farmland, a pumpkin on its stem and a lone pumpkin. Crops and farmland are
+     * never to be broken; a villager dropped onto the field does not trample it; a farmer leaves a player's
+     * field alone but still tends the village's.
+     */
+    private static final class Cultivos extends Scenario {
+        private final VillagerEntityMCA v;
+        private final BlockPos o;
+        private final BlockPos wheat;
+        private final BlockPos playersWheat;
+        private final BlockPos stem;
+        private final BlockPos pumpkin;
+        private final BlockPos lonePumpkin;
+        private final BlockPos landing;
+        private boolean dropped;
+        private String labels = "";
+
+        Cultivos(ServerWorld world) {
+            super("cultivos", world, 400);
+            o = new BlockPos(3200, 100, 0);
+            load(world, o, 10);
+            fill(world, o.add(-6, -3, -6), o.add(6, -2, 6), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-6, -1, -6), o.add(6, -1, 6), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-6, 0, -6), o.add(6, 8, 6), Blocks.AIR.getDefaultState());
+            BlockState soil = Blocks.FARMLAND.getDefaultState().with(net.minecraft.block.FarmlandBlock.MOISTURE, 7);
+            BlockState ripe = Blocks.WHEAT.getDefaultState().with(net.minecraft.block.CropBlock.AGE, 7);
+            fill(world, o.add(0, -1, 0), o.add(2, -1, 2), soil);
+            fill(world, o.add(0, 0, 0), o.add(2, 0, 2), ripe);
+            wheat = o.add(0, 0, 0);
+            playersWheat = o.add(2, 0, 2);
+            landing = o.add(1, 0, 1);
+            net.mca.server.world.data.TropelesMundo.get(world).placedByPlayer(playersWheat.down());
+            pumpkin = o.add(-2, 0, 0);
+            stem = o.add(-3, 0, 0);
+            world.setBlockState(stem.down(), soil, 2);
+            world.setBlockState(pumpkin, Blocks.PUMPKIN.getDefaultState(), 2);
+            world.setBlockState(stem, Blocks.ATTACHED_PUMPKIN_STEM.getDefaultState().with(net.minecraft.block.AttachedStemBlock.FACING, Direction.EAST), 2);
+            lonePumpkin = o.add(-4, 0, 4);
+            world.setBlockState(lonePumpkin, Blocks.PUMPKIN.getDefaultState(), 2);
+            v = villager(world, o.add(4, 0, 0), Direction.WEST);
+        }
+
+        @Override
+        Boolean step() {
+            if (ticks < 40) {
+                return null;
+            }
+            if (!dropped) {
+                Obras.Kind crop = Obras.kind(world, v, wheat);
+                Obras.Kind ground = Obras.kind(world, v, wheat.down());
+                boolean neverBroken = !Obras.mayBreak(world, v, wheat) && !Obras.mayBreak(world, v, wheat.down())
+                        && !Obras.mayBreak(world, v, pumpkin) && !Obras.mayBreak(world, v, stem);
+                boolean gourds = Obras.cropAt(world, pumpkin) && !Obras.cropAt(world, lonePumpkin);
+                var farmer = (net.mca.mixin.MixinFarmerVillagerTaskInvoker) (Object) new net.minecraft.entity.ai.brain.task.FarmerVillagerTask();
+                boolean village = farmer.mca$isSuitableTarget(wheat, world);
+                boolean players = farmer.mca$isSuitableTarget(playersWheat, world);
+                labels = "trigo: " + crop.label + ", tierra arada: " + ground.label + ", nunca se rompen: " + neverBroken
+                        + ", zapallo en su tallo es cultivo: " + Obras.cropAt(world, pumpkin) + ", zapallo suelto: " + Obras.cropAt(world, lonePumpkin)
+                        + ", el granjero cosecharía el del pueblo: " + village + ", el del jugador: " + players;
+                if (!(crop == Obras.Kind.CROP && ground == Obras.Kind.CROP && neverBroken && gourds && village && !players)) {
+                    fail(name, labels);
+                    return Boolean.FALSE;
+                }
+                // now drop it from three blocks onto the wheat
+                v.requestTeleport(landing.getX() + 0.5, landing.getY() + 3.0, landing.getZ() + 0.5);
+                v.fallDistance = 0;
+                dropped = true;
+                return null;
+            }
+            if (!v.isOnGround() || ticks < 120) {
+                return null;
+            }
+            boolean field = world.getBlockState(landing.down()).isOf(Blocks.FARMLAND) && world.getBlockState(landing).isOf(Blocks.WHEAT);
+            check(name, field, labels + ", cayó 3 bloques sobre el trigo y el campo sigue arado: " + field);
+            return field;
+        }
+
+        @Override
+        String state() {
+            return "aldeano en " + v.getBlockPos().toShortString() + ", " + labels;
+        }
+
+        @Override
+        void cleanup() {
+            v.discard();
+            net.mca.server.world.data.TropelesMundo.get(world).removed(playersWheat.down());
+        }
+    }
+
+    // ------------------------------------------------------------------ water
+
+    /** The diamond at the end of a stone corridor, with a spring coming out of the wall on the way. */
+    private static final class AguaTunel extends Scenario {
+        private final ProspectingTask task = new ProspectingTask();
+        private final VillagerEntityMCA miner;
+        private final BlockPos diamond;
+        private final BlockPos spring;
+        private final BlockPos origin;
+        private int wetTicks;
+
+        AguaTunel(ServerWorld world) {
+            super("agua-tunel", world, 2400);
+            origin = new BlockPos(3300, 100, 0);
+            load(world, origin, 24);
+            fill(world, origin.add(-3, -5, -3), origin.add(14, 4, 3), Blocks.STONE.getDefaultState());
+            fill(world, origin.add(0, 0, 0), origin.add(9, 1, 0), Blocks.AIR.getDefaultState());
+            for (int x = 0; x <= 9; x += 3) {
+                world.setBlockState(origin.add(x, 2, 0), Blocks.GLOWSTONE.getDefaultState(), 2);
+            }
+            diamond = origin.add(10, 0, 0);
+            world.setBlockState(diamond, Blocks.DIAMOND_ORE.getDefaultState(), 2);
+            // a spring in the side wall, halfway: it floods the corridor
+            spring = origin.add(5, 0, 1);
+            world.setBlockState(spring, Blocks.WATER.getDefaultState(), 3);
+            miner = villager(world, origin, Direction.EAST);
+            miner.getInventory().addStack(new ItemStack(Items.DIAMOND_PICKAXE));
+            miner.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 32));
+            face(miner, -90.0F, 0.0F);
+        }
+
+        @Override
+        Boolean step() {
+            if (!miner.isAlive()) {
+                fail(name, "el minero murió; " + state());
+                return Boolean.FALSE;
+            }
+            if (ticks < 30) {
+                return null; // let the water run into the corridor first
+            }
+            if (ticks == 30) {
+                Retina.lookAll(world, miner);
+            }
+            if (miner.isSubmergedInWater()) {
+                wetTicks++;
+            }
+            miner.getNavigation().stop();
+            task.practice(world, miner);
+            if (world.getBlockState(diamond).isOf(Blocks.DIAMOND_ORE)) {
+                return null;
+            }
+            boolean got = miner.getInventory().count(Items.DIAMOND) > 0;
+            if (!got && ticks % 20 != 0) {
+                return null;
+            }
+            boolean plugged = !net.mca.entity.ai.body.Agua.water(world, spring);
+            boolean passed = got && plugged;
+            check(name, passed, "diamante picado en " + ticks + " ticks, en la mochila: " + got + ", manantial tapado: " + plugged
+                    + ", ticks con la cabeza bajo el agua: " + wetTicks + "; " + state());
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "en " + miner.getBlockPos().toShortString() + ", haciendo: " + Retina.memory(miner).doing() + ", piedra "
+                    + miner.getInventory().count(Items.COBBLESTONE) + ", manantial: " + world.getBlockState(spring).getBlock().getName().getString();
+        }
+
+        @Override
+        void cleanup() {
+            miner.discard();
+        }
+    }
+
+    /**
+     * The picture Benja sent: a villager at the bottom of a one-wide shaft with three blocks of water in it and
+     * hungry, so it heads home. It has to get out of the water without drowning and climb the dry shaft to the
+     * surface, like a player spamming blocks under their feet.
+     */
+    private static final class AguaPozo extends Scenario {
+        private final ProspectingTask task = new ProspectingTask();
+        private final VillagerEntityMCA miner;
+        private final BlockPos o;
+        private int lowestAir = Integer.MAX_VALUE;
+
+        AguaPozo(ServerWorld world) {
+            super("agua-pozo", world, 2600);
+            o = new BlockPos(3400, 100, 0);
+            load(world, o, 32);
+            fill(world, o.add(-12, -14, -12), o.add(12, -2, 12), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-12, -1, -12), o.add(12, -1, 12), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-12, 0, -12), o.add(12, 10, 12), Blocks.AIR.getDefaultState());
+            BlockPos bottom = o.add(0, -11, 0);
+            fill(world, bottom, o.add(0, -1, 0), Blocks.AIR.getDefaultState());
+            fill(world, bottom, bottom.up(2), Blocks.WATER.getDefaultState());
+            miner = villager(world, bottom, Direction.EAST);
+            miner.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            miner.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+            miner.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 32));
+            miner.getInventory().addStack(new ItemStack(Items.OAK_PLANKS, 12));
+            miner.getInventory().addStack(new ItemStack(Items.STICK, 4));
+            task.setHome(o.add(6, 0, 0));
+            task.setFood(3);
+            face(miner, -90.0F, 0.0F);
+        }
+
+        @Override
+        Boolean step() {
+            if (!miner.isAlive()) {
+                fail(name, "el minero se ahogó o murió; " + state());
+                return Boolean.FALSE;
+            }
+            lowestAir = Math.min(lowestAir, miner.getAir());
+            miner.getNavigation().stop();
+            task.practice(world, miner);
+            boolean surface = miner.getBlockY() >= o.getY() - 1 && world.isSkyVisible(miner.getBlockPos().up()) && !miner.isTouchingWater();
+            if (!surface) {
+                return null;
+            }
+            boolean hurt = miner.getHealth() < miner.getMaxHealth() - 4;
+            check(name, !hurt, "salió del pozo inundado a la superficie en " + ticks + " ticks, aire mínimo " + lowestAir + "/" + miner.getMaxAir()
+                    + ", vida " + (int) miner.getHealth() + "/" + (int) miner.getMaxHealth() + "; " + state());
+            return !hurt;
+        }
+
+        @Override
+        String state() {
+            return "en " + miner.getBlockPos().toShortString() + ", haciendo: " + Retina.memory(miner).doing() + ", aire " + miner.getAir()
+                    + ", en el agua: " + miner.isTouchingWater() + ", piedra " + miner.getInventory().count(Items.COBBLESTONE) + ", comida " + task.food();
+        }
+
+        @Override
+        void cleanup() {
+            miner.discard();
+        }
+    }
+
+    // ------------------------------------------------------------------ talking
+
+    /**
+     * With no internet at all: the villager's own mind understands plain orders and questions and carries them
+     * out, the same way it does when a language model speaks for it.
+     */
+    private static final class IaLocal extends Scenario {
+        private final VillagerEntityMCA v;
+        private final net.minecraft.server.network.ServerPlayerEntity p;
+
+        IaLocal(ServerWorld world) {
+            super("ia-local", world, 200);
+            BlockPos o = new BlockPos(3500, 100, 0);
+            load(world, o, 8);
+            fill(world, o.add(-5, -1, -5), o.add(5, -1, 5), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-5, 0, -5), o.add(5, 4, 5), Blocks.AIR.getDefaultState());
+            v = villager(world, o, Direction.EAST, "Rosa Mente");
+            p = fakePlayer(world, "Prueba_IA", Vec3d.ofBottomCenter(o.east(3)));
+            v.getInventory().addStack(new ItemStack(Items.BREAD, 5));
+            v.getInventory().addStack(new ItemStack(Items.IRON_INGOT, 3));
+        }
+
+        private String say(String msg) {
+            String answer = new net.mca.entity.ai.chatAI.OpenAIChatAI().answer(p, v, msg).orElse("");
+            MCA.LOGGER.info("PRUEBA ia-local: «" + msg + "» -> «" + answer + "»");
+            return answer;
+        }
+
+        @Override
+        Boolean step() {
+            if (ticks < 40) {
+                return null;
+            }
+            net.mca.entity.ai.chatAI.Cerebros.OFFLINE.set(true);
+            try {
+                String hello = say("Hola Rosa, sígueme por favor");
+                boolean follows = v.getVillagerBrain().getMoveState() == MoveState.FOLLOW;
+                say("quédate aquí");
+                boolean stays = v.getVillagerBrain().getMoveState() == MoveState.STAY;
+                String gave = say("dame 2 lingotes de hierro");
+                boolean handed = v.getInventory().count(Items.IRON_INGOT) == 1;
+                String bag = say("¿qué tienes en la mochila?");
+                boolean knowsBag = bag.contains("pan") && bag.contains("lingote");
+                String mine = say("busca diamantes");
+                boolean mining = v.getVillagerBrain().getCurrentJob() == net.mca.entity.ai.Chore.PROSPECT
+                        && "diamond".equals(ProspectingTask.wanted(v));
+                v.getVillagerBrain().abandonJob();
+                v.getVillagerBrain().setMoveState(MoveState.STAY, null);
+                String english = say("what are you doing?");
+                boolean inEnglish = english.contains("waiting") || english.contains("I'm") || english.contains("Nothing");
+                String lost = say("dime algo bonito");
+                boolean helps = lost.contains("Puedo seguirte");
+                boolean passed = !hello.isEmpty() && follows && stays && handed && gave.contains("hierro") && knowsBag && mining
+                        && !mine.isEmpty() && inEnglish && helps;
+                check(name, passed, "sin internet: me sigue " + follows + ", se queda " + stays + ", me dio 2 lingotes " + handed
+                        + " («" + gave + "»), sabe lo que lleva " + knowsBag + ", va a minar buscando diamantes " + mining
+                        + ", contesta en inglés " + inEnglish + ", si no entiende dice lo que sabe hacer " + helps);
+                return passed;
+            } finally {
+                net.mca.entity.ai.chatAI.Cerebros.OFFLINE.set(false);
+                net.mca.entity.ai.chatAI.OpenAIChatAI.forget(v.getUuid());
+            }
+        }
+
+        @Override
+        String state() {
+            return "movimiento " + v.getVillagerBrain().getMoveState() + ", trabajo " + v.getVillagerBrain().getCurrentJob();
+        }
+
+        @Override
+        void cleanup() {
+            v.discard();
+        }
+    }
+
+    /**
+     * The free minds, from a real server on the internet: each one is asked once and the log says which answered;
+     * then a real conversation and an order only a language model would understand.
+     */
+    private static final class IaRed extends Scenario {
+        private static final String SYSTEM = "Eres un aldeano de Minecraft. Responde SOLO con un JSON {\"message\": \"lo que dices\", "
+                + "\"optionalCommand\": \"\", \"argument\": \"\"}. Comandos: follow-player (seguir al jugador), stay-here (quedarse).";
+        private final VillagerEntityMCA v;
+        private final net.minecraft.server.network.ServerPlayerEntity p;
+        private java.util.concurrent.CompletableFuture<Map<String, String>> probe;
+        private java.util.concurrent.CompletableFuture<String> chat;
+        private java.util.concurrent.CompletableFuture<String> order;
+        private String minds = "";
+        private String chatMind = "";
+
+        IaRed(ServerWorld world) {
+            super("ia-red", world, 3000);
+            BlockPos o = new BlockPos(3600, 100, 0);
+            load(world, o, 8);
+            fill(world, o.add(-5, -1, -5), o.add(5, -1, 5), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-5, 0, -5), o.add(5, 4, 5), Blocks.AIR.getDefaultState());
+            v = villager(world, o, Direction.EAST, "Tomás Red");
+            p = fakePlayer(world, "Tropeles_CI", Vec3d.ofBottomCenter(o.east(3)));
+            v.getInventory().addStack(new ItemStack(Items.BREAD, 5));
+            v.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+        }
+
+        private java.util.concurrent.CompletableFuture<String> talk(String msg) {
+            return java.util.concurrent.CompletableFuture.supplyAsync(() -> new net.mca.entity.ai.chatAI.OpenAIChatAI().answer(p, v, msg).orElse(""))
+                    .exceptionally(e -> {
+                        MCA.LOGGER.error("PRUEBA ia-red: excepción", e);
+                        return "";
+                    });
+        }
+
+        @Override
+        Boolean step() {
+            if (ticks < 40) {
+                return null;
+            }
+            if (probe == null) {
+                probe = java.util.concurrent.CompletableFuture.supplyAsync(() -> net.mca.entity.ai.chatAI.Cerebros.probe("Tropeles_CI", SYSTEM, "Hola, sígueme por favor"))
+                        .exceptionally(e -> Map.of("error", e.toString()));
+                return null;
+            }
+            if (!probe.isDone()) {
+                return null;
+            }
+            if (chat == null) {
+                Map<String, String> results = probe.join();
+                results.forEach((mind, how) -> MCA.LOGGER.info("PRUEBA ia-red mente " + mind + ": " + how));
+                minds = results.entrySet().stream().filter(e -> e.getValue().startsWith("ok")).map(Map.Entry::getKey).toList().toString();
+                chat = talk("Hola Tomás, ¿cómo estás? ¿Qué llevas en la mochila?");
+                return null;
+            }
+            if (!chat.isDone()) {
+                return null;
+            }
+            if (order == null) {
+                chatMind = net.mca.entity.ai.chatAI.Cerebros.last(v.getUuid());
+                MCA.LOGGER.info("PRUEBA ia-red charla con " + chatMind + ": «" + chat.join() + "»");
+                order = talk("¿Te animas a acompañarme un rato por el bosque?");
+                return null;
+            }
+            if (!order.isDone()) {
+                return null;
+            }
+            String orderMind = net.mca.entity.ai.chatAI.Cerebros.last(v.getUuid());
+            boolean follows = v.getVillagerBrain().getMoveState() == MoveState.FOLLOW;
+            MCA.LOGGER.info("PRUEBA ia-red orden con " + orderMind + ": «" + order.join() + "», lo sigue: " + follows);
+            boolean passed = !chat.join().isBlank() && !order.join().isBlank();
+            check(name, passed, "mentes gratis que respondieron desde el servidor: " + minds + "; charla con " + chatMind
+                    + "; orden que solo entiende la IA («acompañarme») con " + orderMind + ", lo sigue: " + follows);
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "sonda " + (probe != null && probe.isDone()) + ", charla " + (chat != null && chat.isDone()) + ", orden " + (order != null && order.isDone());
+        }
+
+        @Override
+        void cleanup() {
+            v.discard();
+            net.mca.entity.ai.chatAI.OpenAIChatAI.forget(v.getUuid());
         }
     }
 }

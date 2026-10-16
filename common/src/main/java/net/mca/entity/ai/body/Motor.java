@@ -67,7 +67,7 @@ public final class Motor {
     public Result step(ServerWorld world, VillagerEntityMCA villager, BlockPos goal, boolean dig, boolean build) {
         villager.getBrain().forget(net.minecraft.entity.ai.brain.MemoryModuleType.WALK_TARGET);
         BlockPos feet = villager.getBlockPos();
-        if (villager.isOnGround() && Mining.passable(world, feet) && !Mining.heat(world, feet)) {
+        if (villager.isOnGround() && Mining.passable(world, feet) && !Mining.heat(world, feet) && !Agua.water(world, feet)) {
             if (safeTrail.isEmpty() || !safeTrail.peekLast().equals(feet)) {
                 safeTrail.addLast(feet.toImmutable());
                 if (safeTrail.size() > 16) {
@@ -80,6 +80,22 @@ public final class Motor {
         }
         if (plugLava(world, villager)) {
             return Result.RUNNING;
+        }
+        // water: shut it out of the way before going on, and climb out of it when swimming in a hole
+        if (keepDry(world, villager, stand == null ? java.util.List.of() : route(feet))) {
+            return Result.RUNNING;
+        }
+        if (stand != null && Agua.overwhelmed(villager, world.getTime()) && route(feet).stream().anyMatch(cell -> Agua.water(world, cell))) {
+            // more water than blocks to stop it: this way is drowned, take another
+            reset(world, villager);
+            return Result.BLOCKED;
+        }
+        if (villager.isSubmergedInWater()) {
+            villager.getJumpControl().setActive();
+            if (villager.getAir() < villager.getMaxAir() / 3 && !safeTrail.isEmpty()) {
+                // out of breath and nothing more to block: back to the last dry spot
+                return retreat(world, villager);
+            }
         }
         if (villager.isInsideWall() && dig) {
             BlockPos head = BlockPos.ofFloored(villager.getEyePos());
@@ -96,7 +112,8 @@ public final class Motor {
             return Result.ARRIVED;
         }
 
-        if (stand == null || feet.equals(stand) && villager.isOnGround() && kind != Kind.PILLAR
+        boolean footing = villager.isOnGround() || villager.isTouchingWater();
+        if (stand == null || feet.equals(stand) && footing && kind != Kind.PILLAR
                 || kind == Kind.PILLAR && pillarFrom != null && feet.getY() > pillarFrom.getY() && villager.isOnGround()) {
             plan(world, villager, feet, goal, build);
             stepTicks = 0;
@@ -168,10 +185,45 @@ public final class Motor {
         };
         Vec3d target = Vec3d.ofBottomCenter(stand);
         villager.getMoveControl().moveTo(target.x, target.y, target.z, 0.6);
-        if (kind == Kind.UP && villager.isOnGround() && villager.horizontalCollision) {
+        if (kind == Kind.UP && (villager.isOnGround() || villager.isTouchingWater()) && villager.horizontalCollision) {
             villager.getJumpControl().setActive();
         }
         return Result.RUNNING;
+    }
+
+    /**
+     * Blocks water off the body and the way ahead (see {@link Agua}). True while busy with it this tick. Callers
+     * that work in place (hitting an ore in front of them) use it too.
+     */
+    public boolean keepDry(ServerWorld world, VillagerEntityMCA villager, java.util.Collection<BlockPos> path) {
+        if (!Agua.seal(world, villager, path)) {
+            return false;
+        }
+        doing = "tapando el agua";
+        villager.getNavigation().stop();
+        return true;
+    }
+
+    /**
+     * For work done standing still (hitting an ore in front): plugs lava or water coming out of what it just
+     * broke and keeps water off the body. True while busy with it this tick.
+     */
+    public boolean tend(ServerWorld world, VillagerEntityMCA villager) {
+        return plugLava(world, villager) || keepDry(world, villager, java.util.List.of());
+    }
+
+    /** It broke {@code cell} by hand outside of a step: picks up the drop and watches the hole for a moment. */
+    public void broke(ServerWorld world, VillagerEntityMCA villager, BlockPos cell) {
+        afterBreak(world, villager, cell);
+    }
+
+    /** The cells the body passes through on the step being made. */
+    private java.util.List<BlockPos> route(BlockPos feet) {
+        java.util.List<BlockPos> cells = new java.util.ArrayList<>(java.util.List.of(clearance(feet)));
+        if (stand != null && !cells.contains(stand)) {
+            cells.add(stand);
+        }
+        return cells;
     }
 
     private void plan(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, BlockPos goal, boolean build) {
@@ -278,7 +330,7 @@ public final class Motor {
     private void afterBreak(ServerWorld world, VillagerEntityMCA villager, BlockPos cell) {
         Hands.collect(world, villager, cell, 2.5);
         justBroken = cell.toImmutable();
-        plugTicks = 6;
+        plugTicks = 12;
         // look into the hole: what was behind it is now in view
         Retina.peek(world, villager, cell);
     }
@@ -295,16 +347,25 @@ public final class Motor {
         VisualMemory memory = Retina.memory(villager);
         BlockPos hole = justBroken;
         boolean lava = world.getFluidState(hole).isIn(FluidTags.LAVA) || Mining.lavaSeen(memory, hole);
-        if (!lava) {
+        // water pouring into the hole it just opened, underground: plug it like lava, it is only less deadly
+        // (a hole on its own way only when it filled up deep: shallow running water there is just walked through)
+        boolean water = !lava && Agua.water(world, hole) && !world.isSkyVisible(hole) && !Agua.body(villager).contains(hole)
+                && (Agua.deep(world, hole) || !route(villager.getBlockPos()).contains(hole));
+        if (!lava && !water) {
             return false;
         }
-        doing = "tapando lava";
+        doing = lava ? "tapando lava" : "tapando el agua";
         ItemStack block = Hands.buildingBlock(villager);
-        BlockPos plug = world.getFluidState(hole).isIn(FluidTags.LAVA) || Mining.passable(world, hole) ? hole : null;
+        BlockPos plug = world.getFluidState(hole).isIn(FluidTags.LAVA) || water || Mining.passable(world, hole) ? hole : null;
         if (plug != null && !block.isEmpty() && Hands.place(world, villager, plug, block)) {
             justBroken = null;
             reset(world, villager);
             return true;
+        }
+        if (water) {
+            // nothing to plug it with: the water is no danger, the way just gets wet
+            justBroken = null;
+            return false;
         }
         // could not plug it: step back the way it came
         retreat(world, villager);

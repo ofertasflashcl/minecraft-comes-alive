@@ -6,6 +6,7 @@ import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.DistressCalls;
 import net.mca.entity.ai.Threats;
 import net.mca.entity.ai.WorkTools;
+import net.mca.entity.ai.body.Agua;
 import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.body.Hands;
 import net.mca.entity.ai.body.Mining;
@@ -87,6 +88,41 @@ public class ProspectingTask extends AbstractChoreTask {
     private int homeDir;
     private BlockPos homeChest;
     private boolean hungryTrip;
+    private BlockPos stuckAt;
+    private int stuckItems = -1;
+    private int stuckTicks;
+    private int stuckRounds;
+
+    /** The ore each miner was asked to look for first ("busca diamantes"). */
+    private static final Map<VillagerEntityMCA, String> WANTED = new java.util.WeakHashMap<>();
+
+    private static final Map<String, String> ORE_WORDS = Map.ofEntries(
+            Map.entry("diamante", "diamond"), Map.entry("diamantes", "diamond"), Map.entry("diamonds", "diamond"),
+            Map.entry("hierro", "iron"), Map.entry("oro", "gold"), Map.entry("carbon", "coal"), Map.entry("cobre", "copper"),
+            Map.entry("lapislazuli", "lapis"), Map.entry("esmeralda", "emerald"), Map.entry("esmeraldas", "emerald"),
+            Map.entry("emeralds", "emerald"), Map.entry("cuarzo", "quartz"), Map.entry("netherita", "ancient_debris"),
+            Map.entry("netherite", "ancient_debris"), Map.entry("escombros", "ancient_debris"), Map.entry("debris", "ancient_debris")
+    );
+
+    /** Asks {@code villager} to go for this ore first; empty or unknown clears the wish. */
+    public static void want(VillagerEntityMCA villager, @org.jetbrains.annotations.Nullable String ore) {
+        String word = ore == null ? "" : java.text.Normalizer.normalize(ore, java.text.Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "").toLowerCase(java.util.Locale.ROOT).trim();
+        for (String part : word.split("[^a-z_]+")) {
+            String key = ORE_WORDS.getOrDefault(part, part);
+            if (java.util.List.of("diamond", "iron", "gold", "coal", "copper", "redstone", "lapis", "emerald", "quartz", "ancient_debris").contains(key)) {
+                WANTED.put(villager, key);
+                return;
+            }
+        }
+        WANTED.remove(villager);
+    }
+
+    /** The ore it was asked to look for first, or null. */
+    @org.jetbrains.annotations.Nullable
+    public static String wanted(VillagerEntityMCA villager) {
+        return WANTED.get(villager);
+    }
 
     public ProspectingTask() {
         super(ImmutableMap.of(
@@ -173,6 +209,9 @@ public class ProspectingTask extends AbstractChoreTask {
             }
         }
 
+        if (watchdog(world, villager)) {
+            return;
+        }
         switch (phase) {
             case SEEK -> seek(world, villager);
             case SHELTER_DIG -> shelterDig(world, villager);
@@ -201,7 +240,59 @@ public class ProspectingTask extends AbstractChoreTask {
         if (gearUp(world, villager) || !equipPick(villager)) {
             return;
         }
+        if (watchdog(world, villager)) {
+            return;
+        }
         seek(world, villager);
+    }
+
+    /**
+     * A player who notices they have not got anywhere for half a minute stops and tries something else. Nothing
+     * moved and nothing new in the bag for that long: drop the plan, forget that ore, turn; the third time in a
+     * row, head up and home and start over from there. True when it changed course this tick.
+     */
+    private boolean watchdog(ServerWorld world, VillagerEntityMCA villager) {
+        if (phase != Phase.SEEK || !progreso.idle()) {
+            stuckTicks = 0;
+            stuckAt = null;
+            return false;
+        }
+        if ((villager.age % 20) != 0) {
+            return false;
+        }
+        BlockPos feet = villager.getBlockPos();
+        int items = 0;
+        for (int i = 0; i < villager.getInventory().size(); i++) {
+            items += villager.getInventory().getStack(i).getCount();
+        }
+        if (stuckAt == null || !feet.isWithinDistance(stuckAt, 1.5) || items != stuckItems) {
+            if (stuckAt != null && !feet.isWithinDistance(stuckAt, 3)) {
+                stuckRounds = 0;
+            }
+            stuckAt = feet;
+            stuckItems = items;
+            stuckTicks = 0;
+            return false;
+        }
+        stuckTicks += 20;
+        if (stuckTicks < 600) {
+            return false;
+        }
+        stuckTicks = 0;
+        stuckRounds++;
+        motor.reset(world, villager);
+        plan.clear();
+        if (ore != null) {
+            ignore(ore, world.getTime());
+            ore = null;
+        }
+        tunnelDir = (tunnelDir + (villager.getRandom().nextBoolean() ? 1 : 3)) & 3;
+        Retina.memory(villager).doing("atascado: cambia de rumbo", world.getTime());
+        if (stuckRounds >= 3) {
+            stuckRounds = 0;
+            beginHome(world, villager, false);
+        }
+        return true;
     }
 
     /** For the in-game checks: how full its food bar is, and where home is. */
@@ -478,15 +569,18 @@ public class ProspectingTask extends AbstractChoreTask {
             BlockPos feet = villager.getBlockPos();
             boolean underFeet = ore.equals(feet.down());
             if (!underFeet && Retina.visibleFace(world, villager, ore, Retina.BLOCK_REACH) != null) {
+                if (motor.tend(world, villager)) {
+                    memory.doing(motor.doing(), now);
+                    return;
+                }
                 memory.doing(String.format("picando %s a %.1f bloques", name, Math.sqrt(villager.getEyePos().squaredDistanceTo(ore.toCenterPos()))), now);
                 villager.getNavigation().stop();
                 int r = motor.breaker().tick(world, villager, ore);
                 if (r == Hands.Breaker.DONE) {
-                    Hands.collect(world, villager, ore, 2.5);
+                    motor.broke(world, villager, ore);
                     if (state != null) {
                         announceOre(world, state);
                     }
-                    Retina.peek(world, villager, ore);
                     ore = null;
                 } else if (r == Hands.Breaker.FAILED) {
                     ignore(ore, now);
@@ -496,6 +590,9 @@ public class ProspectingTask extends AbstractChoreTask {
             }
             memory.doing(String.format("yendo hacia %s en %d %d %d", name, ore.getX(), ore.getY(), ore.getZ()), now);
             Motor.Result result = motor.step(world, villager, ore, true, true);
+            if ("tapando el agua".equals(motor.doing())) {
+                memory.doing("tapando el agua camino a " + name, now);
+            }
             if (result == Motor.Result.BLOCKED) {
                 if (++oreFails > 3) {
                     ignore(ore, now);
@@ -515,6 +612,9 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         memory.doing(villager.getY() > targetDepth(world) + 2 ? "bajando en escalera a buscar minerales" : "minando en ramas", now);
         Motor.Result result = motor.step(world, villager, goal, true, true);
+        if ("tapando el agua".equals(motor.doing())) {
+            memory.doing("tapando el agua que entra al túnel", now);
+        }
         if (result == Motor.Result.ARRIVED) {
             plan.pollFirst();
         } else if (result == Motor.Result.BLOCKED) {
@@ -544,6 +644,17 @@ public class ProspectingTask extends AbstractChoreTask {
             }
         }
         Direction forward = Direction.fromHorizontal(tunnelDir);
+        if (wetAhead(villager, feet, forward)) {
+            // the eye saw water that way and there are not enough blocks to wall it off: another way
+            for (int turn = 1; turn <= 3; turn++) {
+                Direction other = Direction.fromHorizontal((tunnelDir + turn) & 3);
+                if (!wetAhead(villager, feet, other)) {
+                    tunnelDir = other.getHorizontal();
+                    forward = other;
+                    break;
+                }
+            }
+        }
         if (feet.getY() > depth + 2) {
             int steps = Math.min(4, feet.getY() - depth);
             plan.add(feet.offset(forward, steps).down(steps));
@@ -561,6 +672,32 @@ public class ProspectingTask extends AbstractChoreTask {
         plan.add(junction);
     }
 
+    /** The eye remembers water in the next few cells that way, and the bag is short of blocks to wall it off. */
+    private boolean wetAhead(VillagerEntityMCA villager, BlockPos feet, Direction forward) {
+        if (buildingBlocks(villager) >= 16) {
+            return false;
+        }
+        VisualMemory memory = Retina.memory(villager);
+        for (int k = 1; k <= 4; k++) {
+            BlockPos cell = feet.offset(forward, k);
+            if (Agua.seenNear(memory, cell) || Agua.seenNear(memory, cell.down()) || Agua.seenNear(memory, cell.up())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int buildingBlocks(VillagerEntityMCA villager) {
+        int count = 0;
+        for (int i = 0; i < villager.getInventory().size(); i++) {
+            ItemStack stack = villager.getInventory().getStack(i);
+            if (Hands.isBuildingBlock(stack)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
     private boolean stillOre(VisualMemory memory, BlockPos pos) {
         BlockState state = memory.stateAt(pos);
         return state != null && Mining.isOre(state);
@@ -572,16 +709,24 @@ public class ProspectingTask extends AbstractChoreTask {
         BlockPos feet = villager.getBlockPos();
         BlockPos best = null;
         double bestScore = Double.MAX_VALUE;
+        boolean lowOnBlocks = buildingBlocks(villager) < 6;
         boolean needsCoal = villager.getInventory().count(Items.TORCH) < 4 && villager.getInventory().count(Items.COAL) + villager.getInventory().count(Items.CHARCOAL) == 0;
         for (VisualMemory.SeenBlock seen : memory.blocks(s -> Mining.isOre(s.state))) {
             if (isIgnored(seen.pos, now) || !tool.isSuitableFor(seen.state)) {
                 continue;
+            }
+            if (lowOnBlocks && Agua.seenNear(memory, seen.pos)) {
+                continue; // ore in the water and nothing to wall it off with
             }
             double distance = Math.sqrt(seen.pos.getSquaredDistance(feet));
             if (distance > ORE_SEARCH_RADIUS) {
                 continue;
             }
             double score = distance - Mining.oreValue(seen.state) / 10.0;
+            String wish = WANTED.get(villager);
+            if (wish != null && net.minecraft.registry.Registries.BLOCK.getId(seen.state.getBlock()).getPath().contains(wish)) {
+                score -= 25; // what it was asked for comes first
+            }
             if (needsCoal && (seen.state.isOf(Blocks.COAL_ORE) || seen.state.isOf(Blocks.DEEPSLATE_COAL_ORE))) {
                 score -= 12; // no torches and no coal: coal first, a player would
             }

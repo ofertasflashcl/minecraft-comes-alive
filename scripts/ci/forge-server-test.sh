@@ -44,7 +44,7 @@ if [ -f ../scripts/ci/commands.txt ] && grep -q 'mca-prueba resumen' ../scripts/
   line=$(grep -o 'PRUEBA RESUMEN [0-9]*/[0-9]*' logs/latest.log | tail -1)
   [ -n "$line" ] || { echo "The in-game checks never reported"; exit 1; }
   ok=${line#PRUEBA RESUMEN }; ok_n=${ok%/*}; all_n=${ok#*/}
-  [ "$ok_n" = "$all_n" ] && [ "$all_n" -ge 16 ] || { echo "Checks passed: $ok"; exit 1; }
+  [ "$ok_n" = "$all_n" ] && [ "$all_n" -ge 21 ] || { echo "Checks passed: $ok"; exit 1; }
 fi
 grep -nE 'Exception in server tick|Encountered an unexpected exception' logs/latest.log && exit 1
 echo "Server booted and stopped cleanly with MCA loaded"

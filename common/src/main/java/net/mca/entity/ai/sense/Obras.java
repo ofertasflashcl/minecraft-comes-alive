@@ -6,12 +6,23 @@ import net.mca.server.world.data.Building;
 import net.mca.server.world.data.TropelesMundo;
 import net.mca.server.world.data.Village;
 import net.mca.server.world.data.VillageManager;
+import net.minecraft.block.AttachedStemBlock;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.CocoaBlock;
+import net.minecraft.block.CropBlock;
+import net.minecraft.block.FarmlandBlock;
+import net.minecraft.block.GourdBlock;
 import net.minecraft.block.LeavesBlock;
+import net.minecraft.block.NetherWartBlock;
+import net.minecraft.block.StemBlock;
+import net.minecraft.block.SweetBerryBushBlock;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.world.World;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayDeque;
@@ -28,13 +39,14 @@ import java.util.WeakHashMap;
  * the ground and carries leaves the world grew (leaves a player places are marked persistent and do not
  * count); nothing made touches it. A building is anything a player placed, anything inside a village
  * building, any made block (planks, glass, doors, fences, bricks, cobblestone, torches, crops...) and the
- * natural blocks that sit between made ones, like the dirt under a wooden floor. A villager only breaks
- * natural things and what it placed itself.
+ * natural blocks that sit between made ones, like the dirt under a wooden floor. Crops and farmland are a
+ * field, never in the way and never something to dig. A villager only breaks natural things and what it
+ * placed itself.
  */
 public final class Obras {
     /** How a block reads to the eye. */
     public enum Kind {
-        TREE("árbol"), BUILDING("construcción"), PLAYER_BUILT("construcción de un jugador"), OWN("puesto por él mismo"), NATURE("natural");
+        TREE("árbol"), BUILDING("construcción"), PLAYER_BUILT("construcción de un jugador"), OWN("puesto por él mismo"), CROP("cultivo"), NATURE("natural");
 
         public final String label;
 
@@ -87,6 +99,44 @@ public final class Obras {
         }
         // logs are judged as part of a whole trunk, see tree()
         return state.isIn(BlockTags.LOGS);
+    }
+
+    /**
+     * Something planted or tended: crops, stems and the melons and pumpkins hanging from them, berry bushes,
+     * cocoa, nether wart, and farmland. Seen at a glance by the shape, like a player does.
+     */
+    public static boolean crop(BlockState state) {
+        Block block = state.getBlock();
+        return block instanceof CropBlock || block instanceof StemBlock || block instanceof AttachedStemBlock
+                || block instanceof FarmlandBlock || block instanceof NetherWartBlock || block instanceof SweetBerryBushBlock
+                || block instanceof CocoaBlock;
+    }
+
+    /** A crop at {@code pos}, the ground it grows in, or a melon or pumpkin on its stem. */
+    public static boolean cropAt(World world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        if (crop(state)) {
+            return true;
+        }
+        BlockState above = world.getBlockState(pos.up());
+        if (crop(above) && !(above.getBlock() instanceof CocoaBlock)) {
+            return true; // the soil a crop grows in
+        }
+        if (state.getBlock() instanceof GourdBlock) {
+            for (Direction dir : Direction.Type.HORIZONTAL) {
+                BlockState near = world.getBlockState(pos.offset(dir));
+                if (near.getBlock() instanceof AttachedStemBlock && near.get(AttachedStemBlock.FACING) == dir.getOpposite()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Planted by a player, or growing on ground a player tilled or planted. */
+    public static boolean playersField(ServerWorld world, BlockPos pos) {
+        TropelesMundo mundo = mundo(world);
+        return mundo != null && (mundo.isPlayerPlaced(pos) || mundo.isPlayerPlaced(pos.down()));
     }
 
     /** A made block: anything that is not ground, rock, plant or tree. */
@@ -202,8 +252,11 @@ public final class Obras {
         TropelesMundo mundo = mundo(world);
         if (mundo != null) {
             UUID by = mundo.placedBy(pos);
-            if (villager != null && villager.getUuid().equals(by)) {
+            if (villager != null && villager.getUuid().equals(by) && !cropAt(world, pos)) {
                 return Kind.OWN;
+            }
+            if (cropAt(world, pos)) {
+                return Kind.CROP;
             }
             if (mundo.isPlayerPlaced(pos)) {
                 return Kind.PLAYER_BUILT;
@@ -211,6 +264,9 @@ public final class Obras {
             if (by != null) {
                 return Kind.BUILDING; // another villager's
             }
+        }
+        if (cropAt(world, pos)) {
+            return Kind.CROP;
         }
         if (state.isIn(BlockTags.LOGS)) {
             return tree(world, pos) && !inVillageBuilding(world, pos) ? Kind.TREE : Kind.BUILDING;

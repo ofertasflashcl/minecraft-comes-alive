@@ -118,6 +118,16 @@ public final class Config extends CommonConfig {
     public boolean villagerChatAIUseLongTermMemory = false;
     public boolean villagerChatAIUseSharedLongTermMemory = false;
     public boolean villagerChatAIIncludeSessionInformation = false;
+    /**
+     * Tropeles: the free minds asked in turn until one answers. "custom" is villagerChatAIEndpoint when it is not
+     * the default one; "player2" and "ollama" run on your own computer (skipped quietly when not running);
+     * "conczin" is MCA's own service; "llm7", "chat" (ch.at) and "pollinations" are free public ones that need no
+     * key. When none answers, the villager's own offline mind does, so it always talks and always obeys.
+     */
+    public List<String> tropelesMinds = List.of("custom", "player2", "ollama", "conczin", "llm7", "chat", "pollinations");
+    public String tropelesOllamaUrl = "http://127.0.0.1:11434/";
+    /** Empty: the first model Ollama has installed. */
+    public String tropelesOllamaModel = "";
 
     //InworldAI
     public String inworldAIToken = "";
