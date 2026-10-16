@@ -308,6 +308,11 @@ public class ProspectingTask extends AbstractChoreTask {
         return phase == Phase.SEEK;
     }
 
+    /** For the in-game checks: the ore it is going for, and its phase. */
+    public String debug() {
+        return phase + (ore == null ? "" : " hacia " + ore.toShortString()) + (plan.isEmpty() ? "" : " plan " + plan.peekFirst().toShortString());
+    }
+
     /** Raw iron in its furnace right now. */
     public boolean cooking() {
         return progreso.cooking();

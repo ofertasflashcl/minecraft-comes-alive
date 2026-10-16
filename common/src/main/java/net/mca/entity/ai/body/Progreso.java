@@ -120,6 +120,7 @@ public final class Progreso {
     /** When collecting, take everything and the furnace too: it is leaving. */
     private boolean packFurnace;
     private int collectTicks;
+    private int packTicks;
     private boolean wantChest;
 
     /** Asks for a chest to be made (from 8 planks at a table) next time it gears up. */
@@ -588,6 +589,11 @@ public final class Progreso {
         if (!tableInReach(world, villager)) {
             SimpleInventory inv = villager.getInventory();
             if (count(inv, Mat.TABLE) == 0) {
+                if (goal != FURNACE && shortLogs(inv, goal, true) > 0) {
+                    // a table now would leave too little wood for what it is for
+                    step = Step.WOOD;
+                    return;
+                }
                 prepareWood(villager, CRAFTING_TABLE, false);
                 if (!craft(world, villager, CRAFTING_TABLE, (k, p) -> {
                 })) {
@@ -645,9 +651,9 @@ public final class Progreso {
         finishCrafting();
     }
 
-    /** Whether it has (or can saw from its logs) the planks for a chest. */
+    /** Whether it has (or can saw from its logs) the planks for a chest, and for the table to make it on. */
     public static boolean canMakeChest(SimpleInventory inv) {
-        return affordableWithWood(inv, CHEST);
+        return hasNonWood(inv, CHEST) && shortLogs(inv, CHEST, true) == 0;
     }
 
     private static boolean affordableWithWood(SimpleInventory inv, Recipe recipe) {
@@ -730,9 +736,18 @@ public final class Progreso {
         Retina.memory(villager).doing("recogiendo " + world.getBlockState(target).getBlock().getName().getString(), world.getTime());
         int r = breaker.tick(world, villager, target);
         if (r == Hands.Breaker.DONE) {
+            packTicks = 0;
             Hands.collect(world, villager, target, 2.5);
         } else if (r == Hands.Breaker.FAILED) {
-            // out of reach now; leave it where it stands
+            // out of reach: a player walks back for a table or a furnace that is still close
+            if (villager.getPos().distanceTo(Vec3d.ofCenter(target)) < 12 && ++packTicks < 300) {
+                if ((packTicks % 20) == 1 || villager.getNavigation().isIdle()) {
+                    villager.getNavigation().startMovingTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.6);
+                }
+                return;
+            }
+            packTicks = 0;
+            // too far now; leave it where it stands
             if (target.equals(furnace) && !cooking) {
                 furnace = null;
             } else {

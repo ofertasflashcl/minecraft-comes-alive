@@ -1009,6 +1009,9 @@ public final class Pruebas {
                 fail(name, "el minero murió; " + state());
                 return Boolean.FALSE;
             }
+            if (ticks % 200 == 0) {
+                MCA.LOGGER.info("PRUEBA hogar t=" + ticks + ": " + task.debug() + ", " + state());
+            }
             if (!task.atWork() || ticks < 20) {
                 task.practice(world, miner);
                 return null;
@@ -1154,7 +1157,7 @@ public final class Pruebas {
             super("agua-tunel", world, 2400);
             origin = new BlockPos(3300, 100, 0);
             load(world, origin, 24);
-            fill(world, origin.add(-3, -5, -3), origin.add(14, 4, 3), Blocks.STONE.getDefaultState());
+            fill(world, origin.add(-6, -12, -8), origin.add(16, 4, 8), Blocks.STONE.getDefaultState());
             fill(world, origin.add(0, 0, 0), origin.add(9, 1, 0), Blocks.AIR.getDefaultState());
             for (int x = 0; x <= 9; x += 3) {
                 world.setBlockState(origin.add(x, 2, 0), Blocks.GLOWSTONE.getDefaultState(), 2);
@@ -1170,6 +1173,7 @@ public final class Pruebas {
             face(miner, -90.0F, 0.0F);
             // it looks down the corridor and sees the diamond, like in "minar"
             Retina.lookAll(world, miner);
+            net.mca.entity.ai.body.Agua.trace = miner;
         }
 
         @Override
@@ -1183,6 +1187,9 @@ public final class Pruebas {
             }
             if (miner.isSubmergedInWater()) {
                 wetTicks++;
+            }
+            if (ticks % 100 == 0) {
+                MCA.LOGGER.info("PRUEBA agua-tunel t=" + ticks + ": " + task.debug() + ", " + state());
             }
             miner.getNavigation().stop();
             task.practice(world, miner);
@@ -1209,6 +1216,7 @@ public final class Pruebas {
         @Override
         void cleanup() {
             miner.discard();
+            net.mca.entity.ai.body.Agua.trace = null;
         }
     }
 

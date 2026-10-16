@@ -39,11 +39,21 @@ public final class Agua {
     /** A player clicks a few times a second, not every tick. */
     private static final long GAP_TICKS = 3;
 
+    /** Blocks kept back for pillars and bridges: water is never worth the last of them. */
+    private static final int KEEP = 8;
+    /** A cell it filled is not filled again for this long: if the water came back, filling it does no good. */
+    private static final long REFILL_TICKS = 1200;
+
     private static final class State {
         long lastPlace = Long.MIN_VALUE / 2;
         long windowStart;
         int spent;
+        final Map<BlockPos, Long> filled = new java.util.HashMap<>();
     }
+
+    /** For the in-game checks: the villager whose every water block is logged. */
+    @org.jetbrains.annotations.Nullable
+    public static volatile VillagerEntityMCA trace;
 
     private static final Map<VillagerEntityMCA, State> STATES = new WeakHashMap<>();
 
@@ -138,13 +148,25 @@ public final class Agua {
         if (block.isEmpty()) {
             return false;
         }
+        state.filled.values().removeIf(at -> now - at > REFILL_TICKS);
+        BlockPos under = trapped || underOnly ? underFeet(villager) : null;
+        boolean spare = blocks(villager) > KEEP;
+        targets.removeIf(pos -> state.filled.containsKey(pos) || !spare && !pos.equals(under));
+        if (targets.isEmpty()) {
+            return false;
+        }
         if (now - state.lastPlace < GAP_TICKS) {
             return true;
         }
         for (BlockPos target : targets) {
+            String why = target.equals(under) ? "bajo los pies" : source(world, target) ? "fuente" : "agua que cae";
             if (Hands.place(world, villager, target, block)) {
                 state.lastPlace = now;
                 state.spent++;
+                state.filled.put(target.toImmutable(), now);
+                if (trace == villager) {
+                    net.mca.MCA.LOGGER.info("PRUEBA agua: tapó {} ({}) desde {}", target.toShortString(), why, villager.getBlockPos().toShortString());
+                }
                 return true;
             }
         }
@@ -191,6 +213,22 @@ public final class Agua {
         return null;
     }
 
+    private static BlockPos underFeet(VillagerEntityMCA villager) {
+        int lowest = MathHelper.floor(villager.getBoundingBox().minY + 1.0E-3);
+        return BlockPos.ofFloored(villager.getX(), lowest - 1, villager.getZ());
+    }
+
+    private static int blocks(VillagerEntityMCA villager) {
+        int count = 0;
+        for (int i = 0; i < villager.getInventory().size(); i++) {
+            ItemStack stack = villager.getInventory().getStack(i);
+            if (Hands.isBuildingBlock(stack)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
     /** In water in a hole three or more sides walled. */
     private static boolean shaft(World world, VillagerEntityMCA villager) {
         return villager.isTouchingWater() && walls(world, villager.getBlockPos()) >= 3;
@@ -212,8 +250,7 @@ public final class Agua {
         List<BlockPos> targets = new ArrayList<>();
         if (trapped || underOnly) {
             // the water under its feet becomes the floor it climbs on
-            int lowest = MathHelper.floor(villager.getBoundingBox().minY + 1.0E-3);
-            BlockPos under = BlockPos.ofFloored(villager.getX(), lowest - 1, villager.getZ());
+            BlockPos under = underFeet(villager);
             if (water(world, under) && !body.contains(under)) {
                 targets.add(under);
             }
