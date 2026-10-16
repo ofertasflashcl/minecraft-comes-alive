@@ -1,5 +1,6 @@
 package net.mca.entity.ai.brain.tasks.chore;
 
+import net.mca.entity.ai.sense.Obras;
 import com.google.common.collect.ImmutableMap;
 import com.google.gson.JsonSyntaxException;
 import net.mca.Config;
@@ -136,6 +137,11 @@ public class ChoppingTask extends AbstractChoreTask {
             return false;
         }
 
+        // a trunk the world grew, not the log wall of somebody's cabin
+        if (!Obras.tree(world, origin) || Obras.inVillageBuilding(world, origin)) {
+            return false;
+        }
+
         // check upside continues and valid leaves exist.
         BlockPos.Mutable posUp = origin.mutableCopy(); // copy as mutable for reduce resources
         for (int y = 0; y < Config.getInstance().maxTreeHeight; y++) {
@@ -151,7 +157,8 @@ public class ChoppingTask extends AbstractChoreTask {
         BlockState state;
 
         while ((state = world.getBlockState(pos)).isIn(BlockTags.LOGS)) {
-            if (world.breakBlock(pos, false, villager)) {
+            if (Obras.mayBreak(world, villager, pos) && world.breakBlock(pos, false, villager)) {
+                Obras.broken(world, pos);
                 pos = pos.add(0, 1, 0);
                 villager.getInventory().addStack(new ItemStack(state.getBlock(), 1));
                 stack.damage(1, villager, e -> e.sendEquipmentBreakStatus(e.getDominantSlot()));

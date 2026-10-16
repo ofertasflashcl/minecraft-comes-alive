@@ -21,10 +21,10 @@ import java.util.UUID;
 import java.util.WeakHashMap;
 
 /**
- * The part of test-juego pull 80 that actually sees. A ray leaves the eyes along the head.
- * Glass, panes and bars let it through. Tinted glass and opaque stone stop it. Darkness hides
- * what is not close, unless the villager has night vision. A body that slips out of view is
- * looked for where it was last seen, not through the wall. Someone sneaking is not heard.
+ * Memory of where bodies were last seen, and hearing. Seeing itself is done by
+ * {@link net.mca.entity.ai.sense.Retina}: exact rays against real block shapes, a player's
+ * field of view and reach. A body that slips out of view is looked for where it was last seen,
+ * not through the wall. Someone sneaking is not heard.
  */
 public final class VillagerEyes {
     public static final int GLIMPSE = 10;
@@ -65,27 +65,12 @@ public final class VillagerEyes {
         return gene(viewer.getUuid(), 11, 0.0F, 1.0F);
     }
 
+    /** Exact sight, see {@link net.mca.entity.ai.sense.Retina#canSee}. */
     public static boolean sees(ServerWorld world, LivingEntity viewer, Entity target) {
         if (target == null || target == viewer || !target.isAlive()) {
             return false;
         }
-        Vec3d from = eye(viewer);
-        Vec3d to = new Vec3d(target.getX(), target.getEyeY(), target.getZ());
-        double distance = from.distanceTo(to);
-        int range = radius(viewer);
-        if (distance > range || distance < 0.01) {
-            return distance <= 2.5;
-        }
-        Vec3d forward = direction(viewer.getHeadYaw(), viewer.getPitch());
-        Vec3d toward = to.subtract(from).normalize();
-        double limit = Math.cos(Math.toRadians(fieldOfView(viewer) / 2.0));
-        if (forward.dotProduct(toward) < limit && distance > 2.5) {
-            return false;
-        }
-        if (!lit(world, BlockPos.ofFloored(to), distance, range, nightVision(viewer))) {
-            return false;
-        }
-        return clear(world, from, to);
+        return net.mca.entity.ai.sense.Retina.canSee(world, viewer, target);
     }
 
     /**

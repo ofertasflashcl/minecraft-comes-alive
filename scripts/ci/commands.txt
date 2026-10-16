@@ -1,0 +1,26 @@
+# In-game checks, fed to the server console after it starts (see forge-server-test.sh)
+gamerule doMobSpawning false
+gamerule doDaylightCycle false
+gamerule doWeatherCycle false
+time set 6000
+difficulty easy
+mca-prueba ojo
+mca-prueba minar
+mca-prueba espada
+mca-prueba arco
+mca-prueba progreso
+mca-prueba nombre
+mca-prueba obras
+mca-prueba robo
+mca-prueba regalo
+mca-prueba arco-cerca
+mca-prueba horno
+mca-prueba hogar
+mca-prueba cultivos
+mca-prueba agua-tunel
+mca-prueba agua-pozo
+mca-prueba ia-local
+mca-prueba ia-red
+sleep 200
+mca-prueba resumen
+sleep 2

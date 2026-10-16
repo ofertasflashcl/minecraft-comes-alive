@@ -117,6 +117,7 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
     private final BreedableRelationship relations = new BreedableRelationship(this);
     private final VillagerCommandHandler interactions = new VillagerCommandHandler(this);
     private final UpdatableInventory inventory = new UpdatableInventory(27);
+    private final net.mca.entity.ai.sense.VisualMemory visualMemory = new net.mca.entity.ai.sense.VisualMemory();
     private final VillagerDimensions.Mutable dimensions = new VillagerDimensions.Mutable(AgeState.UNASSIGNED);
 
     private GameProfile gameProfile;
@@ -228,6 +229,11 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
     @Override
     public BreedableRelationship getRelationships() {
         return relations;
+    }
+
+    /** What this villager's eyes have seen, see {@link net.mca.entity.ai.sense.Retina}. */
+    public net.mca.entity.ai.sense.VisualMemory getVisualMemory() {
+        return visualMemory;
     }
 
     @Override
@@ -734,6 +740,9 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
             tickDespawnDelay();
 
             residency.tick();
+
+            // someone emptied its chest? it finds out once it is by the chest or sees them
+            net.mca.entity.ai.body.Cofres.tick((ServerWorld) getWorld(), this);
 
             relations.tick(age);
 
@@ -1448,6 +1457,10 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
 
         if (isHolding(Items.CROSSBOW)) {
             this.shoot(this, 1.75F);
+        } else if (isHolding(Items.BOW) && getWorld() instanceof ServerWorld serverWorld && getMainHandStack().isOf(Items.BOW)
+                && net.mca.entity.ai.body.Archery.shootAt(serverWorld, this, target, Math.max(pullProgress, 1.0F))) {
+            // solved against the real arrow physics, see Archery
+            return;
         } else if (isHolding(Items.BOW)) {
             ItemStack itemStack = this.getProjectileType(this.getStackInHand(ProjectileUtil.getHandPossiblyHolding(this, Items.BOW)));
             PersistentProjectileEntity persistentProjectileEntity = this.createArrowProjectile(itemStack, pullProgress);

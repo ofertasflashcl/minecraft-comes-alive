@@ -29,10 +29,14 @@ public class MixinServerPlayNetworkHandler {
         if (Config.getInstance().enableVillagerChatAI) {
             String msg = StringUtils.normalizeSpace(message.chatMessage());
             if (!msg.startsWith("/")) {
-                // Check if there's an eligible villager for the conversation
-                Optional<VillagerEntityMCA> villager = ChatAI.getVillagerForConversation(player, msg);
-                // Yes? => Talk to it
-                villager.ifPresent(villagerEntityMCA -> mca$runAsyncAnswerRequest(player, villagerEntityMCA, msg));
+                ServerPlayerEntity speaker = player;
+                // entities are only looked up on the server thread; this hook runs on the network thread
+                speaker.getServer().execute(() -> {
+                    // Check if there's an eligible villager for the conversation
+                    Optional<VillagerEntityMCA> villager = ChatAI.getVillagerForConversation(speaker, msg);
+                    // Yes? => Talk to it
+                    villager.ifPresent(villagerEntityMCA -> mca$runAsyncAnswerRequest(speaker, villagerEntityMCA, msg));
+                });
             }
         }
     }
@@ -41,8 +45,7 @@ public class MixinServerPlayNetworkHandler {
     private void mca$runAsyncAnswerRequest(ServerPlayerEntity player, VillagerEntityMCA villager, String msg) {
         CompletableFuture.runAsync(() -> {
             Optional<String> answer = ChatAI.answer(player, villager, msg);
-            answer.ifPresent(a -> villager.conversationManager.addMessage(player, Text.literal(a)));
+            answer.ifPresent(a -> player.getServer().execute(() -> ChatAI.deliver(player, villager, a)));
         });
     }
 }
-

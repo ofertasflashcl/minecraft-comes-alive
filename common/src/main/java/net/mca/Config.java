@@ -107,15 +107,27 @@ public final class Config extends CommonConfig {
     //AI
     @SuppressWarnings("unused")
     public String _read_this_before_using_villager_ai = "https://github.com/Luke100000/minecraft-comes-alive/wiki/GPT3-based-conversations";
-    public boolean enableVillagerChatAI = false;
+    public boolean enableVillagerChatAI = true;
     public String villagerChatAIEndpoint = "https://api.conczin.net/v1/mca/chat";
-    public boolean villagerChatAIUseTools = false;
+    public boolean villagerChatAIUseTools = true;
+    /** Bumped when this fork turns chat AI and its commands on for configs written before it. */
+    public int tropelesChatDefaults = 0;
     public String villagerChatAIToken = "";
     public String villagerChatAIModel = "default";
     public String villagerChatAISystemPrompt = "";
     public boolean villagerChatAIUseLongTermMemory = false;
     public boolean villagerChatAIUseSharedLongTermMemory = false;
     public boolean villagerChatAIIncludeSessionInformation = false;
+    /**
+     * Tropeles: the free minds asked in turn until one answers. "custom" is villagerChatAIEndpoint when it is not
+     * the default one; "player2" and "ollama" run on your own computer (skipped quietly when not running);
+     * "conczin" is MCA's own service; "llm7", "chat" (ch.at) and "pollinations" are free public ones that need no
+     * key. When none answers, the villager's own offline mind does, so it always talks and always obeys.
+     */
+    public List<String> tropelesMinds = List.of("custom", "player2", "ollama", "conczin", "llm7", "chat", "pollinations");
+    public String tropelesOllamaUrl = "http://127.0.0.1:11434/";
+    /** Empty: the first model Ollama has installed. */
+    public String tropelesOllamaModel = "";
 
     //InworldAI
     public String inworldAIToken = "";
@@ -317,6 +329,12 @@ public final class Config extends CommonConfig {
                 Config config = gson.fromJson(reader, Config.class);
                 if (config == null || config.version != VERSION) {
                     config = new Config();
+                }
+                if (config.tropelesChatDefaults < 1) {
+                    // villagers talk and take orders by chat from the start, also in worlds made before
+                    config.enableVillagerChatAI = true;
+                    config.villagerChatAIUseTools = true;
+                    config.tropelesChatDefaults = 1;
                 }
                 config.save();
                 return config;

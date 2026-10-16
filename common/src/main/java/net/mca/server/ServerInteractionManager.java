@@ -46,6 +46,7 @@ public class ServerInteractionManager {
     }
 
     public void tick() {
+        net.mca.server.command.Pruebas.tick();
         List<UUID> removals = new ArrayList<>();
         procreateMap.keySet().stream()
                 .filter((k) -> procreateMap.getLong(k) < System.currentTimeMillis())
