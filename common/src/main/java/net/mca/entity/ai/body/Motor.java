@@ -262,7 +262,9 @@ public final class Motor {
         if (dy < 0) {
             kind = Kind.DOWN;
             stand = feet.offset(horizontal).down();
-        } else if (dy > 0 && Math.abs(dx) + Math.abs(dz) <= 1 && !Mining.standable(world, feet.offset(horizontal))) {
+        } else if (dy > 0 && !Mining.standable(world, feet.offset(horizontal))
+                && (Math.abs(dx) + Math.abs(dz) <= 1 || build && !Hands.buildingBlock(villager).isEmpty())) {
+            // nothing to step up onto: up on blocks under its own feet first, like a player
             kind = Kind.PILLAR;
             stand = feet.up();
         } else if (dy > 0) {

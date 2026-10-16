@@ -418,6 +418,12 @@ public class ProspectingTask extends AbstractChoreTask {
             Motor.Result result = motor.step(world, villager, plan.peekFirst(), true, true);
             if (result == Motor.Result.ARRIVED) {
                 plan.clear();
+                int hx = target.getX() - feet.getX();
+                int hz = target.getZ() - feet.getZ();
+                if (hx * hx + hz * hz > 4) {
+                    // keep climbing toward home, not past it
+                    homeDir = Direction.getFacing(hx, 0, hz).getHorizontal();
+                }
             } else if (result == Motor.Result.BLOCKED) {
                 plan.clear();
                 motor.reset(world, villager);
