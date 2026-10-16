@@ -121,12 +121,20 @@ public final class Progreso {
     private boolean packFurnace;
     private int collectTicks;
     private int packTicks;
+    private int tableTicks;
     private boolean wantChest;
 
     /** Asks for a chest to be made (from 8 planks at a table) next time it gears up. */
     public void wantChest() {
-        wantChest = true;
-        nextCheck = 0;
+        if (!wantChest) {
+            wantChest = true;
+            nextCheck = 0;
+        }
+    }
+
+    /** The trip home is over: the chest no longer comes before everything else. */
+    public void forgetChest() {
+        wantChest = false;
     }
 
     /** The furnace it left cooking, or null. */
@@ -291,7 +299,10 @@ public final class Progreso {
             wantChest = false;
         }
         if (wantChest && pick > 0) {
-            wanted.add(CHEST);
+            // at home with no chest: the wood is for the chest, nothing else gets it first
+            boolean needsTable = !tableInReach(world, villager);
+            return hasNonWood(inv, CHEST) && (shortLogs(inv, CHEST, needsTable) == 0
+                    || nearestLog(world, villager, Retina.memory(villager), world.getTime()) != null) ? CHEST : null;
         }
         if (pick == 0) {
             wanted.add(WOODEN_PICKAXE);
@@ -581,13 +592,28 @@ public final class Progreso {
     }
 
     private void atTable(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, BiConsumer<String, Object[]> say) {
-        villager.getNavigation().stop();
         if (goal == null) {
             step = Step.IDLE;
             return;
         }
         if (!tableInReach(world, villager)) {
             SimpleInventory inv = villager.getInventory();
+            if (ownTable && table != null && world.getBlockState(table).isOf(Blocks.CRAFTING_TABLE)
+                    && villager.getPos().distanceTo(Vec3d.ofCenter(table)) < 10 && ++tableTicks < 300) {
+                // its own table is just over there: walk back to it instead of making another
+                memory.doing("volviendo a su mesa de crafteo", now);
+                if ((tableTicks % 20) == 1 || villager.getNavigation().isIdle()) {
+                    villager.getNavigation().startMovingTo(table.getX() + 0.5, table.getY(), table.getZ() + 0.5, 0.6);
+                }
+                return;
+            }
+            if (tableTicks >= 300) {
+                // no way back to it: it stays there
+                table = null;
+                ownTable = false;
+            }
+            tableTicks = 0;
+            villager.getNavigation().stop();
             if (count(inv, Mat.TABLE) == 0) {
                 if (goal != FURNACE && shortLogs(inv, goal, true) > 0) {
                     // a table now would leave too little wood for what it is for
@@ -614,6 +640,8 @@ public final class Progreso {
             craftDelay = CRAFT_TICKS;
             return;
         }
+        tableTicks = 0;
+        villager.getNavigation().stop();
         Hands.aim(villager, Vec3d.ofCenter(table));
         if (--craftDelay > 0) {
             return;

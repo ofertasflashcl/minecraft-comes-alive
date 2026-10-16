@@ -389,8 +389,10 @@ public class ProspectingTask extends AbstractChoreTask {
         long now = world.getTime();
         // first its iron: back to the furnace, out with everything, furnace in the bag
         if (!progreso.idle()) {
-            memory.doing("recogiendo su horno antes de irse", now);
-            progreso.leaving();
+            if (phase != Phase.HOME_STORE) {
+                memory.doing("recogiendo su horno antes de irse", now);
+                progreso.leaving();
+            }
             gearUp(world, villager);
             return;
         }
@@ -426,7 +428,7 @@ public class ProspectingTask extends AbstractChoreTask {
         if (phase == Phase.HOME_WALK) {
             double dx = target.getX() + 0.5 - villager.getX();
             double dz = target.getZ() + 0.5 - villager.getZ();
-            if (dx * dx + dz * dz < 9 && Math.abs(target.getY() - villager.getY()) < 1.5) {
+            if (dx * dx + dz * dz < 9 && Math.abs(target.getY() - feet.getY()) <= 1 && villager.isOnGround()) {
                 villager.getNavigation().stop();
                 phase = Phase.HOME_STORE;
                 homeTicks = 0;
@@ -506,6 +508,7 @@ public class ProspectingTask extends AbstractChoreTask {
     }
 
     private void finishHome(ServerWorld world, VillagerEntityMCA villager, int stored) {
+        progreso.forgetChest();
         if (stored > 0) {
             say("chore.mining.stored", stored);
         }

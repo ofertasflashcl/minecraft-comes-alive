@@ -25,6 +25,11 @@ public final class Motor {
     public enum Result {RUNNING, ARRIVED, BLOCKED}
 
     private static final int STEP_TIMEOUT = 240;
+    /**
+     * Extra push per tick when walking in water. A mob's legs give it 0.3 x 0.02 there while a current pushes
+     * with 0.014, so it could never walk upstream; a player's legs give about 0.02 and wade against it.
+     */
+    private static final double WADE = 0.014;
 
     private final Hands.Breaker breaker = new Hands.Breaker();
     private final Deque<BlockPos> safeTrail = new ArrayDeque<>();
@@ -165,9 +170,12 @@ public final class Motor {
                     villager.setSneaking(false);
                     return Result.RUNNING;
                 }
-                // the side face is not in sight yet: edge out like a sneaking player
-                edgeToward(villager, feet, dir);
-                return Result.RUNNING;
+                if (kind != Kind.DOWN) {
+                    // the side face is not in sight yet: edge out like a sneaking player
+                    edgeToward(villager, feet, dir);
+                    return Result.RUNNING;
+                }
+                // a step down with nothing to set a block against: only if the drop is short
             }
             if (lavaBelow || dropDepth(world, floor) > 2) {
                 reset(world, villager);
@@ -185,6 +193,9 @@ public final class Motor {
         };
         Vec3d target = Vec3d.ofBottomCenter(stand);
         villager.getMoveControl().moveTo(target.x, target.y, target.z, 0.6);
+        if (villager.isTouchingWater()) {
+            wade(villager, target);
+        }
         if (kind == Kind.UP && (villager.isOnGround() || villager.isTouchingWater()) && villager.horizontalCollision) {
             villager.getJumpControl().setActive();
         }
@@ -373,6 +384,17 @@ public final class Motor {
         return true;
     }
 
+    /** Walks through running water like a player does, even against the current. */
+    private static void wade(VillagerEntityMCA villager, Vec3d target) {
+        double dx = target.x - villager.getX();
+        double dz = target.z - villager.getZ();
+        double d = Math.sqrt(dx * dx + dz * dz);
+        if (d < 0.15) {
+            return;
+        }
+        villager.addVelocity(dx / d * WADE, 0, dz / d * WADE);
+    }
+
     private Result retreat(ServerWorld world, VillagerEntityMCA villager) {
         doing = "retrocediendo";
         reset(world, villager);
@@ -384,6 +406,9 @@ public final class Motor {
         if (back != null) {
             Vec3d target = Vec3d.ofBottomCenter(back);
             villager.getMoveControl().moveTo(target.x, target.y, target.z, 0.9);
+            if (villager.isTouchingWater()) {
+                wade(villager, target);
+            }
         }
         return Result.BLOCKED;
     }
