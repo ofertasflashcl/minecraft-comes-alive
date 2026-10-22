@@ -4,6 +4,7 @@ import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.MoveState;
 import net.mca.entity.ai.body.Mining;
+import net.mca.entity.ai.body.Progreso;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
 import net.mca.entity.ai.chatAI.Vistazo;
 import net.mca.entity.ai.sense.Escena;
@@ -70,6 +71,9 @@ public class PerceptionModule {
             input.add("$villager is a bit hurt. ");
         }
         BlockPos feet = villager.getBlockPos();
+        input.add("Your exact position: x=" + feet.getX() + ", y=" + feet.getY() + ", z=" + feet.getZ() + " in the "
+                + world.getRegistryKey().getValue().getPath().replace('_', ' ') + ". When asked where you are or for your coordinates, "
+                + "copy these three numbers exactly, as X Y Z (\"" + feet.getX() + " " + feet.getY() + " " + feet.getZ() + "\"); never round or change them. ");
         Escena scene = Vistazo.escena(villager);
         if (scene == null) {
             // no scene: where it is from its sense of place alone, never "underground" for a house roof
@@ -108,6 +112,7 @@ public class PerceptionModule {
         if (job == Chore.PROSPECT) {
             input.add(food == 0 ? "$villager has no food left; when hungry it must climb out to find some. "
                     : "$villager has " + food + " food to eat in the bag. ");
+            input.add(trip(villager, inv));
         }
         if (bag.isEmpty()) {
             input.add("$villager's bag is empty. ");
@@ -173,6 +178,37 @@ public class PerceptionModule {
             input.add("$villager saw water close by. ");
         }
 
+    }
+
+    /**
+     * The mining trip in one line: room left in the bag, pickaxes and how worn the best one is, how deep it is.
+     * What it would weigh before heading back, so the model's words fit what it really does.
+     */
+    private static String trip(VillagerEntityMCA villager, SimpleInventory inv) {
+        int free = 0;
+        for (int i = 0; i < inv.size(); i++) {
+            if (inv.getStack(i).isEmpty()) {
+                free++;
+            }
+        }
+        StringBuilder line = new StringBuilder("Mining trip: ").append(free).append(" of ").append(inv.size()).append(" bag slots free");
+        try {
+            int picks = Progreso.countPicks(villager);
+            line.append(", ").append(picks).append(picks == 1 ? " pickaxe" : " pickaxes");
+            if (picks > 0 && Progreso.worn(Progreso.bestPickStack(villager))) {
+                line.append(" (the best one is about to break)");
+            }
+        } catch (RuntimeException ignored) {
+            // the pickaxes are left out
+        }
+        Lugar lugar = Vistazo.lugar(villager);
+        int depth = Vistazo.profundidad(villager);
+        if (lugar == Lugar.BAJO_TIERRA && depth > 0) {
+            line.append(", ").append(depth).append(" blocks below the surface");
+        } else if (lugar != null) {
+            line.append(", ").append(lugar == Lugar.AFUERA ? "outside" : "under a roof");
+        }
+        return line.append(". ").toString();
     }
 
     /** At most {@link #MAX_SCENE} characters, cut after a sentence. */

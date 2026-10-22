@@ -38,6 +38,7 @@ import net.minecraft.enchantment.EnchantmentHelper;
 import net.minecraft.enchantment.Enchantments;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.WeakHashMap;
 
@@ -55,6 +56,8 @@ public final class CombatMind {
     public enum Style {MELEE, RANGED, FISTS}
 
     private static final Map<VillagerEntityMCA, State> STATES = new WeakHashMap<>();
+    /** Within this of its target it counts as getting somewhere, whatever happened before. */
+    private static final double ENTITY_REACH_FOR_PROGRESS = Retina.ENTITY_REACH;
 
     private static final class State {
         Style style = Style.FISTS;
@@ -70,6 +73,11 @@ public final class CombatMind {
         int reachTick = -1000;
         @Nullable
         Entity reachFor;
+        /** Closest it has got to the current target, and when it last got closer. */
+        double closest = Double.MAX_VALUE;
+        int closerTick;
+        /** Enemies it could not get at, left alone until the tick stored (unless they come close or hit it). */
+        final Map<Integer, Long> unreachable = new HashMap<>();
     }
 
     private CombatMind() {
@@ -77,6 +85,46 @@ public final class CombatMind {
 
     private static State state(VillagerEntityMCA villager) {
         return STATES.computeIfAbsent(villager, v -> new State());
+    }
+
+    /**
+     * Ticks it has been chasing its target without getting any closer while out of reach: a wall, a gap or a
+     * hole is in between and its legs alone will not get it there. 0 while it gains ground or hits.
+     */
+    public static int stuck(VillagerEntityMCA villager) {
+        State state = STATES.get(villager);
+        if (state == null || state.target == null) {
+            return 0;
+        }
+        return Math.max(0, villager.age - state.closerTick);
+    }
+
+    /** It cannot get at this one: no chasing it for {@code ticks}, unless it comes within reach or hurts it. */
+    public static void giveUp(VillagerEntityMCA villager, Entity target, int ticks) {
+        State state = state(villager);
+        state.unreachable.put(target.getId(), villager.getWorld().getTime() + ticks);
+        if (state.target == target) {
+            disengage(villager);
+        }
+    }
+
+    /** True while an enemy it gave up on is left alone: far enough, and not the one that just hurt it. */
+    public static boolean ignoring(VillagerEntityMCA villager, Entity target) {
+        State state = STATES.get(villager);
+        if (state == null) {
+            return false;
+        }
+        Long until = state.unreachable.get(target.getId());
+        if (until == null) {
+            return false;
+        }
+        long now = villager.getWorld().getTime();
+        if (until < now) {
+            state.unreachable.remove(target.getId());
+            return false;
+        }
+        boolean hurtBy = villager.getAttacker() == target && villager.age - villager.getLastAttackedTime() < 40;
+        return !hurtBy && target.squaredDistanceTo(villager) > 2.5 * 2.5;
     }
 
     /** Whether this villager fought during the last few seconds (its hands belong to this class then). */
@@ -103,7 +151,8 @@ public final class CombatMind {
     public static LivingEntity pickTarget(ServerWorld world, VillagerEntityMCA villager, @Nullable LivingEntity ward, double radius) {
         State state = state(villager);
         if (state.target instanceof LivingEntity current && current.isAlive() && !current.isRemoved() && current.getWorld() == world
-                && current.squaredDistanceTo(villager) < (radius + 8) * (radius + 8) && Retina.canSee(world, villager, current)) {
+                && current.squaredDistanceTo(villager) < (radius + 8) * (radius + 8) && Retina.canSee(world, villager, current)
+                && !ignoring(villager, current)) {
             return current;
         }
         if (ward != null) {
@@ -126,12 +175,12 @@ public final class CombatMind {
         if (threat == null && ward != null) {
             threat = Threats.nearest(world, villager.getBlockPos(), hasRanged(villager) ? radius : Math.min(8, radius), villager, player);
         }
-        return threat;
+        return threat != null && ignoring(villager, threat) ? null : threat;
     }
 
     private static boolean valid(ServerWorld world, VillagerEntityMCA villager, @Nullable LivingEntity ward, @Nullable LivingEntity target, double radius) {
         return target != null && target.isAlive() && !target.isRemoved() && target.getWorld() == world
-                && !isFriend(target, ward) && target != villager
+                && !isFriend(target, ward) && target != villager && !ignoring(villager, target)
                 && target.squaredDistanceTo(villager) < (radius + 8) * (radius + 8)
                 && Retina.canSee(world, villager, target);
     }
@@ -251,6 +300,8 @@ public final class CombatMind {
         state.lastFight = now;
         if (state.target != target) {
             state.target = target;
+            state.closest = Double.MAX_VALUE;
+            state.closerTick = villager.age;
             state.draw = 0;
             if (villager.isUsingItem()) {
                 villager.clearActiveItem();
@@ -268,6 +319,10 @@ public final class CombatMind {
         }
 
         double distance = Retina.distanceToBox(villager.getEyePos(), target.getBoundingBox());
+        if (distance < state.closest - 0.5 || distance <= ENTITY_REACH_FOR_PROGRESS) {
+            state.closest = Math.min(state.closest, distance);
+            state.closerTick = villager.age;
+        }
         // a bow with arrows always wins: an archer keeps its distance and never walks up to hit
         boolean ranged = hasRanged(villager) && Archery.hasAmmo(villager);
         boolean melee = hasMelee(villager);
@@ -312,6 +367,13 @@ public final class CombatMind {
 
         if (style == Style.MELEE) {
             holdBestMelee(villager);
+        }
+        if (distance > Retina.ENTITY_REACH && villager.age - state.closerTick > 200) {
+            // ten seconds and not a step closer: it cannot get there on foot, so it stops staring at it
+            memory.doing("no llega a " + target.getName().getString(), now);
+            villager.getNavigation().stop();
+            giveUp(villager, target, 1200);
+            return false;
         }
         memory.doing("peleando con " + target.getName().getString() + String.format(" a %.1f bloques", distance), now);
         if (distance > Retina.ENTITY_REACH - 0.4 || !seen) {

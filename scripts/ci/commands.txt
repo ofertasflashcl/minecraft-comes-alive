@@ -20,6 +20,7 @@ mca-prueba cultivos
 mca-prueba agua-tunel
 mca-prueba agua-pozo
 mca-prueba explorar
+mca-prueba pelea-muro
 mca-prueba ia-local
 mca-prueba ia-red
 sleep 230

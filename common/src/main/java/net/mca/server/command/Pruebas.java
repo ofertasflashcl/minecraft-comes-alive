@@ -86,6 +86,7 @@ public final class Pruebas {
                 case "agua-tunel" -> start(new AguaTunel(world));
                 case "agua-pozo" -> start(new AguaPozo(world));
                 case "explorar" -> start(new Exploracion(world));
+                case "pelea-muro" -> start(new PeleaMuro(world));
                 case "ia-local" -> start(new IaLocal(world));
                 case "ia-red" -> start(new IaRed(world));
                 case "resumen" -> resumen();
@@ -459,6 +460,65 @@ public final class Pruebas {
     }
 
     /** A villager with a sword guarding someone while a zombie comes at them. */
+    /**
+     * A miner with a sword and a pickaxe sees a zombie through a hole it cannot walk through: three blocks of rock
+     * in between, out of sword reach. It must dig through to it and kill it, not stand there staring.
+     */
+    private static final class PeleaMuro extends Scenario {
+        private final ProspectingTask task = new ProspectingTask();
+        private final VillagerEntityMCA miner;
+        private final ZombieEntity zombie;
+        private boolean dug;
+
+        PeleaMuro(ServerWorld world) {
+            super("pelea-muro", world, 1500);
+            BlockPos o = new BlockPos(4000, 100, 0);
+            load(world, o, 24);
+            fill(world, o.add(-5, -2, -4), o.add(9, 4, 4), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-3, 0, -1), o.add(2, 2, 1), Blocks.AIR.getDefaultState());
+            // the hole it sees through, one block high: nothing two blocks tall passes it
+            fill(world, o.add(3, 1, 0), o.add(5, 1, 0), Blocks.AIR.getDefaultState());
+            fill(world, o.add(6, 0, 0), o.add(6, 1, 0), Blocks.AIR.getDefaultState());
+            miner = villager(world, o, Direction.EAST);
+            miner.getInventory().addStack(new ItemStack(Items.IRON_SWORD));
+            miner.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+            miner.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 16));
+            miner.getInventory().addStack(new ItemStack(Items.BREAD, 8));
+            zombie = zombie(world, Vec3d.ofBottomCenter(o.east(6)), true);
+            zombie.setTarget(miner);
+            face(miner, -90.0F, 0.0F);
+            Retina.lookAll(world, miner);
+        }
+
+        @Override
+        Boolean step() {
+            if (!miner.isAlive()) {
+                fail(name, "el aldeano murió; " + state());
+                return Boolean.FALSE;
+            }
+            task.practice(world, miner);
+            dug |= world.getBlockState(new BlockPos(4004, 100, 0)).isAir() || world.getBlockState(new BlockPos(4003, 100, 0)).isAir();
+            if (zombie.isAlive()) {
+                return null;
+            }
+            check(name, dug, "zombi tras la roca muerto en " + ticks + " ticks, cavó hacia él: " + dug + "; " + state());
+            return dug;
+        }
+
+        @Override
+        String state() {
+            return "zombi " + zombie.getHealth() + " vida en " + zombie.getBlockPos().toShortString() + ", aldeano " + miner.getHealth()
+                    + " en " + miner.getBlockPos().toShortString() + " con " + miner.getMainHandStack().getItem() + ", tarea " + task.debug()
+                    + ", haciendo: " + Retina.memory(miner).doing();
+        }
+
+        @Override
+        void cleanup() {
+            miner.discard();
+            zombie.discard();
+        }
+    }
+
     private static final class Espada extends Scenario {
         private final FollowTask follow = new FollowTask();
         private final VillagerEntityMCA guard;

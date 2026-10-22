@@ -8,9 +8,12 @@ import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.util.math.GlobalPos;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.WeakHashMap;
 
 public class TriggerCommandInfos {
     public static final List<TriggerCommandInfo> triggerCommands = ImmutableList.of(
@@ -32,6 +35,11 @@ public class TriggerCommandInfos {
             new TriggerCommandInfo("try-go-home", "Go home now (a miner stops digging and climbs out of the mine first)",
                     null,
                     TriggerCommandInfos::goHome,
+                    (p, v) -> true),
+            new TriggerCommandInfo("consider-return", "Someone suggests you head back or go home (advice, not an order): you weigh it yourself "
+                    + "(bag, food, pickaxe, wounds, monsters, the night) and decide whether to go; you will be told what you decided",
+                    null,
+                    (p, v, ignored) -> considerReturn(p, v).how(),
                     (p, v) -> true),
             new TriggerCommandInfo("come-up", "Stop digging and climb out of the mine to go home now",
                     null,
@@ -90,6 +98,54 @@ public class TriggerCommandInfos {
                     },
                     (p, v) -> !v.getInventory().isEmpty())
     );
+
+    /**
+     * What it made of "sería mejor volver": the verdict ({@code juicio}), whether it really sets off ({@code goes}:
+     * false also when it agreed but has no home here), the account for a language model ({@code how}, plain
+     * English) and its own words in Spanish and English, with its reasons.
+     */
+    public record Vuelta(ProspectingTask.Juicio juicio, boolean goes, String how, String es, String en) {
+    }
+
+    /** The last verdict of each villager, for its own answer right after (server thread only). */
+    private static final Map<VillagerEntityMCA, Vuelta> LAST = new WeakHashMap<>();
+
+    /**
+     * Someone suggests heading back (server thread): it weighs it ({@link ProspectingTask#juzgarVuelta}). A miner
+     * that decides to go leaves along its own trail, goes home, makes a chest if it needs one, stores its haul and
+     * comes back down (the running task does all of that); anyone else who decides to go walks home like
+     * "try-go-home". Deciding to stay changes nothing.
+     */
+    public static Vuelta considerReturn(ServerPlayerEntity player, VillagerEntityMCA villager) {
+        ProspectingTask.Juicio j = ProspectingTask.juzgarVuelta(villager);
+        String name = player.getName().getString();
+        Vuelta vuelta;
+        if (!j.volver()) {
+            vuelta = new Vuelta(j, false, name + " suggested you head back. You weighed it yourself and decided NOT to go back yet: you carry on "
+                    + "with what you were doing. In your own words: \"" + j.en() + "\"", j.es(), j.en());
+        } else if (j.minando()) {
+            vuelta = new Vuelta(j, true, name + " suggested you head back. You weighed it yourself and decided YES, you go back now"
+                    + (j.hambre() ? ", hungry" : "") + ": you climb out the way you came, walk home, store your haul in your chest "
+                    + "(making one if you have none) and then go back down to keep mining. In your own words: \"" + j.en() + "\"", j.es(), j.en());
+        } else {
+            String walked = goHome(player, villager, "");
+            if (walked.startsWith("You have no")) {
+                vuelta = new Vuelta(j, false, name + " suggested you go home and you agreed, but you have no home here to go to, so you stay "
+                        + "where you are.", "Tienes razón, pero aquí no tengo casa a la que volver.", "You're right, but I have no home to go back to here.");
+            } else {
+                vuelta = new Vuelta(j, true, name + " suggested you go home. You weighed it yourself and decided YES: you are walking home now. "
+                        + "In your own words: \"" + j.en() + "\"", j.es(), j.en());
+            }
+        }
+        LAST.put(villager, vuelta);
+        return vuelta;
+    }
+
+    /** The verdict {@link #considerReturn} gave last, or null (server thread). */
+    @Nullable
+    public static Vuelta lastVuelta(VillagerEntityMCA villager) {
+        return LAST.get(villager);
+    }
 
     /**
      * Home, the way a villager really gets there: a miner is called out of its mine (it climbs out like a player

@@ -268,6 +268,11 @@ public class ProspectingTask extends AbstractChoreTask {
 
     private int surfaceTicks;
     private int restTicks;
+    /** Digging toward an enemy it cannot walk to: ticks so far, the tick it last got closer, failed steps. */
+    private int digTicks;
+    private int digGain;
+    private int digFails;
+    private double digClosest;
 
     // where the mine starts: natural ground, not a floor, a wall or a path
     /** The spot it walks to before it cuts the first step, or null. */
@@ -336,6 +341,152 @@ public class ProspectingTask extends AbstractChoreTask {
         CALLED.merge(villager, hungry, Boolean::logicalOr);
     }
 
+    /** The miners at work right now, so the chat can ask one how its trip is going. */
+    private static final Map<VillagerEntityMCA, ProspectingTask> RUNNING = new WeakHashMap<>();
+    /** A trip home it decided on itself after someone suggested it: true = hungry. */
+    private static final Map<VillagerEntityMCA, Boolean> DECIDED = new WeakHashMap<>();
+    /** When someone last suggested going back, and how many times in a row, to tell a passing remark from insisting. */
+    private static final Map<VillagerEntityMCA, long[]> SUGGESTED = new WeakHashMap<>();
+
+    /**
+     * What it makes of "sería mejor volver": its reasons to go and to stay, in its own words, and whether it goes.
+     * {@code volver} false means it carries on; {@code hambre} that the trip is to eat first.
+     */
+    public record Juicio(boolean volver, boolean hambre, boolean minando, String es, String en) {
+    }
+
+    /**
+     * Someone suggests heading back (server thread). It weighs it like a player would: a full bag, hunger, wounds,
+     * a pickaxe about to break, monsters around, the night; against room in the bag, food, an ore right in front of
+     * it. Asked again soon after, it gives in more easily, and the third time it goes. When it decides to go, the
+     * running task climbs out along its own trail, walks home, makes a chest if it has none, stores its haul and
+     * comes back down. Not mining: only the night, wounds or being far from home send it home.
+     */
+    public static Juicio juzgarVuelta(VillagerEntityMCA villager) {
+        long now = villager.getWorld().getTime();
+        long[] asked = SUGGESTED.computeIfAbsent(villager, v -> new long[]{-100000L, 0L});
+        asked[1] = now - asked[0] < 2400 ? asked[1] + 1 : 1;
+        asked[0] = now;
+        int times = (int) asked[1];
+        ProspectingTask task = RUNNING.get(villager);
+        boolean mining = task != null && villager.getVillagerBrain().getCurrentJob() == Chore.PROSPECT;
+        List<String> goEs = new ArrayList<>();
+        List<String> goEn = new ArrayList<>();
+        List<String> stayEs = new ArrayList<>();
+        List<String> stayEn = new ArrayList<>();
+        int score = 0;
+        boolean strong = false;
+        boolean hungry = false;
+        float health = villager.getHealth() / villager.getMaxHealth();
+        if (health < 0.5F) {
+            goEs.add("estoy herido");
+            goEn.add("I'm hurt");
+            score += 2;
+            strong = true;
+        }
+        boolean monsters = false;
+        for (VisualMemory.SeenEntity seen : Retina.memory(villager).entities(now, 200)) {
+            if (seen.type.getSpawnGroup() == net.minecraft.entity.SpawnGroup.MONSTER && seen.distance < 16) {
+                monsters = true;
+                break;
+            }
+        }
+        if (monsters && health < 0.8F) {
+            goEs.add("hay monstruos cerca");
+            goEn.add("there are monsters close by");
+            score++;
+        }
+        if (mining) {
+            SimpleInventory inv = villager.getInventory();
+            int free = freeSlots(inv);
+            int carried = foodPoints(inv);
+            if (free <= 3) {
+                goEs.add(free == 0 ? "tengo la mochila llena" : "tengo la mochila casi llena");
+                goEn.add(free == 0 ? "my bag is full" : "my bag is nearly full");
+                score += 2;
+                strong = true;
+            } else if (free <= 8) {
+                goEs.add("ya llevo harto en la mochila");
+                goEn.add("I'm carrying quite a lot");
+                score++;
+            } else {
+                stayEs.add("todavía tengo espacio en la mochila");
+                stayEn.add("I still have room in my bag");
+                score--;
+            }
+            if (task.food <= GO_HOME_BELOW + 2 && carried < 4) {
+                goEs.add("tengo hambre y no me queda comida");
+                goEn.add("I'm hungry and out of food");
+                score += 2;
+                strong = true;
+                hungry = true;
+            } else if (carried >= 8 || task.food >= 15) {
+                stayEs.add("tengo comida para rato");
+                stayEn.add("I have food for a while");
+                score--;
+            } else if (carried < 4) {
+                goEs.add("me queda poca comida");
+                goEn.add("I'm running low on food");
+                score++;
+                hungry = true;
+            }
+            int picks = Progreso.countPicks(villager);
+            if (picks == 0 || picks == 1 && Progreso.worn(Progreso.bestPickStack(villager)) && !Progreso.canCraftPick(villager)) {
+                goEs.add("se me está acabando el pico");
+                goEn.add("my pickaxe is about to break");
+                score += 2;
+                strong = true;
+            }
+            if (task.ore != null) {
+                stayEs.add("tengo un mineral justo aquí");
+                stayEn.add("there's an ore right here");
+                score--;
+            }
+        } else {
+            if (villager.getWorld().isNight()) {
+                goEs.add("ya es de noche");
+                goEn.add("it's night already");
+                score += 2;
+            }
+            var home = villager.getResidency().getHome();
+            if (home.isPresent() && home.get().getDimension() == villager.getWorld().getRegistryKey()
+                    && !home.get().getPos().isWithinDistance(villager.getBlockPos(), 64)) {
+                goEs.add("estoy lejos de casa");
+                goEn.add("I'm far from home");
+                score++;
+            }
+        }
+        boolean go = strong || score >= 2 || times >= 2 && score >= 1 || times >= 3;
+        if (go && mining) {
+            DECIDED.put(villager, hungry);
+        }
+        String es;
+        String en;
+        if (go) {
+            String why = goEs.isEmpty() ? (times >= 3 ? "ya que insistes" : "tienes razón") : joinEs(goEs);
+            String whyEn = goEn.isEmpty() ? (times >= 3 ? "since you insist" : "you're right") : joinEn(goEn);
+            es = mining ? "Sí, mejor vuelvo: " + why + ". Subo por mi camino, guardo todo en mi cofre y después sigo."
+                    : "Sí, mejor me voy a casa: " + why + ".";
+            en = mining ? "Yes, I'd better head back: " + whyEn + ". I'll climb out the way I came, store everything in my chest and then carry on."
+                    : "Yes, I'd better go home: " + whyEn + ".";
+        } else {
+            String why = stayEs.isEmpty() ? "estoy bien por ahora" : joinEs(stayEs);
+            String whyEn = stayEn.isEmpty() ? "I'm fine for now" : joinEn(stayEn);
+            es = "Todavía no: " + why + (goEs.isEmpty() ? "" : ", aunque " + joinEs(goEs)) + ". Si insistes, vuelvo.";
+            en = "Not yet: " + whyEn + (goEn.isEmpty() ? "" : ", although " + joinEn(goEn)) + ". If you insist, I'll head back.";
+        }
+        MCA.LOGGER.info("[Tropeles] {} piensa si volver (vez {}, puntaje {}): {}", villager.getName().getString(), times, score, es);
+        return new Juicio(go, hungry, mining, es, en);
+    }
+
+    private static String joinEs(List<String> parts) {
+        return parts.size() == 1 ? parts.get(0) : String.join(", ", parts.subList(0, parts.size() - 1)) + " y " + parts.get(parts.size() - 1);
+    }
+
+    private static String joinEn(List<String> parts) {
+        return parts.size() == 1 ? parts.get(0) : String.join(", ", parts.subList(0, parts.size() - 1)) + " and " + parts.get(parts.size() - 1);
+    }
+
     /** "Vuelve a la mina" (server thread): a miner waiting at home after being called out goes back down. */
     public static void backToWork(VillagerEntityMCA villager) {
         BACK.put(villager, Boolean.TRUE);
@@ -374,6 +525,7 @@ public class ProspectingTask extends AbstractChoreTask {
             started = true;
             init(world, villager);
         }
+        RUNNING.put(villager, this);
         Retina.lookAll(world, villager);
     }
 
@@ -637,6 +789,19 @@ public class ProspectingTask extends AbstractChoreTask {
                     }
                 }
                 default -> CALLED.merge(villager, hungry, Boolean::logicalOr); // after the fight or the shelter
+            }
+        }
+        Boolean decided = DECIDED.remove(villager);
+        if (decided != null) {
+            switch (phase) {
+                case SEEK, SURFACE_WORK, RETURN -> {
+                    MCA.LOGGER.info("[Tropeles] {} decide volver a casa a guardar sus cosas{}", name(), decided ? " y comer" : "");
+                    leave(world, villager, decided ? Trip.FOOD : Trip.BAG);
+                }
+                case HOME_UP, HOME_WALK, HOME_STORE, REST, FORAGE -> {
+                    // already on its way, or home
+                }
+                default -> DECIDED.merge(villager, decided, Boolean::logicalOr); // after the fight or the shelter
             }
         }
         if (BACK.remove(villager) != null && phase == Phase.REST) {
@@ -2556,7 +2721,7 @@ public class ProspectingTask extends AbstractChoreTask {
             return false;
         }
         MobEntity threat = Threats.nearest(world, villager.getBlockPos(), 10, villager, null);
-        if (threat == null) {
+        if (threat == null || CombatMind.ignoring(villager, threat)) {
             return false;
         }
         resume = phase == Phase.HOME_STORE ? Phase.HOME_WALK : phase;
@@ -2572,6 +2737,7 @@ public class ProspectingTask extends AbstractChoreTask {
             motor.reset(world, villager);
             phase = Phase.FIGHT;
             fightTicks = 0;
+            digTicks = 0;
             backOffTicks = 0;
             long now = world.getTime();
             if (now - lastFightCall > 600) {
@@ -2615,6 +2781,10 @@ public class ProspectingTask extends AbstractChoreTask {
         dangerFrom = target.getBlockPos().toImmutable();
         boolean hurt = villager.getHealth() < villager.getMaxHealth() * 0.4F;
         if (target instanceof CreeperEntity || hurt || ++fightTicks > 1200) {
+            if (fightTicks > 1200) {
+                CombatMind.giveUp(villager, target, 2400); // a minute on one enemy: it is not winning this one
+            }
+            digTicks = 0;
             CombatMind.disengage(villager);
             if (target instanceof MobEntity mob) {
                 beginDanger(world, mob);
@@ -2623,6 +2793,14 @@ public class ProspectingTask extends AbstractChoreTask {
             }
             return;
         }
+        double distance = Retina.distanceToBox(villager.getEyePos(), target.getBoundingBox());
+        boolean ranged = CombatMind.hasRanged(villager) && Archery.hasAmmo(villager);
+        if (digTicks > 0 || !ranged && CombatMind.stuck(villager) > 40 && distance > Retina.ENTITY_REACH) {
+            // its legs do not get it there: rock, a step too high, a gap. A player digs through to it, pickaxe in hand
+            if (digToward(world, villager, target, distance)) {
+                return;
+            }
+        }
         if (CombatMind.fight(world, villager, null, target)) {
             backOffTicks = 0;
         } else if (++backOffTicks > 60 && target instanceof MobEntity mob) {
@@ -2630,6 +2808,60 @@ public class ProspectingTask extends AbstractChoreTask {
             CombatMind.disengage(villager);
             beginDanger(world, mob);
         }
+    }
+
+    /**
+     * Digs and steps toward an enemy it cannot walk to. True while digging is what it does this tick; false when it
+     * is close and in sight again (the fight goes on). Gives up on one it gets no closer to after a while, or when
+     * the way is blocked for good: it leaves that one alone (and takes cover from one that shoots).
+     */
+    private boolean digToward(ServerWorld world, VillagerEntityMCA villager, LivingEntity target, double distance) {
+        long now = world.getTime();
+        boolean seen = Retina.canSee(world, villager, target);
+        if (digTicks > 0 && distance <= Retina.ENTITY_REACH && seen && !motor.midStep(villager)) {
+            digTicks = 0;
+            motor.reset(world, villager);
+            return false; // in reach: the sword again
+        }
+        if (digTicks == 0) {
+            digClosest = distance;
+            digGain = 0;
+            motor.reset(world, villager);
+            villager.getNavigation().stop();
+            MCA.LOGGER.info("[Tropeles] {} no llega a {} caminando: cava hacia él", name(), target.getName().getString());
+        }
+        digTicks++;
+        if (distance < digClosest - 0.5) {
+            digClosest = distance;
+            digGain = digTicks;
+        }
+        boolean blocked = false;
+        if (Progreso.countPicks(villager) > 0 && equipPick(villager)) {
+            Retina.memory(villager).doing("cavando hacia " + target.getName().getString() + String.format(" a %.1f bloques", distance), now);
+            Motor.Result result = motor.step(world, villager, target.getBlockPos(), true, true);
+            blocked = result == Motor.Result.BLOCKED && ++digFails > 3;
+            if (result != Motor.Result.BLOCKED) {
+                digFails = 0;
+            }
+        } else {
+            blocked = true;
+        }
+        if (blocked || digTicks - digGain > 200 || digTicks > 1200) {
+            MCA.LOGGER.info("[Tropeles] {} no puede llegar a {} ({}): lo deja en paz", name(), target.getName().getString(),
+                    blocked ? "camino cerrado" : "no se acerca");
+            digTicks = 0;
+            digFails = 0;
+            if (!motor.midStep(villager)) {
+                motor.reset(world, villager);
+            }
+            CombatMind.giveUp(villager, target, 2400);
+            if (target instanceof net.minecraft.entity.mob.AbstractSkeletonEntity && target instanceof MobEntity mob && seen) {
+                beginDanger(world, mob); // it keeps shooting: cover first
+            } else {
+                afterTrouble(world, villager);
+            }
+        }
+        return true;
     }
 
     /** The danger is over: back to whatever it was doing, the pickaxe back in hand. */

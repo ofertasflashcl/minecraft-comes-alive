@@ -90,6 +90,46 @@ public final class MenteLocal {
             order("open-trade-window", "comerciar|tradear|intercambiar|que vendes|que tienes para vender|quiero comprar|let'?s trade|trade|what do you sell")
     );
 
+    /**
+     * Asking for its exact position: "dame tus coordenadas", "¿en qué coordenadas estás?", "coords", "your
+     * coordinates". Read before the orders, so "dame tus coordenadas" is not a hand-over.
+     */
+    private static final Pattern COORDS = order("coords", "coordenadas?|coords?|cords|coordinates?|"
+            + "(tu|su) (ubicacion|posicion|localizacion)( exacta)?|(ubicacion|posicion) exacta|en que (posicion|ubicacion) (estas|te encuentras)|"
+            + "donde (estas|te encuentras) exactamente|exactamente donde estas|"
+            + "your (exact )?(position|location)|exact (position|location)|where exactly are you|xyz").getValue();
+
+    /** Going back, said as one: home, up, out; "volver a la mina" or "go back down" is the opposite and does not count. */
+    private static final String BACK_ES = "(volver|volvamos|regresar|regresemos|regreses|vuelvas|subir|subas|salir|salgas|devolverte|devolverse|"
+            + "irte a (tu )?casa|ir a (tu )?casa|irse a casa|vayas a (tu )?casa|volver a (tu )?casa|regresar a (tu )?casa)"
+            + "(?! a (la )?min| a trabajar| a cavar| a picar| abajo| mas abajo)";
+    private static final String BACK_EN = "((go|head|come|get) (back|home)|return( home)?|call it a day|turn back)(?! down| to (the )?min| to work| to digging)";
+
+    /**
+     * Advice to head back, not an order: "sería mejor volver", "deberías subir", "¿no crees que deberías volver?",
+     * "¿por qué no vuelves?", "mejor vuelve", "you should go back", "maybe head home", "better head back". The
+     * villager weighs it itself ({@link ProspectingTask#juzgarVuelta}); a plain "sube" or "vuelve a casa" is still
+     * an order. Read before the orders: "you should go home" holds the order "go home".
+     */
+    private static final Pattern SUGGEST_RETURN = order("consider-return",
+            "(seria|sera|es|creo que es|no seria|quizas seria|tal vez seria) mejor (que )?" + BACK_ES + "|"
+                    + "(deberias|deberiamos|tendrias que|conviene|convendria|te conviene|te convendria|ya es hora de|es hora de|seria bueno) (que )?" + BACK_ES + "|"
+                    + "por que no (vuelves|regresas|subes|sales|te devuelves|te vas a (tu )?casa|vas a (tu )?casa|volvemos)|"
+                    + "y si (vuelves|regresas|subes|sales|te vas a (tu )?casa|volvemos)|"
+                    + "mejor (vuelve|vuelvete|volvamos|regresa|regresemos|sube|subete|sal|salte|vete a (tu )?casa|anda a (tu )?casa|vamonos)(?! a (la )?min| abajo)|"
+                    + "(you|we) (should|ought to|might want to|may want to|better|had better) " + BACK_EN + "|"
+                    + "(you'?d|you had|we'?d) better " + BACK_EN + "|better " + BACK_EN + "|maybe " + BACK_EN + "|"
+                    + "maybe (you|we) should " + BACK_EN + "|shouldn'?t you " + BACK_EN + "|why don'?t (you|we) " + BACK_EN + "|"
+                    + "(it'?s|its|it is) (time|about time) to " + BACK_EN + "|how about (going|heading|coming) (back|home)|"
+                    + "(it )?(might|would) be (better|wise|smart) to " + BACK_EN).getValue();
+
+    /**
+     * The advice turned around: "no deberías volver", "mejor no subas", "you shouldn't go back". Asked as a question
+     * ("¿no deberías volver?", "shouldn't you go back?") it is the advice again, so this only counts without a "?".
+     */
+    private static final Pattern NOT_RETURN = Pattern.compile("(?<![a-z])((no|nunca) (deberias|seria mejor|es mejor|conviene|te conviene|tienes que)|"
+            + "mejor no|shouldn'?t|should not|better not|(don'?t|do not|never) (go|head|come|return))(?![a-z])");
+
     /** A start-* order said with a "no" before it: "no vayas a la mina", "nunca mines aqui", "don't go mining". */
     private static final Pattern NEGATED_START = Pattern.compile("(?<![a-z])(no|nunca|ni)( [a-z]+){0,2} (vayas|vaya|vayan|mines|minar|bajes|sigas|"
             + "tales|talar|peques|pescar|caces|cazar|cosech[a-z]*|excaves|a la mina)(?![a-z])"
@@ -294,6 +334,14 @@ public final class MenteLocal {
         if (t.matches("(para|alto|stop|basta|halt|ya basta|para ya)")) {
             return new Intent("stop", "", null, spanish);
         }
+        // "dame tus coordenadas" asks where it is, it is no hand-over
+        if (COORDS.matcher(t).find()) {
+            return new Intent(null, "", "coords", spanish);
+        }
+        // "sería mejor volver" is advice it weighs, not the order "vuelve a casa"
+        if (SUGGEST_RETURN.matcher(t).find() && (text.contains("?") || text.contains("¿") || !NOT_RETURN.matcher(t).find())) {
+            return new Intent("consider-return", "", null, spanish);
+        }
         for (Map.Entry<String, Pattern> entry : ORDERS) {
             Matcher m = entry.getValue().matcher(t);
             if (m.find()) {
@@ -374,6 +422,7 @@ public final class MenteLocal {
             case "bag" -> bag(villager, es);
             case "health" -> health(villager, player, es);
             case "where" -> where(villager, es);
+            case "coords" -> coords(villager, es);
             case "see" -> see(villager, es);
             case "name" -> es ? "Me llamo " + villager.getName().getString() + "." : "I'm " + villager.getName().getString() + ".";
             case "help" -> help(es);
@@ -395,6 +444,14 @@ public final class MenteLocal {
                                 @Nullable Cofres.Store stored, boolean es, String name) {
         String command = intent.command();
         boolean mining = villager.getVillagerBrain().getCurrentJob() == Chore.PROSPECT;
+        if ("consider-return".equals(command)) {
+            // what it made of the advice, with its reasons ({@link TriggerCommandInfos#considerReturn})
+            TriggerCommandInfos.Vuelta vuelta = TriggerCommandInfos.lastVuelta(villager);
+            if (vuelta != null) {
+                return es ? vuelta.es() : vuelta.en();
+            }
+            return es ? "Mm, déjame pensarlo." : "Hm, let me think about it.";
+        }
         if (outcome == null && "come-up".equals(command)) {
             // only a miner climbs out of a mine
             return es ? "No estoy en ninguna mina ahora mismo." : "I'm not down in a mine right now.";
@@ -530,30 +587,80 @@ public final class MenteLocal {
         return body + " " + doing(villager, es);
     }
 
-    /**
-     * Where it is, from its sense of place ({@link Lugar}): outside, under a roof or down in the rock and how deep,
-     * with its coordinates; a house roof is never "underground".
-     */
-    private static String where(VillagerEntityMCA villager, boolean es) {
+    /** Its exact block position, "X Y Z" as the game's own coordinates show them: "123 64 -45". */
+    public static String coordinates(VillagerEntityMCA villager) {
         BlockPos p = villager.getBlockPos();
-        String coords = p.getX() + ", " + p.getY() + ", " + p.getZ();
+        return p.getX() + " " + p.getY() + " " + p.getZ();
+    }
+
+    /**
+     * Whether {@code line} gives the villager's exact coordinates: its three numbers, signs included, each written
+     * as a whole number somewhere in it ("123 64 -45", "x=123, y=64, z=-45").
+     */
+    public static boolean hasCoordinates(String line, BlockPos p) {
+        Set<Integer> numbers = new java.util.HashSet<>();
+        Matcher m = Pattern.compile("(?<![\\d.,])(-|−)?\\s?(\\d{1,8})(?![\\d]|[.,]\\d)").matcher(line);
+        while (m.find()) {
+            try {
+                int n = Integer.parseInt(m.group(2));
+                numbers.add(m.group(1) != null ? -n : n);
+            } catch (NumberFormatException ignored) {
+                // too long to be a coordinate
+            }
+        }
+        return numbers.contains(p.getX()) && numbers.contains(p.getY()) && numbers.contains(p.getZ());
+    }
+
+    /** " en el Nether" / " in the Nether" outside the overworld, else nothing. */
+    private static String dimension(VillagerEntityMCA villager, boolean es) {
+        String path = villager.getWorld().getRegistryKey().getValue().getPath();
+        return switch (path) {
+            case "overworld" -> "";
+            case "the_nether" -> es ? " en el Nether" : " in the Nether";
+            case "the_end" -> es ? " en el End" : " in the End";
+            default -> es ? " en " + path.replace('_', ' ') : " in " + path.replace('_', ' ');
+        };
+    }
+
+    /**
+     * Where it is in words, from its sense of place ({@link Lugar}): outside, under a roof or down in the rock and
+     * how deep; a house roof is never "underground". "afuera" / "outside".
+     */
+    private static String place(VillagerEntityMCA villager, boolean es) {
         Lugar lugar = Vistazo.lugar(villager);
         if (lugar != null) {
             int depth = Vistazo.profundidad(villager);
             return switch (lugar) {
                 case AFUERA -> depth > 8
-                        ? (es ? "Estoy afuera, pero en un hoyo, unos " + depth + " bloques bajo el suelo, en " + coords + "."
-                        : "I'm outside, but down in a pit, about " + depth + " blocks below the ground, at " + coords + ".")
-                        : (es ? "Estoy afuera, en " + coords + "." : "I'm outside, at " + coords + ".");
-                case BAJO_TECHO -> es ? "Estoy bajo techo, en " + coords + "." : "I'm indoors, under a roof, at " + coords + ".";
+                        ? (es ? "afuera, pero en un hoyo, unos " + depth + " bloques bajo el suelo" : "outside, but down in a pit, about " + depth + " blocks below the ground")
+                        : (es ? "afuera" : "outside");
+                case BAJO_TECHO -> es ? "bajo techo" : "indoors, under a roof";
                 case BAJO_TIERRA -> depth > 0
-                        ? (es ? "Estoy bajo tierra, unos " + depth + " bloques bajo la superficie, en " + coords + "."
-                        : "I'm underground, about " + depth + " blocks below the surface, at " + coords + ".")
-                        : (es ? "Estoy bajo tierra, en " + coords + "." : "I'm underground, at " + coords + ".");
+                        ? (es ? "bajo tierra, unos " + depth + " bloques bajo la superficie" : "underground, about " + depth + " blocks below the surface")
+                        : (es ? "bajo tierra" : "underground");
             };
         }
+        BlockPos p = villager.getBlockPos();
         boolean under = !villager.getWorld().isSkyVisible(p.up()) && p.getY() < villager.getWorld().getSeaLevel() - 4;
-        return es ? "Estoy en " + coords + (under ? ", bajo tierra." : ".") : "I'm at " + coords + (under ? ", underground." : ".");
+        return under ? (es ? "bajo tierra" : "underground") : "";
+    }
+
+    /** Where it is: its place in words and its exact coordinates, "Estoy bajo techo, en 123 64 -45." */
+    private static String where(VillagerEntityMCA villager, boolean es) {
+        String place = place(villager, es);
+        String at = coordinates(villager) + dimension(villager, es);
+        if (place.isEmpty()) {
+            return es ? "Estoy en " + at + "." : "I'm at " + at + ".";
+        }
+        return es ? "Estoy " + place + ", en " + at + "." : "I'm " + place + ", at " + at + ".";
+    }
+
+    /** "Dame tus coordenadas": the exact numbers first, then where that is. */
+    private static String coords(VillagerEntityMCA villager, boolean es) {
+        String place = place(villager, es);
+        String at = coordinates(villager);
+        return es ? "Mis coordenadas: " + at + " (X Y Z)" + dimension(villager, true) + (place.isEmpty() ? "." : "; estoy " + place + ".")
+                : "My coordinates: " + at + " (X Y Z)" + dimension(villager, false) + (place.isEmpty() ? "." : "; I'm " + place + ".");
     }
 
     /** What it sees: the scene in its own words ({@link Escena#describe(boolean)}), else the beings and ores its eyes saw. */
@@ -635,8 +742,8 @@ public final class MenteLocal {
     }
 
     private static String help(boolean es) {
-        return es ? "Puedo seguirte, quedarme aquí, ir a minar (dime qué buscar) y subir cuando me llames, talar, pescar, cosechar, cazar, darte cosas o guardarlas en mi cofre."
-                : "I can follow you, stay here, go mining (tell me what to look for) and come up when you call, chop trees, fish, harvest, hunt, hand you things or store them in my chest.";
+        return es ? "Puedo seguirte, quedarme aquí, ir a minar (dime qué buscar) y subir cuando me llames, talar, pescar, cosechar, cazar, darte cosas o guardarlas en mi cofre, y decirte mis coordenadas exactas."
+                : "I can follow you, stay here, go mining (tell me what to look for) and come up when you call, chop trees, fish, harvest, hunt, hand you things or store them in my chest, and tell you my exact coordinates.";
     }
 
     /** The food in its own bag. */

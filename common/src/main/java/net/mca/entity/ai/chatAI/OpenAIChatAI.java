@@ -12,6 +12,7 @@ import net.mca.entity.ai.chatAI.modules.*;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.util.Pair;
+import net.minecraft.util.math.BlockPos;
 import org.apache.commons.io.IOUtils;
 import org.jetbrains.annotations.Nullable;
 
@@ -54,7 +55,8 @@ public class OpenAIChatAI implements ChatAIStrategy {
             Map.entry("hunt", "start-hunting"), Map.entry("escort", "start-escort"), Map.entry("go-home", "try-go-home"),
             Map.entry("home", "try-go-home"), Map.entry("stop", "stop-working"), Map.entry("give", "give-item"),
             Map.entry("store", "store-items"), Map.entry("trade", "open-trade-window"), Map.entry("climb-out", "come-up"),
-            Map.entry("eat", "eat-break")
+            Map.entry("eat", "eat-break"), Map.entry("consider", "consider-return"), Map.entry("consider-going-back", "consider-return"),
+            Map.entry("consider-going-home", "consider-return"), Map.entry("weigh-return", "consider-return"), Map.entry("think-about-it", "consider-return")
     );
 
     public static String translate(String phrase) {
@@ -68,19 +70,25 @@ public class OpenAIChatAI implements ChatAIStrategy {
     /**
      * Everything read from the world, on the server thread, before any mind is asked. {@code local} is the
      * villager's own answer, true to whatever order was just carried out; {@code done} tells whether that order
-     * really took effect (not refused, not already under way, not impossible).
+     * really took effect (not refused, not already under way, not impossible). {@code goesBack} is what it decided
+     * about advice to head back, when that was the message; {@code pos} its exact block, when asked where it is.
      */
     private record Prepared(String playerName, String villagerName, List<Pair<String, String>> history,
                             MenteLocal.Intent intent, @Nullable String outcome, boolean refused, boolean done, String open,
-                            String inHouse, List<Cerebros.Mind> minds, String local, @Nullable String image) {
+                            String inHouse, List<Cerebros.Mind> minds, String local, @Nullable String image,
+                            @Nullable Boolean goesBack, @Nullable BlockPos pos) {
     }
 
     /**
      * How an order a model chose went: done, or why not in the villager's words, what was handed or stored, and the
-     * order's own account of it ({@code how}, plain English, when it gave one).
+     * order's own account of it ({@code how}, plain English, when it gave one); {@code goesBack} what it decided
+     * when the order was to weigh going back.
      */
     private record Acted(boolean done, @Nullable String failLine, @Nullable Acciones.Given given, @Nullable Cofres.Store stored,
-                         @Nullable String how) {
+                         @Nullable String how, @Nullable Boolean goesBack) {
+        Acted(boolean done, @Nullable String failLine, @Nullable Acciones.Given given, @Nullable Cofres.Store stored, @Nullable String how) {
+            this(done, failLine, given, stored, how, null);
+        }
     }
 
     /** One conversation between a villager and one player. */
@@ -163,6 +171,12 @@ public class OpenAIChatAI implements ChatAIStrategy {
             line = MenteLocal.shrug(prep.intent().spanish());
         }
         line = clip(line);
+        if (prep.pos() != null && !MenteLocal.hasCoordinates(line, prep.pos())) {
+            // asked where it is: the exact numbers are always said, whatever the model wrote
+            String at = prep.intent().spanish() ? " Estoy en " + coords(prep.pos()) + "." : " I'm at " + coords(prep.pos()) + ".";
+            MCA.LOGGER.info("[Tropeles] {} no dio sus coordenadas exactas; se agregan: «{}»", prep.villagerName(), line);
+            line = clip(line, MAX_LINE - at.length()) + at;
+        }
         if (early == null) {
             remember(villager.getUuid(), player.getUuid(), msg, line);
         }
@@ -189,6 +203,16 @@ public class OpenAIChatAI implements ChatAIStrategy {
             // the order was already handled here: the model only finds the words, and may not claim another one
             // ("¡Te sigo!" after a refusal, or "me quedo aquí" when it really went mining)
             String promised = message == null ? null : MenteLocal.promise(message);
+            if (prep.goesBack() != null && !prep.refused()) {
+                // advice to head back: it decided itself, and the words must say the same ("¡vuelvo!" when it stays is a lie)
+                if (message != null && (contradicts(message, prep.goesBack())
+                        || promised != null && !(prep.goesBack() && HOME.contains(promised)))) {
+                    MCA.LOGGER.info("[Tropeles] {} decidió {} volver pero dijo otra cosa: habla su propia mente («{}»)", prep.villagerName(),
+                            prep.goesBack() ? "sí" : "no", message);
+                    return prep.local();
+                }
+                return message;
+            }
             if (promised != null && (prep.refused() || !sameOrder(promised, prep.intent().command()))) {
                 MCA.LOGGER.info("[Tropeles] {} prometió '{}' pero hizo '{}': habla su propia mente", prep.villagerName(), promised,
                         prep.refused() ? "nada" : prep.intent().command());
@@ -217,6 +241,13 @@ public class OpenAIChatAI implements ChatAIStrategy {
         if (acted.failLine() != null) {
             return acted.failLine(); // it could not: say so, never what the model hoped
         }
+        if (acted.goesBack() != null) {
+            // it chose to weigh going back before it knew what it would decide: its words count only when they
+            // already say that decision, otherwise its own answer gives the verdict and the reasons
+            MenteLocal.Intent weighed = new MenteLocal.Intent(chosen, "", null, es);
+            boolean fits = message != null && agrees(message, acted.goesBack()) && !contradicts(message, acted.goesBack());
+            return fits ? message : onServer(server, () -> MenteLocal.answer(player, villager, weighed, acted.how(), null, null, false));
+        }
         if (message != null) {
             String words = MenteLocal.promise(message);
             if (words == null || sameOrder(words, chosen)) {
@@ -230,13 +261,64 @@ public class OpenAIChatAI implements ChatAIStrategy {
         return onServer(server, () -> MenteLocal.answer(player, villager, intent, outcome, acted.given(), acted.stored(), false));
     }
 
+    /** The orders that take it home: climbing out of a mine is going home. */
+    private static final Set<String> HOME = Set.of("come-up", "try-go-home", "eat-break");
+
     /** Whether words promising {@code promised} fit the order really carried out: climbing out of a mine is going home. */
     private static boolean sameOrder(String promised, @Nullable String done) {
         if (promised.equals(done)) {
             return true;
         }
-        Set<String> home = Set.of("come-up", "try-go-home", "eat-break");
-        return home.contains(promised) && done != null && home.contains(done);
+        return HOME.contains(promised) && done != null && HOME.contains(done);
+    }
+
+    /** Words that say it goes back: "vale, vuelvo", "tienes razón", "I'll head back". */
+    private static final java.util.regex.Pattern GOING = java.util.regex.Pattern.compile("(?<![a-z])(vuelvo|regreso|me devuelvo|me regreso|subo|ya subo|salgo|"
+            + "me voy a (mi )?casa|voy a (mi )?casa|vamos de vuelta|tienes razon|buena idea|mejor vuelvo|mejor me voy|"
+            + "i('?ll| will) (go|head|come) (back|home|up)|heading (back|home)|going (back|home)|coming (back|up)|you'?re right|good idea|"
+            + "i'?m off)(?![a-z])");
+    /** Words that say it stays: "todavía no", "sigo un rato", "not yet". */
+    private static final java.util.regex.Pattern STAYING = java.util.regex.Pattern.compile("(?<![a-z])(todavia no|aun no|no todavia|no aun|"
+            + "me quedo|sigo (aca|aqui|minando|picando|cavando|un rato|un poco|trabajando)|voy a seguir|mejor no|no hace falta|no (vuelvo|regreso|subo|me voy)|"
+            + "not yet|i('?ll| will) stay|i('?ll| will) keep (going|digging|mining|at it)|i'?m staying|i'?m fine (here|for now)|no need|"
+            + "(i'?m )?not (going|heading) (back|home))(?![a-z])");
+    /**
+     * Said after one of these, words about going are a condition, not a decision: "si insistes, vuelvo". (No bare
+     * "si": without its accent it is also the "sí" of "sí, me voy a casa".)
+     */
+    private static final Set<String> CONDITION = Set.of("quieres", "want", "if", "cuando", "when", "insistes", "insist", "unless", "salvo", "luego", "later", "despues");
+
+    /** Whether {@code message} says the decision the villager did not make. */
+    private static boolean contradicts(String message, boolean goes) {
+        String t = Acciones.normalize(message).replaceAll("[^a-z0-9' ]", " ").replaceAll("\\s+", " ").trim();
+        return goes ? says(STAYING, t) : says(GOING, t);
+    }
+
+    /** Whether {@code message} says the decision it made. */
+    private static boolean agrees(String message, boolean goes) {
+        String t = Acciones.normalize(message).replaceAll("[^a-z0-9' ]", " ").replaceAll("\\s+", " ").trim();
+        return goes ? says(GOING, t) : says(STAYING, t);
+    }
+
+    /** A match of {@code pattern} with no "no" and no condition in the few words before it. */
+    private static boolean says(java.util.regex.Pattern pattern, String t) {
+        java.util.regex.Matcher m = pattern.matcher(t);
+        while (m.find()) {
+            String[] before = t.substring(0, m.start()).trim().split(" ");
+            boolean plain = true;
+            for (int i = Math.max(0, before.length - 4); i < before.length; i++) {
+                String w = before[i];
+                if (w.equals("no") || w.equals("not") || w.equals("never") || w.equals("nunca") || w.startsWith("don") || w.startsWith("won")
+                        || w.equals("can't") || w.equals("cant") || CONDITION.contains(w)) {
+                    plain = false;
+                    break;
+                }
+            }
+            if (plain) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The order's name as the command list spells it, or "" when it is none of them. */
@@ -310,6 +392,7 @@ public class OpenAIChatAI implements ChatAIStrategy {
         String outcome = null;
         Acciones.Given given = null;
         Cofres.Store stored = null;
+        Boolean goesBack = null;
         if (intent.order()) {
             try {
                 int hearts = villager.getVillagerBrain().getMemoriesForPlayer(player).getHearts();
@@ -338,6 +421,10 @@ public class OpenAIChatAI implements ChatAIStrategy {
                         outcome = how != null ? how : "You did it: " + command.get().description + ".";
                         // "You have no home to go to here": carried out, but nothing happened
                         done = how == null || !how.startsWith("You have no");
+                        if ("consider-return".equals(intent.command())) {
+                            TriggerCommandInfos.Vuelta vuelta = TriggerCommandInfos.lastVuelta(villager);
+                            goesBack = vuelta != null && vuelta.goes();
+                        }
                     }
                 }
             } catch (RuntimeException e) {
@@ -405,6 +492,9 @@ public class OpenAIChatAI implements ChatAIStrategy {
         StringBuilder orders = new StringBuilder("\n\n");
         if (refused) {
             orders.append(playerName).append(" just asked you to do something, but you refuse: you dislike them. Say no in your own words. Use no command.\n");
+        } else if (goesBack != null) {
+            orders.append(outcome).append(" Answer ").append(playerName).append(" in your own words with that decision and your reasons. ")
+                    .append(goesBack ? "Never say you stay or carry on. " : "Never say you go back, go up or go home now. ").append("Use no command.\n");
         } else if (intent.order()) {
             orders.append("You have already done what ").append(playerName).append(" just asked. ").append(outcome)
                     .append(" Tell them in your own words, matching what really happened. Use no command.\n");
@@ -458,8 +548,10 @@ public class OpenAIChatAI implements ChatAIStrategy {
         String image = !offline && Vistazo.aboutSight(intent) && Cerebros.anyCanLook(minds) ? Vistazo.foto(villager) : null;
         String open = persona + "\n" + context + speech + orders;
 
+        // "¿dónde estás?": the answer will hold the exact numbers, whoever says it
+        BlockPos pos = !intent.order() && ("where".equals(intent.question()) || "coords".equals(intent.question())) ? villager.getBlockPos() : null;
         return new Prepared(playerName, villagerName, history, intent, outcome, refused, done, open, inHouse.toString(),
-                minds, local, image);
+                minds, local, image, goesBack, pos);
     }
 
     /**
@@ -518,6 +610,11 @@ public class OpenAIChatAI implements ChatAIStrategy {
                 boolean done = stored != Cofres.Store.NONE;
                 return new Acted(done, done ? null : MenteLocal.answer(player, villager, new MenteLocal.Intent("store-items", "", null, spanish), "", null, stored, false),
                         null, stored, null);
+            }
+            if (name.equals("consider-return")) {
+                TriggerCommandInfos.Vuelta vuelta = TriggerCommandInfos.considerReturn(player, villager);
+                MCA.LOGGER.info("[Tropeles] {} piensa si volver (lo eligió la IA): {}", villager.getName().getString(), vuelta.goes() ? "vuelve" : "sigue");
+                return new Acted(true, null, null, null, vuelta.how(), vuelta.goes());
             }
             Optional<TriggerCommandInfo> command = TriggerCommandInfos.findCommand(name, player, villager);
             if (command.isPresent()) {
@@ -648,12 +745,20 @@ public class OpenAIChatAI implements ChatAIStrategy {
 
     /** At most {@link #MAX_LINE} characters, cut after a sentence when it can be. */
     private static String clip(String line) {
+        return clip(line, MAX_LINE);
+    }
+
+    private static String clip(String line, int max) {
         String text = line.trim();
-        if (text.length() <= MAX_LINE) {
+        if (text.length() <= max) {
             return text;
         }
-        int cut = Math.max(text.lastIndexOf(". ", MAX_LINE), Math.max(text.lastIndexOf("! ", MAX_LINE), text.lastIndexOf("? ", MAX_LINE)));
-        return cut > 40 ? text.substring(0, cut + 1) : text.substring(0, MAX_LINE - 1) + "…";
+        int cut = Math.max(text.lastIndexOf(". ", max), Math.max(text.lastIndexOf("! ", max), text.lastIndexOf("? ", max)));
+        return cut > 40 ? text.substring(0, cut + 1) : text.substring(0, max - 1) + "…";
+    }
+
+    private static String coords(BlockPos p) {
+        return p.getX() + " " + p.getY() + " " + p.getZ();
     }
 
     /** For the in-game checks: a fresh start, as if it never talked to anyone. */
