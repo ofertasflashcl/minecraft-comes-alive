@@ -567,7 +567,7 @@ public final class Progreso {
         }
         for (Recipe recipe : wanted) {
             boolean needsTable = recipe.table() && !tableInReach(world, villager);
-            if (!hasNonWood(inv, recipe)) {
+            if (!hasNonWood(inv, recipe) || robsIronPick(world, inv, recipe, pick)) {
                 continue;
             }
             int logs = shortLogs(inv, recipe, needsTable);
@@ -1349,6 +1349,51 @@ public final class Progreso {
             keep += 4;
         }
         return keep;
+    }
+
+    /**
+     * With iron for a pickaxe in the bag or in the furnace, a lesser tool does not get the sticks (or the planks for
+     * them, and for a table) that the iron pickaxe will need: a player saves the sticks for the upgrade.
+     */
+    private boolean robsIronPick(ServerWorld world, SimpleInventory inv, Recipe recipe, int pick) {
+        if (pick >= 3 || recipe == IRON_PICKAXE || recipe == DIAMOND_PICKAXE) {
+            return false;
+        }
+        if (count(inv, Items.RAW_IRON) + count(inv, Mat.IRON) + ironInFurnace(world) < 3) {
+            return false;
+        }
+        int sticks = count(inv, Mat.STICK) - recipe.cost().getOrDefault(Mat.STICK, 0);
+        int planks = count(inv, Mat.PLANKS) + 4 * count(inv, Mat.LOG) - recipe.cost().getOrDefault(Mat.PLANKS, 0);
+        if (sticks < 0) {
+            // the recipe saws its own sticks out of planks, two planks for four sticks
+            int batches = (int) Math.ceil(-sticks / 4.0);
+            planks -= 2 * batches;
+            sticks += 4 * batches;
+        }
+        int needPlanks = sticks >= 2 ? 0 : 2;
+        if (count(inv, Mat.TABLE) == 0 && !(ownTable && table != null)) {
+            needPlanks += 4;
+        }
+        return planks < needPlanks;
+    }
+
+    /** Raw iron still in its furnace and ingots waiting in it. */
+    private int ironInFurnace(ServerWorld world) {
+        if (!cooking || furnace == null) {
+            return 0;
+        }
+        BlockEntity be = world.getBlockEntity(furnace);
+        if (!(be instanceof AbstractFurnaceBlockEntity oven)) {
+            return 0;
+        }
+        int n = 0;
+        if (oven.getStack(0).isOf(Items.RAW_IRON)) {
+            n += oven.getStack(0).getCount();
+        }
+        if (oven.getStack(2).isOf(Items.IRON_INGOT)) {
+            n += oven.getStack(2).getCount();
+        }
+        return n;
     }
 
     /** How much of {@code mat} it may burn: all its coal, but only the wood beyond the {@code keepPlanks} it keeps. */
