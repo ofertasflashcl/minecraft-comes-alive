@@ -6,6 +6,7 @@ import net.mca.entity.ai.sense.Obras;
 import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
 import net.mca.util.InventoryUtils;
+import net.minecraft.block.AbstractFurnaceBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
@@ -19,6 +20,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.item.SwordItem;
 import net.minecraft.item.ToolItem;
+import net.minecraft.nbt.NbtCompound;
 import net.minecraft.registry.Registries;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
@@ -585,12 +587,14 @@ public final class Progreso {
                 return null;
             }
         }
-        if (!cooking && pick < 3 && count(inv, Mat.IRON) < 3 && count(inv, Items.RAW_IRON) + count(inv, Mat.IRON) >= 3 && fuelFor(inv, 1) != null
+        // the wood the next tool and its table need is not firewood
+        int keep = woodToKeep(inv);
+        if (!cooking && pick < 3 && count(inv, Mat.IRON) < 3 && count(inv, Items.RAW_IRON) + count(inv, Mat.IRON) >= 3 && fuelFor(inv, 1, keep) != null
                 && (count(inv, Mat.FURNACE) > 0 || count(inv, Mat.STONE) >= 8)) {
             return FURNACE; // stands for "smelt": a furnace is needed first
         }
         int raw = count(inv, Mat.RAW);
-        if (!cooking && raw > 0 && (raw >= 2 || wantCook) && fuelFor(inv, raw) != null
+        if (!cooking && raw > 0 && (raw >= 2 || wantCook) && fuelFor(inv, raw, keep) != null
                 && (count(inv, Mat.FURNACE) > 0 || count(inv, Mat.STONE) >= 8)) {
             return COOK; // raw meat on it: into the furnace, like a player who hunted
         }
@@ -612,9 +616,9 @@ public final class Progreso {
             if (!(be instanceof AbstractFurnaceBlockEntity oven)) {
                 cooking = false;
                 furnace = null;
-            } else if (oven.getStack(2).getCount() >= 3 || oven.getStack(0).isEmpty()
+            } else if (enoughOut(villager, oven) || oven.getStack(0).isEmpty() || wentOut(oven)
                     || tooFar(villager, furnace)) {
-                // the first ingots are out, or it went too far: back to the furnace
+                // the ingots for a tool are out, the fire went out with some left, or it went too far: back to the furnace
                 step = Step.COLLECT;
                 collectTicks = 0;
                 motorRest = 0;
@@ -1165,8 +1169,8 @@ public final class Progreso {
             memory.doing("poniendo una mesa de crafteo", now);
             BlockPos placed = placeBeside(world, villager, Mat.TABLE);
             if (placed == null) {
-                // nowhere to set it down here: try again after a few steps
-                step = Step.IDLE;
+                // nowhere to set it down here: try again after a few steps (a furnace that is done comes along first)
+                step = furnace != null && !cooking ? Step.PACK_UP : Step.IDLE;
                 nextCheck = 100;
                 return;
             }
@@ -1335,18 +1339,80 @@ public final class Progreso {
 
     // ------------------------------------------------------------------ smelting
 
+    /**
+     * Planks it keeps out of the fire: the sticks for the pickaxe the ingots are for, and a table to make it on when
+     * it carries none and has none of its own standing.
+     */
+    private int woodToKeep(SimpleInventory inv) {
+        int keep = 2 * (int) Math.ceil(Math.max(0, 2 - count(inv, Mat.STICK)) / 4.0);
+        if (count(inv, Mat.TABLE) == 0 && !(ownTable && table != null)) {
+            keep += 4;
+        }
+        return keep;
+    }
+
+    /** How much of {@code mat} it may burn: all its coal, but only the wood beyond the {@code keepPlanks} it keeps. */
+    private static int spare(SimpleInventory inv, Mat mat, int keepPlanks) {
+        int planks = count(inv, Mat.PLANKS);
+        if (mat == Mat.PLANKS) {
+            return Math.max(0, planks - keepPlanks);
+        }
+        if (mat == Mat.LOG) {
+            // what the planks do not cover of the wood it keeps is sawn from logs
+            return Math.max(0, count(inv, Mat.LOG) - (int) Math.ceil(Math.max(0, keepPlanks - planks) / 4.0));
+        }
+        return count(inv, mat);
+    }
+
     @Nullable
-    private static Mat fuelFor(SimpleInventory inv, int items) {
-        if (count(inv, Mat.COAL) * 8 >= items) {
+    private static Mat fuelFor(SimpleInventory inv, int items, int keepPlanks) {
+        int coal = spare(inv, Mat.COAL, keepPlanks);
+        int planks = spare(inv, Mat.PLANKS, keepPlanks);
+        int logs = spare(inv, Mat.LOG, keepPlanks);
+        if (coal * 8 >= items) {
             return Mat.COAL;
         }
-        if (count(inv, Mat.PLANKS) * 3 >= items * 2) {
+        if (planks * 3 >= items * 2) {
             return Mat.PLANKS;
         }
-        if (count(inv, Mat.LOG) * 3 >= items * 2) {
+        if (logs * 3 >= items * 2) {
             return Mat.LOG;
         }
-        return count(inv, Mat.COAL) > 0 ? Mat.COAL : count(inv, Mat.PLANKS) > 0 ? Mat.PLANKS : count(inv, Mat.LOG) > 0 ? Mat.LOG : null;
+        return coal > 0 ? Mat.COAL : planks > 0 ? Mat.PLANKS : logs > 0 ? Mat.LOG : null;
+    }
+
+    /** The fire of the furnace is burning (the block shows it lit). */
+    private static boolean lit(AbstractFurnaceBlockEntity oven) {
+        var world = oven.getWorld();
+        BlockState state = world == null ? oven.getCachedState() : world.getBlockState(oven.getPos());
+        return state.contains(AbstractFurnaceBlock.LIT) && state.get(AbstractFurnaceBlock.LIT);
+    }
+
+    /**
+     * How many more items the fire already burning finishes without another lump, as a player reads it off the
+     * flame: what is left of the item cooking now, then a whole cook time each. 0 when the fire is out.
+     */
+    private static int stillBurns(AbstractFurnaceBlockEntity oven) {
+        if (!lit(oven)) {
+            return 0;
+        }
+        NbtCompound saved = oven.createNbt();
+        int burn = saved.getShort("BurnTime");
+        int total = Math.max(1, (int) saved.getShort("CookTimeTotal"));
+        int first = Math.max(0, total - saved.getShort("CookTime"));
+        return burn < first ? 0 : 1 + (burn - first) / total;
+    }
+
+    /** The fire went out with something still in the input and nothing left to burn: it needs a hand. */
+    private static boolean wentOut(AbstractFurnaceBlockEntity oven) {
+        return !oven.getStack(0).isEmpty() && oven.getStack(1).isEmpty() && !lit(oven);
+    }
+
+    /** Three are out, or the ingots out make up the three it was short of for a pickaxe: time to fetch them. */
+    private static boolean enoughOut(VillagerEntityMCA villager, AbstractFurnaceBlockEntity oven) {
+        ItemStack out = oven.getStack(2);
+        int carried = out.isOf(Items.IRON_INGOT) ? villager.getInventory().count(Items.IRON_INGOT) : 0;
+        return out.getCount() >= 3 || carried < 3 && out.getCount() + carried >= 3;
     }
 
     /** Puts a furnace down, loads it with what is to be smelted and fuel from the bag, and goes on with its day. */
@@ -1370,7 +1436,7 @@ public final class Progreso {
         }
         Hands.aim(villager, Vec3d.ofCenter(furnace));
         Predicate<ItemStack> what = goal == COOK ? Progreso::rawFood : s -> s.isOf(Items.RAW_IRON);
-        if (!load(oven, inv, what)) {
+        if (!load(oven, inv, what, woodToKeep(inv))) {
             step = Step.PACK_UP;
             return;
         }
@@ -1391,9 +1457,10 @@ public final class Progreso {
 
     /**
      * What {@code what} picks from the bag into the input (only more of the same when something is in there
-     * already), and fuel for all of it into the fuel slot. False when there is nothing to smelt or burn.
+     * already), and fuel for all of it into the fuel slot, never the {@code keepPlanks} it keeps for its next tool.
+     * False when there is nothing to smelt, or nothing to burn and the fire is out.
      */
-    private static boolean load(AbstractFurnaceBlockEntity oven, SimpleInventory inv, Predicate<ItemStack> what) {
+    private static boolean load(AbstractFurnaceBlockEntity oven, SimpleInventory inv, Predicate<ItemStack> what, int keepPlanks) {
         ItemStack input = oven.getStack(0);
         int rawSlot = input.isEmpty()
                 ? Hands.findSlot(inv, what)
@@ -1414,18 +1481,23 @@ public final class Progreso {
             return false;
         }
         ItemStack fuelNow = oven.getStack(1);
-        // fuel already in there and burning covers this many items
+        boolean lit = lit(oven);
+        // fuel waiting in there, and the fire already burning, cover this many items
         int covered = fuelNow.isEmpty() ? 0 : fuelNow.isOf(Items.COAL) || fuelNow.isOf(Items.CHARCOAL) ? fuelNow.getCount() * 8 : fuelNow.getCount() * 3 / 2;
+        covered += stillBurns(oven);
         if (covered < toSmelt) {
-            Mat fuel = fuelFor(inv, toSmelt - covered);
-            if (fuel == null && fuelNow.isEmpty()) {
-                // nothing to burn: give it back
+            Mat fuel = fuelFor(inv, toSmelt - covered, keepPlanks);
+            if (fuel == null && fuelNow.isEmpty() && !lit) {
+                // nothing to burn and the fire is out: give it back
                 giveBack(inv, oven, 0);
                 return false;
             }
+            // with the fire still going and nothing more to put on, it cooks what the flame lasts for; whatever is
+            // left when it goes out is fetched then (see wentOut)
             if (fuel != null) {
                 int need = toSmelt - covered;
                 int items = fuel == Mat.COAL ? (int) Math.ceil(need / 8.0) : (int) Math.ceil(need / 1.5);
+                items = Math.min(items, spare(inv, fuel, keepPlanks));
                 int slot = Hands.findSlot(inv, fuel.match);
                 ItemStack fuelStack = inv.getStack(slot);
                 if (fuelNow.isEmpty()) {
@@ -1516,7 +1588,8 @@ public final class Progreso {
         if (done > 0) {
             say.accept("chore.mining.smelted", new Object[]{done, outName});
         }
-        boolean stillCooking = !packFurnace && load(oven, inv, Progreso::cookable);
+        // still lit with raw iron left, it goes on cooking: the flame burning in there counts as fuel
+        boolean stillCooking = !packFurnace && load(oven, inv, Progreso::cookable, woodToKeep(inv));
         if (!stillCooking) {
             giveBack(inv, oven, 0);
             giveBack(inv, oven, 1);

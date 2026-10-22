@@ -754,8 +754,9 @@ public class ProspectingTask extends AbstractChoreTask {
         if (phase != Phase.SEEK) {
             return;
         }
-        if (Mining.onSurface(world, feet)) {
-            // the mine starts where the sky ends
+        if (Mining.onSurface(world, feet) && Mining.openGround(world, feet)) {
+            // the mine starts where the sky ends: the door on open ground, where the way up counts as out, the open
+            // top of the staircase already part of the way in
             mina.outside(world, villager);
             return;
         }
@@ -992,7 +993,10 @@ public class ProspectingTask extends AbstractChoreTask {
     }
 
     private void climbUp(ServerWorld world, VillagerEntityMCA villager, BlockPos target, BlockPos feet, VisualMemory memory, long now) {
-        boolean out = Mining.onSurface(world, feet) || !camping && (Mining.outdoors(world, feet) && feet.getY() >= target.getY() - 1
+        // out means on open ground: sky over the open top of its own staircase is not out yet while the land beside
+        // it still rises over its head
+        boolean open = Mining.openGround(world, feet);
+        boolean out = open && Mining.onSurface(world, feet) || !camping && (open && feet.getY() >= target.getY() - 1
                 || feet.getY() >= target.getY() && feet.isWithinDistance(target, 24));
         // never off its feet: leaving in mid-jump drops the block it was about to stand on
         if (out && villager.isOnGround() && !motor.midStep(villager)) {
@@ -1028,10 +1032,14 @@ public class ProspectingTask extends AbstractChoreTask {
             if (fallback) {
                 plan.clear();
                 climbFails = 0;
-                climbMode = preferredClimbMode(world, villager, villager.getBlockPos());
+                BlockPos here = villager.getBlockPos();
+                climbMode = preferredClimbMode(world, villager, here);
                 int hx = target.getX() - feet.getX();
                 int hz = target.getZ() - feet.getZ();
-                if (hx * hx + hz * hz > 4) {
+                // in the open top of its staircase the land is a step or two further on the way it is going: turning
+                // back toward home there would set blocks over the steps it just cut, its way back down
+                boolean cutTop = Mining.outdoors(world, here) && !Mining.openGround(world, here);
+                if (hx * hx + hz * hz > 4 && !cutTop) {
                     // keep climbing toward home, not past it
                     homeDir = Direction.getFacing(hx, 0, hz).getHorizontal();
                 }
@@ -1209,7 +1217,8 @@ public class ProspectingTask extends AbstractChoreTask {
         int dy = target.getY() - feet.getY();
         // a dig-out leg under way is finished before the path finder gets the legs back
         boolean digging = motor.busy() || !plan.isEmpty();
-        if (!digging && dx * dx + dz * dz <= 16 && Math.abs(dy) <= 3 && villager.isOnGround()) {
+        // home is at most a hop up: still down in a hole or a cut under it is not there yet (the ledge climb below)
+        if (!digging && dx * dx + dz * dz <= 16 && dy <= 1 && dy >= -3 && villager.isOnGround()) {
             villager.getNavigation().stop();
             enterHomeStore();
             return;

@@ -211,6 +211,34 @@ public final class Mining {
         return outdoors(world, feet) && feet.getY() >= world.getSeaLevel() - 12;
     }
 
+    /**
+     * Out on open ground, not only under open sky: outdoors, and either nothing beside it reaches up to its head (flat
+     * land, a hilltop, a ditch one step deep) or there is ground on two sides or more it could walk out onto at its
+     * own level or a step down, open to the sky as well (beside a wall or a tree, on a slope, the top of the water
+     * when it swims). False in the open top of a one-wide staircase still two steps or more under the land: the
+     * walls beside it rise over its head and the step below is the only open side.
+     */
+    public static boolean openGround(World world, BlockPos feet) {
+        if (!outdoors(world, feet)) {
+            return false;
+        }
+        // its level: the feet on dry land, the top of the water when it swims
+        int level = Math.max(feet.getY(), world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, feet.getX(), feet.getZ()));
+        boolean walled = false;
+        int sides = 0;
+        for (Direction dir : Direction.Type.HORIZONTAL) {
+            BlockPos next = feet.offset(dir);
+            int top = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, next.getX(), next.getZ());
+            if (top > level + 1) {
+                walled = true; // a block beside it at head height or higher
+            }
+            if (top <= level && top >= level - 1 && passable(world, next) && passable(world, next.up())) {
+                sides++;
+            }
+        }
+        return !walled || sides >= 2;
+    }
+
     /** Lava right at or beside a cell. Used as the feel of heat on the skin, only for cells the body touches. */
     public static boolean heat(World world, BlockPos pos) {
         if (world.getFluidState(pos).isIn(FluidTags.LAVA)) {

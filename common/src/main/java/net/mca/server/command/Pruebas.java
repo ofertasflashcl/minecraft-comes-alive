@@ -960,9 +960,35 @@ public final class Pruebas {
         @Override
         String state() {
             var inv = miner.getInventory();
+            // the whole bag, slot by slot (the order says which block the hands reach for first)
+            StringBuilder bag = new StringBuilder();
+            int free = 0;
+            for (int i = 0; i < inv.size(); i++) {
+                ItemStack stack = inv.getStack(i);
+                if (stack.isEmpty()) {
+                    free++;
+                } else {
+                    bag.append(bag.length() == 0 ? "" : " ").append(i).append(':').append(stack.getItem()).append('x').append(stack.getCount());
+                }
+            }
+            // where its tables and furnaces stand, and what is in each furnace
+            StringBuilder placed = new StringBuilder();
+            for (BlockPos pos : BlockPos.iterate(origin.add(-16, -10, -16), origin.add(16, 8, 16))) {
+                BlockState block = world.getBlockState(pos);
+                if (block.isOf(Blocks.CRAFTING_TABLE)) {
+                    placed.append(" mesa en ").append(pos.toShortString()).append(';');
+                } else if (block.isOf(Blocks.FURNACE) && world.getBlockEntity(pos) instanceof net.minecraft.block.entity.AbstractFurnaceBlockEntity oven) {
+                    placed.append(" horno en ").append(pos.toShortString()).append(" encendido ").append(block.get(net.minecraft.block.AbstractFurnaceBlock.LIT))
+                            .append(" [").append(oven.getStack(0).getItem()).append('x').append(oven.getStack(0).getCount())
+                            .append(", ").append(oven.getStack(1).getItem()).append('x').append(oven.getStack(1).getCount())
+                            .append(", ").append(oven.getStack(2).getItem()).append('x').append(oven.getStack(2).getCount()).append("];");
+                }
+            }
             return "en " + miner.getBlockPos().toShortString() + ", haciendo: " + Retina.memory(miner).doing() + ", crudo " + inv.count(Items.RAW_IRON)
                     + ", lingotes " + inv.count(Items.IRON_INGOT) + ", carbón " + inv.count(Items.COAL) + ", roca " + inv.count(Items.COBBLESTONE)
-                    + ", horno " + inv.count(Items.FURNACE) + ", fundiendo " + task.cooking() + ", mano " + miner.getMainHandStack().getItem();
+                    + ", horno " + inv.count(Items.FURNACE) + ", fundiendo " + task.cooking() + ", mano " + miner.getMainHandStack().getItem()
+                    + ", tarea " + task.debug() + ", equipo quieto " + task.gearIdle() + ", comida " + task.food()
+                    + ", mochila (" + free + " libres) " + bag + ", en el mundo:" + (placed.length() == 0 ? " nada" : placed);
         }
 
         @Override

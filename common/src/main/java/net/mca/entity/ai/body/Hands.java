@@ -392,6 +392,10 @@ public final class Hands {
         if (state.hasBlockEntity() || block instanceof FallingBlock || block == Blocks.TNT) {
             return false;
         }
+        // the crafting table it carries is gear, like its furnace and chest: never a step, a bridge or a plug
+        if (block == Blocks.CRAFTING_TABLE) {
+            return false;
+        }
         if (state.isIn(BlockTags.LOGS) || state.isIn(BlockTags.BEACON_BASE_BLOCKS) || state.isIn(BlockTags.LEAVES) || state.isIn(BlockTags.ICE)) {
             return false;
         }
