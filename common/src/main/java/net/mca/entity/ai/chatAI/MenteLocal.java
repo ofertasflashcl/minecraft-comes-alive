@@ -7,6 +7,8 @@ import net.mca.entity.ai.MoveState;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
 import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.body.Mining;
+import net.mca.entity.ai.sense.Escena;
+import net.mca.entity.ai.sense.Lugar;
 import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
 import net.minecraft.entity.SpawnGroup;
@@ -93,6 +95,14 @@ public final class MenteLocal {
             + "tales|talar|peques|pescar|caces|cazar|cosech[a-z]*|excaves|a la mina)(?![a-z])"
             + "|(?<![a-z])(don'?t|do not|never) (go )?(mine|mining|chop|fish|hunt|harvest)");
 
+    /** Asking whether it sees something, or where one is: "¿hay ...?", "¿ves ...?", "¿dónde hay ...?", "any ...?". */
+    private static final String ASK = "(hay(?! que )|ves|viste|divisas|distingues|donde|any|see|spot|where|there)( [a-z']+){0,3} ";
+
+    /** "see:<kind>": a question about one kind of thing ({@link Escena} kinds), by the words people use for it. */
+    private static Map.Entry<String, Pattern> seeing(String kind, String nouns) {
+        return order("see:" + kind, ASK + "(" + nouns + ")");
+    }
+
     private static final List<Map.Entry<String, Pattern>> QUESTIONS = List.of(
             order("bye", "adios|chao|chau|nos vemos|hasta luego|hasta pronto|hasta manana|bye|goodbye|good bye|see you|see ya"),
             order("hungry", "tienes hambre|tienes comida|te queda comida|has comido|are you hungry|do you have (any )?food|have you eaten"),
@@ -100,9 +110,26 @@ public final class MenteLocal {
                     + "found anything|what did you find|did you find"),
             order("doing", "que (estas haciendo|haces|andas haciendo)|en que andas|en que estas|what are you doing|what('re| are) you up to"),
             order("bag", "que (tienes|llevas|traes|cargas)|tu inventario|tu mochila|que hay en tu mochila|what do you have|what are you carrying|your inventory|your bag"),
+            // "¿hay árboles?", "¿ves agua?", "¿dónde hay hierro?", "any monsters around?"
+            seeing(Escena.ARBOL, "arbol|arboles|bosques?|troncos?|madera|trees?|woods?|forests?|logs?"),
+            seeing(Escena.AGUA, "agua|rios?|lagos?|mar|laguna|charcos?|water|rivers?|lakes?|sea|ocean|pond"),
+            seeing(Escena.LAVA, "lava"),
+            seeing(Escena.CUEVA, "cuevas?|cavernas?|grutas?|tuneles?|caves?|caverns?|tunnels?"),
+            seeing(Escena.MONSTRUO, "monstruos?|zombis?|zombies?|esqueletos?|aranas?|creepers?|enemigos?|bichos|mobs?|monsters?|enemies|hostiles?|skeletons?|spiders?"),
+            seeing(Escena.ANIMAL, "animales|animal|vacas?|ovejas?|cerdos?|chanchos?|gallinas?|pollos?|caballos?|peces|conejos?|animals?|cows?|sheep|pigs?|chickens?|horses?|fish|rabbits?"),
+            seeing(Escena.MINERAL, "minerales|mineral|menas?|vetas?|ores?|minerals?|" + ORES),
+            seeing(Escena.COFRE, "cofres?|baul|baules|chests?"),
+            seeing(Escena.CULTIVO, "cultivos?|sembrados?|huertos?|trigo|crops?|farms?|wheat"),
+            seeing(Escena.CONSTRUCCION, "casas?|edificios?|construcciones?|aldea|pueblo|houses?|buildings?|village"),
+            seeing(Escena.PERSONA, "personas?|gente|aldeanos?|alguien|jugadores|jugador|people|villagers?|anyone|someone|players?"),
             order("health", "como estas|estas bien|como te sientes|que tal estas|how are you|are you (ok|okay|alright)|you (ok|okay)"),
-            order("where", "donde estas|en donde estas|where are you"),
-            order("see", "que ves|que estas viendo|que hay (alrededor|cerca)|what do you see|what can you see|what'?s around"),
+            order("where", "donde estas|en donde estas|donde te encuentras|donde andas|en que lugar estas|where are you|where you at"),
+            order("see", "que ves|que estas viendo|que hay (alrededor|cerca)|what do you see|what can you see|what'?s around|"
+                    + "que hay( (por aqui|por aca|aqui|aca|ahi|alla|al frente|enfrente|delante|adelante|detras|atras|a tu (izquierda|derecha|alrededor)))?$|"
+                    + "que (miras|estas mirando)|mira( a tu| a su)? alrededor|mira (bien|eso|esto|ahi|alla|aca|al frente|adelante)|^mira$|"
+                    + "(echa|echale|da|dale) un vistazo|describe(me)?|describi(r|lo)?|cuentame (que|lo que) ves|como es (el lugar|aqui|aca|esto)|"
+                    + "what is around|what'?s (out )?there|what'?s near( you)?|look around|^look$|take a look|have a look|"
+                    + "tell me what you see|what are you looking at|what does it look like"),
             order("name", "como te llamas|quien eres|cual es tu nombre|what('s| is) your name|who are you"),
             order("help", "que puedes hacer|que sabes hacer|ayuda|what can you do|help"),
             order("thanks", "gracias|muchas gracias|thanks|thank you|bien hecho|buen trabajo|good job|well done"),
@@ -339,6 +366,9 @@ public final class MenteLocal {
             return order(villager, intent, outcome, given, stored, es, name);
         }
         String q = intent.question() == null ? "" : intent.question();
+        if (q.startsWith("see:")) {
+            return seeKind(villager, q.substring(4), es);
+        }
         return switch (q) {
             case "doing" -> doing(villager, es);
             case "bag" -> bag(villager, es);
@@ -395,10 +425,10 @@ public final class MenteLocal {
                         ? (es ? "¡A la mina! Me armo mis herramientas y busco minerales." : "Off to the mine! I'll make my tools and look for ores.")
                         : (es ? "Voy a minar y busco " + oreName(ore, true) + " primero." : "I'll go mining and look for " + oreName(ore, false) + " first.");
             }
-            case "start-chopping" -> es ? "Voy a talar árboles." : "I'll go chop some trees.";
-            case "start-fishing" -> es ? "Voy a pescar." : "I'll go fishing.";
+            case "start-chopping" -> (es ? "Voy a talar árboles." : "I'll go chop some trees.") + hint(villager, Escena.ARBOL, es);
+            case "start-fishing" -> (es ? "Voy a pescar." : "I'll go fishing.") + hint(villager, Escena.AGUA, es);
             case "start-harvesting" -> es ? "Voy a cosechar." : "I'll go harvest.";
-            case "start-hunting" -> es ? "Voy de caza." : "I'll go hunting.";
+            case "start-hunting" -> (es ? "Voy de caza." : "I'll go hunting.") + hint(villager, Escena.ANIMAL, es);
             case "start-escort" -> es ? "Te escolto." : "I'll escort you.";
             case "try-go-home" -> mining ? (es ? "Dejo de picar y vuelvo a casa." : "I'll stop digging and head home.")
                     : outcome.startsWith("You have no home") || villager.getResidency().getHome().isEmpty()
@@ -500,14 +530,90 @@ public final class MenteLocal {
         return body + " " + doing(villager, es);
     }
 
+    /**
+     * Where it is, from its sense of place ({@link Lugar}): outside, under a roof or down in the rock and how deep,
+     * with its coordinates; a house roof is never "underground".
+     */
     private static String where(VillagerEntityMCA villager, boolean es) {
         BlockPos p = villager.getBlockPos();
-        boolean under = !villager.getWorld().isSkyVisible(p.up()) && p.getY() < villager.getWorld().getSeaLevel() - 4;
         String coords = p.getX() + ", " + p.getY() + ", " + p.getZ();
+        Lugar lugar = Vistazo.lugar(villager);
+        if (lugar != null) {
+            int depth = Vistazo.profundidad(villager);
+            return switch (lugar) {
+                case AFUERA -> depth > 8
+                        ? (es ? "Estoy afuera, pero en un hoyo, unos " + depth + " bloques bajo el suelo, en " + coords + "."
+                        : "I'm outside, but down in a pit, about " + depth + " blocks below the ground, at " + coords + ".")
+                        : (es ? "Estoy afuera, en " + coords + "." : "I'm outside, at " + coords + ".");
+                case BAJO_TECHO -> es ? "Estoy bajo techo, en " + coords + "." : "I'm indoors, under a roof, at " + coords + ".";
+                case BAJO_TIERRA -> depth > 0
+                        ? (es ? "Estoy bajo tierra, unos " + depth + " bloques bajo la superficie, en " + coords + "."
+                        : "I'm underground, about " + depth + " blocks below the surface, at " + coords + ".")
+                        : (es ? "Estoy bajo tierra, en " + coords + "." : "I'm underground, at " + coords + ".");
+            };
+        }
+        boolean under = !villager.getWorld().isSkyVisible(p.up()) && p.getY() < villager.getWorld().getSeaLevel() - 4;
         return es ? "Estoy en " + coords + (under ? ", bajo tierra." : ".") : "I'm at " + coords + (under ? ", underground." : ".");
     }
 
+    /** What it sees: the scene in its own words ({@link Escena#describe(boolean)}), else the beings and ores its eyes saw. */
     private static String see(VillagerEntityMCA villager, boolean es) {
+        Escena scene = Vistazo.escena(villager);
+        if (scene != null) {
+            try {
+                String said = scene.describe(es);
+                if (said != null && !said.isBlank()) {
+                    return said.trim();
+                }
+            } catch (RuntimeException e) {
+                MCA.LOGGER.warn("[Tropeles] {} no supo contar lo que ve: {}", villager.getName().getString(), e.toString());
+            }
+        }
+        return sightings(villager, es);
+    }
+
+    /** "¿Hay árboles?": where the nearest one is and how many, or that it saw none ({@link Escena#describe(String, boolean)}). */
+    private static String seeKind(VillagerEntityMCA villager, String kind, boolean es) {
+        Escena scene = Vistazo.escena(villager);
+        if (scene != null) {
+            try {
+                String said = scene.describe(kind, es);
+                if (said != null && !said.isBlank()) {
+                    return said.trim();
+                }
+            } catch (RuntimeException e) {
+                MCA.LOGGER.warn("[Tropeles] {} no supo contar si ve {}: {}", villager.getName().getString(), kind, e.toString());
+            }
+        }
+        if (Escena.MINERAL.equals(kind) || Escena.ANIMAL.equals(kind) || Escena.MONSTRUO.equals(kind)) {
+            return sightings(villager, es);
+        }
+        return es ? "No sabría decirte, todavía no me he fijado bien." : "I couldn't say, I haven't had a good look yet.";
+    }
+
+    /**
+     * What it saw of a kind, said after an order when it fits ("Voy a talar árboles. Veo un roble a la izquierda..."):
+     * only when it really saw one not far off, otherwise nothing.
+     */
+    private static String hint(VillagerEntityMCA villager, String kind, boolean es) {
+        Escena scene = Vistazo.escena(villager);
+        if (scene == null) {
+            return "";
+        }
+        try {
+            Escena.Cosa nearest = scene.nearest(kind);
+            if (nearest == null || nearest.distancia() > 48) {
+                return "";
+            }
+            String said = scene.describe(kind, es);
+            return said == null || said.isBlank() || said.length() > 140 ? "" : " " + said.trim();
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    /** The beings and ores its eyes saw lately, from the raw sightings (when no scene could be made). */
+    private static String sightings(VillagerEntityMCA villager, boolean es) {
         VisualMemory memory = Retina.memory(villager);
         long now = villager.getWorld().getTime();
         List<String> parts = new ArrayList<>();
@@ -576,7 +682,16 @@ public final class MenteLocal {
         counts.forEach((id, n) -> parts.add(amount(n, kinds.get(id), es)));
         String carried = parts.isEmpty() ? (es ? "Todavía no he sacado nada bueno." : "I haven't dug up anything good yet.")
                 : (es ? "Llevo " : "I've got ") + join(parts.subList(0, Math.min(6, parts.size())), es) + ".";
-        String seen = see(villager, es);
+        Escena scene = Vistazo.escena(villager);
+        if (scene != null) {
+            try {
+                // the ores it saw, with where they are; nothing more when it saw none
+                return scene.nearest(Escena.MINERAL) == null ? carried : carried + " " + scene.describe(Escena.MINERAL, es).trim();
+            } catch (RuntimeException e) {
+                // the raw sightings below
+            }
+        }
+        String seen = sightings(villager, es);
         return seen.startsWith(es ? "Veo " : "I can see ") ? carried + " " + seen : carried;
     }
 

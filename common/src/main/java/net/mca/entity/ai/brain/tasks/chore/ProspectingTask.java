@@ -11,12 +11,15 @@ import net.mca.entity.ai.body.Agua;
 import net.mca.entity.ai.body.Archery;
 import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.body.CombatMind;
+import net.mca.entity.ai.body.Explorar;
 import net.mca.entity.ai.body.Hands;
 import net.mca.entity.ai.body.Mina;
 import net.mca.entity.ai.body.Mining;
 import net.mca.entity.ai.body.Motor;
 import net.mca.entity.ai.body.Progreso;
 import net.mca.entity.ai.relationship.AgeState;
+import net.mca.entity.ai.sense.Entorno;
+import net.mca.entity.ai.sense.MapaVisto;
 import net.mca.entity.ai.sense.Obras;
 import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
@@ -54,7 +57,6 @@ import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.Heightmap;
 import net.minecraft.world.World;
@@ -122,6 +124,10 @@ public class ProspectingTask extends AbstractChoreTask {
     private static final int SAVE_TICKS = 1200;
     /** Ticks without any progress before the watchdog counts a round. */
     private static final int STUCK_TICKS = 600;
+    /** The same, standing on the land with no ore in view and no step cut. */
+    private static final int SURFACE_STUCK_TICKS = 300;
+    /** A spot found no good to start a mine is not tried again for this long. */
+    private static final long SITE_FORGET = 6000;
     /** Rounds of no progress on the way home, counted in ticks, before it says it is lost. */
     private static final int LOST_TICKS = 12000;
     private static final int REST_TICKS = 6000;
@@ -252,13 +258,29 @@ public class ProspectingTask extends AbstractChoreTask {
     @Nullable
     private BlockPos lootAt;
     private int lootTicks;
-    private int exploreTicks;
+    /** Looking around for food, or for a spot to start a mine: where it looked already and which way it went. */
+    private final Explorar explorar = new Explorar();
+    /** The forage it is on is for provisions before going down, not because it is hungry. */
+    private boolean provisioning;
     private long lastHuntSay = -1200;
     private long foodKnownAt = -1000;
     private boolean foodKnownCache;
 
     private int surfaceTicks;
     private int restTicks;
+
+    // where the mine starts: natural ground, not a floor, a wall or a path
+    /** The spot it walks to before it cuts the first step, or null. */
+    @Nullable
+    private BlockPos site;
+    private int siteTicks;
+    /** When it may skip judging the spot it stands on again (it was fine a moment ago). */
+    private long siteCheckAt;
+    /** The watchdog saw it stand still on the land without digging: find another spot whatever this one looks like. */
+    private boolean forceSite;
+    /** Exploring for a spot: the eye showed no natural land away from buildings. */
+    private boolean siteExploring;
+    private final Map<Long, Long> badSites = new HashMap<>();
 
     // watchdog
     @Nullable
@@ -375,7 +397,7 @@ public class ProspectingTask extends AbstractChoreTask {
         tunnelDir = saved.dir & 3;
         branchLeft = saved.left;
         MCA.LOGGER.info("[Tropeles] {} retoma su mina: {} pasos de camino guardados", villager.getName().getString(), saved.size());
-        if (saved.known() && Mining.onSurface(world, villager.getBlockPos())) {
+        if (saved.known() && Entorno.enLaSuperficie(world, villager)) {
             beginReturn(world, villager);
         }
     }
@@ -428,6 +450,11 @@ public class ProspectingTask extends AbstractChoreTask {
         fallback = false;
         climb.clear();
         sealed.clear();
+        site = null;
+        siteExploring = false;
+        forceSite = false;
+        provisioning = false;
+        explorar.reset();
         resetWatch();
         ItemStack stack = villager.getMainHandStack();
         if (WorkTools.isPickaxe(stack)) {
@@ -776,7 +803,8 @@ public class ProspectingTask extends AbstractChoreTask {
         BlockPos feet = villager.getBlockPos();
         SimpleInventory inv = villager.getInventory();
         tidyBag(world, villager, false);
-        boolean underground = !Mining.onSurface(world, feet);
+        // down in the rock by its own sense of place: a house roof or a tree over its head is not a mine
+        boolean underground = Entorno.bajoTierra(world, villager);
         boolean noFood = foodPoints(inv) == 0;
         boolean weak = villager.getHealth() < villager.getMaxHealth() * 0.4F && food < HEAL_ABOVE;
         if (noFood && now >= nextFoodTrip && (food <= leaveAt(world, feet) || weak)) {
@@ -818,8 +846,11 @@ public class ProspectingTask extends AbstractChoreTask {
             }
             if (foodPoints(inv) < 6 && !world.isNight() && foodKnown(world, villager)) {
                 say("chore.mining.provisions");
+                MCA.LOGGER.info("[Tropeles] {} junta provisiones antes de bajar ({}, {} puntos de comida en la mochila)", name(),
+                        Entorno.lugar(world, villager).palabra(), foodPoints(inv));
                 trip = Trip.FOOD;
                 startForage();
+                provisioning = true;
                 return true;
             }
         }
@@ -925,6 +956,14 @@ public class ProspectingTask extends AbstractChoreTask {
         climbFails = 0;
         saveMine(world, villager);
         resetWatch();
+        if (!Entorno.bajoTierra(world, villager) && (Mining.onSurface(world, feet) || Mining.nearTheSky(world, feet, 8))) {
+            // not in a mine at all: out on the land, under a roof, at the open top of its staircase. Nothing to climb
+            // out of; it sets off from here like a player who just turns around and walks
+            MCA.LOGGER.info("[Tropeles] {} se va ({}) desde {}, {}: no está en una mina, camina directo a casa {}{}", name(), why,
+                    feet.toShortString(), Entorno.lugar(world, villager).palabra(), target.toShortString(), camping ? " (acampa)" : "");
+            surfaced(world, villager);
+            return;
+        }
         phase = Phase.HOME_UP;
         MCA.LOGGER.info("[Tropeles] {} sale de la mina ({}): {} pasos de camino, comida {}, casa {}{}", name(), why, mina.size(), food,
                 target.toShortString(), camping ? " (acampa)" : "");
@@ -1572,7 +1611,8 @@ public class ProspectingTask extends AbstractChoreTask {
         preyTicks = 0;
         lootTicks = 0;
         lootAt = null;
-        exploreTicks = 0;
+        explorar.reset();
+        provisioning = false;
         foraged = true;
         resetWatch();
         MCA.LOGGER.info("[Tropeles] {} sale a buscar comida (comida {})", name(), food);
@@ -1662,17 +1702,14 @@ public class ProspectingTask extends AbstractChoreTask {
         lookAround(world, villager, memory, now);
     }
 
-    /** No animal in sight: walk somewhere new and look around, as a player turns the camera. */
+    /**
+     * No animal in sight: explore like a player, a look all around, then the way it knows least about (see
+     * {@link Explorar}). Once it has seen most of the land around and nothing to hunt, the search is over.
+     */
     private void lookAround(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now) {
-        memory.doing("buscando algo para comer", now);
-        float yaw = villager.getHeadYaw() + 9.0F;
-        Vec3d look = Vec3d.fromPolar(-5.0F + 10.0F * MathHelper.sin(exploreTicks * 0.05F), yaw).multiply(8);
-        Hands.aim(villager, villager.getEyePos().add(look));
-        if (++exploreTicks % 80 == 1 || villager.getNavigation().isIdle() && exploreTicks % 20 == 0) {
-            Vec3d target = FuzzyTargeting.find(villager, 24, 6);
-            if (target != null) {
-                villager.getNavigation().startMovingTo(target.x, target.y, target.z, 0.65);
-            }
+        memory.doing(explorar.sweeping() ? "mirando alrededor buscando algo para comer" : "buscando algo para comer", now);
+        if (!explorar.tick(world, villager, Explorar.Busca.COMIDA)) {
+            noFoodTicks = LOOK_FOR_FOOD; // nothing to hunt anywhere it can see: done looking
         }
     }
 
@@ -1684,6 +1721,14 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         int carried = foodPoints(villager.getInventory());
         MCA.LOGGER.info("[Tropeles] {} termina de buscar comida: lleva {} puntos, comida {}", name(), carried, food);
+        if (provisioning) {
+            provisioning = false;
+            if (carried < 6) {
+                // nothing out there to take along: it goes down with what it has, and does not set off again for a day
+                nextProvision = world.getTime() + 24000;
+                MCA.LOGGER.info("[Tropeles] {} no encontró provisiones: baja a minar con lo que tiene", name());
+            }
+        }
         if (carried == 0 && food <= GO_HOME_BELOW) {
             phase = Phase.SEEK;
             abandonJobWithMessage("chore.mining.nofood");
@@ -1909,13 +1954,27 @@ public class ProspectingTask extends AbstractChoreTask {
             return false;
         }
         stuckTicks += 20;
-        if (stuckTicks < STUCK_TICKS) {
+        // standing about up on the land with nothing in view is noticed sooner: there is no rock face to work at
+        boolean onLand = ore == null && Entorno.enLaSuperficie(world, villager);
+        if (stuckTicks < (onLand ? SURFACE_STUCK_TICKS : STUCK_TICKS)) {
             return false;
         }
         stuckTicks = 0;
         stuckRounds++;
         motor.reset(world, villager);
         plan.clear();
+        if (onLand) {
+            // it never got the first step cut here: another spot, another way, never a climb out of a mine it is not in
+            MCA.LOGGER.info("[Tropeles] {} lleva {} s quieto en {} ({}) sin cavar, haciendo «{}»: busca otro sitio para empezar su mina (vuelta {})",
+                    name(), SURFACE_STUCK_TICKS / 20, feet.toShortString(), Entorno.lugar(world, villager).palabra(), Retina.memory(villager).doing(), stuckRounds);
+            badSites.put(siteKey(feet), world.getTime() + SITE_FORGET);
+            forceSite = true;
+            siteCheckAt = 0;
+            site = null;
+            tunnelDir = (tunnelDir + (stuckRounds % 2 == 1 ? 1 : 3)) & 3;
+            Retina.memory(villager).doing("atascado: busca otro sitio para cavar", world.getTime());
+            return true;
+        }
         if (ore != null) {
             ignore(ore, world.getTime());
             ore = null;
@@ -2015,7 +2074,10 @@ public class ProspectingTask extends AbstractChoreTask {
             return;
         }
 
-        // nothing seen: open rock in front of the eyes
+        // nothing seen: open rock in front of the eyes, from ground that is its to dig
+        if (plan.isEmpty() && !motor.busy() && needsSite(world, villager, memory, now)) {
+            return;
+        }
         if (plan.isEmpty()) {
             if (levelCells >= BARREN_CELLS) {
                 barrenLevel(world, villager);
@@ -2040,6 +2102,177 @@ public class ProspectingTask extends AbstractChoreTask {
             motor.reset(world, villager);
             tunnelDir = (tunnelDir + (villager.getRandom().nextBoolean() ? 1 : 3)) & 3;
         }
+    }
+
+    /**
+     * Before the first step of a staircase, up on the land: the ground it is about to cut must be nature's, not the
+     * floor, a wall or a path of a village or a player, nor the inside of a village house. When it is not, it walks
+     * to open natural land its eye saw away from any building (and explores for some when it saw none), and
+     * starts there. True while it is busy getting to such a spot.
+     */
+    private boolean needsSite(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now) {
+        BlockPos feet = villager.getBlockPos();
+        if (site == null && !siteExploring && !forceSite
+                && (now < siteCheckAt || feet.getY() <= targetY(world, villager) + 2 || Entorno.bajoTierra(world, villager)
+                || Entorno.profundidad(world, villager) > 2)) {
+            return false; // already in the rock, not going down, or judged fine a moment ago
+        }
+        if (site != null) {
+            double dx = site.getX() + 0.5 - villager.getX();
+            double dz = site.getZ() + 0.5 - villager.getZ();
+            boolean there = dx * dx + dz * dz <= 2.25;
+            boolean lost = ++siteTicks > 400;
+            villager.getBrain().forget(MemoryModuleType.WALK_TARGET);
+            if (!there && !lost && villager.getNavigation().isIdle() && (siteTicks % 20) == 0) {
+                // the path ran out short of it: on from here, or that spot is out of reach
+                lost = !villager.getNavigation().startMovingTo(site.getX() + 0.5, site.getY(), site.getZ() + 0.5, 0.65);
+            }
+            if (!there && !lost) {
+                memory.doing("yendo a un buen sitio para empezar su mina", now);
+                return true;
+            }
+            villager.getNavigation().stop();
+            if (!there && dx * dx + dz * dz > 9) {
+                MCA.LOGGER.info("[Tropeles] {} no llega al sitio {} para su mina: busca otro", name(), site.toShortString());
+                badSites.put(siteKey(site), now + SITE_FORGET);
+            }
+            site = null;
+            // judged again below, from where it stands now
+        }
+        if (siteExploring && (villager.age % 10) != 0) {
+            memory.doing("buscando dónde empezar su mina", now);
+            if (!explorar.tick(world, villager, Explorar.Busca.SITIO)) {
+                stopSiteSearch(now, "exploró todo alrededor sin ver tierra natural lejos de las casas");
+                return false;
+            }
+            return true;
+        }
+        String why = forceSite ? "lleva rato parado ahí sin poder cavar" : badSpot(world, villager, feet);
+        forceSite = false;
+        if (why == null) {
+            if (siteExploring) {
+                MCA.LOGGER.info("[Tropeles] {} encontró dónde empezar su mina en {}", name(), feet.toShortString());
+                siteExploring = false;
+            }
+            siteCheckAt = now + 100;
+            return false;
+        }
+        badSites.put(siteKey(feet), now + SITE_FORGET);
+        BlockPos next = chooseSite(world, villager, feet, now);
+        if (next != null) {
+            MCA.LOGGER.info("[Tropeles] {} no empieza su mina en {} ({}, {}): va a tierra natural que vio en {}", name(), feet.toShortString(), why,
+                    Entorno.lugar(world, villager).palabra(), next.toShortString());
+            site = next;
+            siteTicks = 0;
+            siteExploring = false;
+            memory.doing("yendo a un buen sitio para empezar su mina", now);
+            villager.getNavigation().startMovingTo(site.getX() + 0.5, site.getY(), site.getZ() + 0.5, 0.65);
+            return true;
+        }
+        if (!siteExploring) {
+            MCA.LOGGER.info("[Tropeles] {} no empieza su mina en {} ({}) y no vio tierra natural lejos de las casas: explora", name(),
+                    feet.toShortString(), why);
+            siteExploring = true;
+            explorar.reset();
+        }
+        memory.doing("buscando dónde empezar su mina", now);
+        if (!explorar.tick(world, villager, Explorar.Busca.SITIO)) {
+            stopSiteSearch(now, "exploró todo alrededor sin ver tierra natural lejos de las casas");
+            return false;
+        }
+        return true;
+    }
+
+    /** Nothing better anywhere it looked: it digs where it can from here, and the watchdog takes it from there. */
+    private void stopSiteSearch(long now, String why) {
+        siteExploring = false;
+        siteCheckAt = now + SITE_FORGET;
+        explorar.reset();
+        MCA.LOGGER.info("[Tropeles] {} deja de buscar sitio ({}): cava donde pueda", name(), why);
+    }
+
+    /** Why the mine cannot start where it stands, or null when the ground here is its to cut. */
+    @Nullable
+    private String badSpot(ServerWorld world, VillagerEntityMCA villager, BlockPos feet) {
+        if (Obras.inVillageBuilding(world, feet)) {
+            return "está dentro de una casa del pueblo";
+        }
+        Obras.Kind floor = Obras.kind(world, villager, feet.down());
+        if (floor == Obras.Kind.BUILDING || floor == Obras.Kind.PLAYER_BUILT || floor == Obras.Kind.CROP) {
+            return "el suelo es " + floor.label;
+        }
+        for (int turn = 0; turn < 4; turn++) {
+            Direction way = Direction.fromHorizontal((tunnelDir + turn) & 3);
+            if (stairsFit(world, villager, feet, way)) {
+                if (turn != 0) {
+                    tunnelDir = way.getHorizontal();
+                }
+                return null;
+            }
+        }
+        return "no hay tierra natural para bajar por ningún lado";
+    }
+
+    /** The first two steps down that way cut only nature (or open air): no floor, wall or path of anybody's build. */
+    private static boolean stairsFit(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, Direction way) {
+        for (int k = 1; k <= 2; k++) {
+            BlockPos step = feet.offset(way, k).down(k);
+            for (BlockPos cell : new BlockPos[]{step.up(2), step.up(), step}) {
+                if (Mining.passable(world, cell)) {
+                    continue;
+                }
+                if (!Mining.mayDig(world, cell, world.getBlockState(cell)) || !Obras.mayBreak(world, villager, cell)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Open natural land or rock its eye saw near its own level, nearest first, away from anything built and from
+     * water and lava, and not a spot already found no good.
+     */
+    @Nullable
+    private BlockPos chooseSite(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, long now) {
+        badSites.values().removeIf(until -> until < now);
+        MapaVisto mapa = Retina.memory(villager).mapa();
+        int tries = 0;
+        for (BlockPos cell : mapa.find(feet, 40, MapaVisto.LAND | MapaVisto.ROCK)) {
+            BlockPos top = mapa.land(cell.getX(), cell.getZ());
+            if (top == null || top.isWithinDistance(feet, 3) || Math.abs(top.getY() - feet.getY()) > 6) {
+                continue;
+            }
+            Long until = badSites.get(siteKey(top));
+            if (until != null && until > now || (mapa.flags(top.getX(), top.getZ()) & (MapaVisto.WATER | MapaVisto.LAVA | MapaVisto.BUILT)) != 0
+                    || builtNear(mapa, top)) {
+                continue;
+            }
+            if (++tries > 24) {
+                break; // a look at the nearest few is enough; the village test below is not free
+            }
+            if (Obras.inVillageBuilding(world, top)) {
+                continue;
+            }
+            return top;
+        }
+        return null;
+    }
+
+    /** Its eye saw a building within about six blocks of this spot. */
+    private static boolean builtNear(MapaVisto mapa, BlockPos pos) {
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                if ((mapa.flags(pos.getX() + dx * MapaVisto.CELL, pos.getZ() + dz * MapaVisto.CELL) & MapaVisto.BUILT) != 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static long siteKey(BlockPos pos) {
+        return ((long) (pos.getX() >> 1) << 32) ^ ((pos.getZ() >> 1) & 0xffffffffL);
     }
 
     /** A whole stretch of this layer and not one ore: the branch mine moves a few blocks up or down. */

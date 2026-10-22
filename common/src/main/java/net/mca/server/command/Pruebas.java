@@ -15,6 +15,7 @@ import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.body.Mining;
 import net.mca.entity.ai.brain.tasks.FollowTask;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
+import net.mca.entity.ai.sense.Entorno;
 import net.mca.entity.ai.sense.Obras;
 import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
@@ -84,11 +85,12 @@ public final class Pruebas {
                 case "cultivos" -> start(new Cultivos(world));
                 case "agua-tunel" -> start(new AguaTunel(world));
                 case "agua-pozo" -> start(new AguaPozo(world));
+                case "explorar" -> start(new Exploracion(world));
                 case "ia-local" -> start(new IaLocal(world));
                 case "ia-red" -> start(new IaRed(world));
                 case "resumen" -> resumen();
                 default -> {
-                    ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | progreso | nombre | obras | robo | regalo | arco-cerca | horno | hogar | cultivos | agua-tunel | agua-pozo | ia-local | ia-red | resumen"));
+                    ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | progreso | nombre | obras | robo | regalo | arco-cerca | horno | hogar | cultivos | agua-tunel | agua-pozo | explorar | ia-local | ia-red | resumen"));
                     return 0;
                 }
             }
@@ -1307,6 +1309,141 @@ public final class Pruebas {
         @Override
         void cleanup() {
             miner.discard();
+        }
+    }
+
+    // ------------------------------------------------------------------ exploring
+
+    /**
+     * What Benja saw: an empty-handed villager inside a small roofed hut (a player's build), the trees out of sight
+     * behind a ridge on the far side. It must not take the roof for a mine: out of the door, a look around, explore
+     * toward what it has not seen, spot the canopies, chop, make a wooden pickaxe and start a staircase on natural
+     * ground, never climbing "out of a mine" and never breaking the hut.
+     */
+    private static final class Exploracion extends Scenario {
+        private final ProspectingTask task = new ProspectingTask();
+        private final VillagerEntityMCA v;
+        private final BlockPos o;
+        private final List<BlockPos> hut = new ArrayList<>();
+        private boolean wooden;
+        private int woodenAt;
+        private boolean homeUp;
+        private String homeUpState = "";
+        private int outAt = -1;
+
+        Exploracion(ServerWorld world) {
+            super("explorar", world, 4000);
+            o = new BlockPos(3800, 100, 0);
+            load(world, o, 40);
+            fill(world, o.add(-31, -14, -31), o.add(31, -2, 31), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-31, -1, -31), o.add(31, -1, 31), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-31, 0, -31), o.add(31, 14, 31), Blocks.AIR.getDefaultState());
+            // a low stone rim, so that nobody walks off the edge of the platform
+            fill(world, o.add(-31, 0, -31), o.add(31, 1, -31), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-31, 0, 31), o.add(31, 1, 31), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-31, 0, -31), o.add(-31, 1, 31), Blocks.STONE.getDefaultState());
+            fill(world, o.add(31, 0, -31), o.add(31, 1, 31), Blocks.STONE.getDefaultState());
+            // a dirt ridge across the whole platform, five high in the middle, one block a step: it hides the trees
+            for (int x = 9; x <= 17; x++) {
+                int h = 5 - Math.abs(x - 13);
+                fill(world, o.add(x, 0, -30), o.add(x, h - 1, 30), Blocks.DIRT.getDefaultState());
+            }
+            tree(world, o.add(26, 0, -4), 5);
+            tree(world, o.add(28, 0, 3), 5);
+            tree(world, o.add(25, 0, 9), 5);
+            // the hut: planks walls and roof around a 3x3 room, a door gap on the west side, all set by a player
+            BlockState planks = Blocks.OAK_PLANKS.getDefaultState();
+            for (BlockPos pos : BlockPos.iterate(o.add(-2, 0, -2), o.add(2, 3, 2))) {
+                boolean wall = Math.abs(pos.getX() - o.getX()) == 2 || Math.abs(pos.getZ() - o.getZ()) == 2 || pos.getY() == o.getY() + 3;
+                boolean door = pos.getX() == o.getX() - 2 && pos.getZ() == o.getZ() && pos.getY() <= o.getY() + 1;
+                if (wall && !door) {
+                    world.setBlockState(pos, planks, 2);
+                    Obras.placedByPlayer(world, pos);
+                    hut.add(pos.toImmutable());
+                }
+            }
+            v = villager(world, o, Direction.WEST);
+            // free to walk: its own legs take it out of the door, no "stay here"
+            v.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            // facing the door, its back to the hut wall and the trees
+            face(v, 90.0F, 0.0F);
+        }
+
+        private int hutLeft() {
+            int n = 0;
+            for (BlockPos pos : hut) {
+                if (world.getBlockState(pos).isOf(Blocks.OAK_PLANKS)) {
+                    n++;
+                }
+            }
+            return n;
+        }
+
+        @Override
+        Boolean step() {
+            if (!v.isAlive()) {
+                fail(name, "el aldeano murió; " + state());
+                return Boolean.FALSE;
+            }
+            task.practice(world, v);
+            if (ticks % 200 == 0) {
+                MCA.LOGGER.info("PRUEBA explorar t=" + ticks + ": " + state());
+            }
+            if (!homeUp && task.debug().startsWith("HOME_UP")) {
+                homeUp = true;
+                homeUpState = state();
+                MCA.LOGGER.info("PRUEBA explorar: subiendo de una mina que no existe a los " + ticks + " ticks; " + homeUpState);
+            }
+            if (outAt < 0 && Math.max(Math.abs(v.getBlockX() - o.getX()), Math.abs(v.getBlockZ() - o.getZ())) > 2) {
+                outAt = ticks;
+                MCA.LOGGER.info("PRUEBA explorar: salió de la choza a los " + ticks + " ticks; " + state());
+            }
+            if (!wooden && (v.getMainHandStack().isOf(Items.WOODEN_PICKAXE) || v.getInventory().count(Items.WOODEN_PICKAXE) > 0)) {
+                wooden = true;
+                woodenAt = ticks;
+                MCA.LOGGER.info("PRUEBA explorar: pico de madera hecho en " + ticks + " ticks; " + state());
+            }
+            int left = hutLeft();
+            if (left < hut.size()) {
+                fail(name, "rompió la choza: quedan " + left + "/" + hut.size() + " tablas; " + state());
+                return Boolean.FALSE;
+            }
+            if (!wooden || v.getBlockY() > o.getY() - 3 || !v.isOnGround()) {
+                return null;
+            }
+            boolean passed = !homeUp;
+            check(name, passed, "salió de la choza a los " + outAt + " ticks, pico de madera en " + woodenAt + " ticks, cavó hasta "
+                    + v.getBlockPos().toShortString() + " a los " + ticks + " ticks, choza intacta " + left + "/" + hut.size()
+                    + ", se creyó en una mina: " + homeUp + (homeUp ? " (" + homeUpState + ")" : "") + "; " + state());
+            return passed;
+        }
+
+        @Override
+        String state() {
+            var inv = v.getInventory();
+            StringBuilder bag = new StringBuilder();
+            for (int i = 0; i < inv.size(); i++) {
+                ItemStack stack = inv.getStack(i);
+                if (!stack.isEmpty()) {
+                    bag.append(bag.length() == 0 ? "" : " ").append(stack.getItem()).append('x').append(stack.getCount());
+                }
+            }
+            String lugar;
+            try {
+                lugar = Entorno.lugar(world, v).palabra() + " (" + Entorno.profundidad(world, v) + " bajo la tierra)";
+            } catch (RuntimeException e) {
+                lugar = "? (" + e + ")";
+            }
+            return "en " + v.getBlockPos().toShortString() + ", lugar " + lugar + ", tarea " + task.debug() + ", haciendo: " + Retina.memory(v).doing()
+                    + ", mano " + v.getMainHandStack().getItem() + ", mochila [" + bag + "]";
+        }
+
+        @Override
+        void cleanup() {
+            v.discard();
+            for (BlockPos pos : hut) {
+                Obras.broken(world, pos);
+            }
         }
     }
 

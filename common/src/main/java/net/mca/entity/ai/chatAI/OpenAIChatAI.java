@@ -72,7 +72,7 @@ public class OpenAIChatAI implements ChatAIStrategy {
      */
     private record Prepared(String playerName, String villagerName, List<Pair<String, String>> history,
                             MenteLocal.Intent intent, @Nullable String outcome, boolean refused, boolean done, String open,
-                            String inHouse, List<Cerebros.Mind> minds, String local) {
+                            String inHouse, List<Cerebros.Mind> minds, String local, @Nullable String image) {
     }
 
     /**
@@ -121,7 +121,9 @@ public class OpenAIChatAI implements ChatAIStrategy {
         if (server == null) {
             return Optional.of(MenteLocal.shrug(MenteLocal.spanish(msg)));
         }
-        Prepared prep = onServer(server, () -> prepare(player, villager, msg));
+        // the in-game checks keep this thread offline; the world is read on the server thread, so it is told
+        boolean offline = Cerebros.OFFLINE.get();
+        Prepared prep = onServer(server, () -> prepare(player, villager, msg, offline));
         if (prep == null) {
             String line = lastResort(server, player, villager, msg);
             if (early == null) {
@@ -141,11 +143,12 @@ public class OpenAIChatAI implements ChatAIStrategy {
         } else {
             try {
                 Cerebros.Reply reply = Cerebros.ask(prep.minds(), mind -> mind.inHouse() ? prep.inHouse() : prep.open(),
-                        prep.history(), msg, prep.playerName(), prep.villagerName(), villager.getUuid(), deadline);
+                        prep.history(), msg, prep.playerName(), prep.villagerName(), villager.getUuid(), deadline, prep.image());
                 if (reply != null) {
                     StructuredResponse said = structured(reply.content(), prep.villagerName());
                     line = speak(server, player, villager, prep, said);
-                    MCA.LOGGER.info("[Tropeles] {} pensó con {} en {} ms (orden '{}')", prep.villagerName(), reply.mind(), reply.millis(), said.optionalCommand());
+                    MCA.LOGGER.info("[Tropeles] {} pensó con {} en {} ms (orden '{}'){}", prep.villagerName(), reply.mind(), reply.millis(),
+                            said.optionalCommand(), reply.saw() ? ", mirando la foto de lo que ve" : "");
                 }
             } catch (RuntimeException e) {
                 MCA.LOGGER.warn("[Tropeles] las mentes en línea fallaron, contesta la mente local", e);
@@ -257,6 +260,7 @@ public class OpenAIChatAI implements ChatAIStrategy {
      */
     public static String lastResort(MinecraftServer server, ServerPlayerEntity player, VillagerEntityMCA villager, String msg) {
         String line = onServer(server, () -> {
+            Vistazo.fresh(villager);
             MenteLocal.Intent intent = MenteLocal.read(msg, villager.getName().getString());
             return intent.order() ? MenteLocal.shrug(intent.spanish()) : MenteLocal.answer(player, villager, intent, null, null, null, false);
         });
@@ -287,8 +291,10 @@ public class OpenAIChatAI implements ChatAIStrategy {
 
     // ------------------------------------------------------------------ on the server thread
 
-    private static Prepared prepare(ServerPlayerEntity player, VillagerEntityMCA villager, String msg) {
+    private static Prepared prepare(ServerPlayerEntity player, VillagerEntityMCA villager, String msg, boolean offline) {
         Config config = Config.getInstance();
+        // fresh eyes first (at most every few seconds): an idle villager has just looked around before it answers
+        Vistazo.fresh(villager);
         String playerName = player.getName().getString();
         String villagerName = villager.getName().getString();
         List<Pair<String, String>> history = history(villager.getUuid(), player.getUuid());
@@ -388,6 +394,7 @@ public class OpenAIChatAI implements ChatAIStrategy {
         } else {
             world.append("$player is right here with you, ").append(Math.max(1, (int) villager.distanceTo(player))).append(" blocks away. ");
         }
+        world.append(SIGHT);
         String context = ("\nWho you are: " + who + "\nWhere you are and what you see: " + world)
                 .replace("$player", playerName).replace("$villager", villagerName);
 
@@ -446,11 +453,22 @@ public class OpenAIChatAI implements ChatAIStrategy {
                 + "you can be warm, funny, sarcastic or blunt. No emojis, no lists, no narrating actions between asterisks. "
                 + "You only know what you have seen, carry and done yourself: never invent items, places or deeds, and when you "
                 + "do not know something, say so. Keep to what was said before in this conversation.";
+        List<Cerebros.Mind> minds = Cerebros.chain(playerName);
+        // a question about what it sees: a picture of its view for the minds that can look at one
+        String image = !offline && Vistazo.aboutSight(intent) && Cerebros.anyCanLook(minds) ? Vistazo.foto(villager) : null;
         String open = persona + "\n" + context + speech + orders;
 
         return new Prepared(playerName, villagerName, history, intent, outcome, refused, done, open, inHouse.toString(),
-                Cerebros.chain(playerName), local);
+                minds, local, image);
     }
+
+    /**
+     * How to talk about the surroundings: only what the scene above lists, with its directions, and an honest "I
+     * don't see any" for the rest. About 60 tokens: free models have small contexts.
+     */
+    private static final String SIGHT = "\nWhen you talk about your surroundings, mention only what is listed above, with its direction "
+            + "as given (left, right, ahead, behind: in Spanish izquierda, derecha, delante, detrás) and its rough distance. "
+            + "If asked about something not listed, say honestly that you do not see any from here. ";
 
     /** Adds what one module knows; a module that fails is logged and left out, the rest still count. */
     private static void module(StringBuilder into, String name, Supplier<List<String>> module) {

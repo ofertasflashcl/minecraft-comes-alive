@@ -23,6 +23,7 @@ import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.world.BlockView;
+import net.minecraft.world.LightType;
 import net.minecraft.world.World;
 import org.jetbrains.annotations.Nullable;
 
@@ -42,7 +43,14 @@ import java.util.WeakHashMap;
  * the open half of a trapdoor, and it stops on the exact face it touches. Glass, panes, bars, plants,
  * torches and water let the look through; lava and every other surface stop it. Far away things need
  * light to be seen. What a ray touches goes into the villager's {@link VisualMemory}: block, full state,
- * face, hit point and exact distance. Nothing else does.
+ * face, hit point and exact distance, and into its coarse {@link MapaVisto} of the land. Nothing else does.
+ * <p>
+ * Like a real eye it never holds still: every band is cast through a fresh sub-pixel offset (a saccade, from
+ * a low-discrepancy sequence so successive frames fill the gaps between rays), so a trunk forty blocks off,
+ * thinner than a ray spacing, is hit within a few frames. The middle third of the view also has a fovea, a
+ * denser {@link #FOVEA_WIDTH}x{@link #FOVEA_HEIGHT} grid scanned with the bands; its hits go to memory only,
+ * never into the {@link #WIDTH}x{@link #HEIGHT} frame. One look costs one band of the frame (192 rays) plus
+ * one band of the fovea (48 rays).
  */
 public final class Retina {
     public static final int WIDTH = 32;
@@ -60,6 +68,13 @@ public final class Retina {
     /** Closer than this nothing is hidden by darkness, like the minimum brightness of a player's screen. */
     public static final double DARK_SIGHT = 6.0;
     public static final int MIN_LIGHT = 3;
+    /** The fovea: a denser grid over the middle third of the view, in both directions. */
+    public static final int FOVEA_WIDTH = 16;
+    public static final int FOVEA_HEIGHT = 9;
+    /** A ray this close to straight up that reaches nothing has seen the open sky overhead. */
+    public static final double SKY_UP = 0.7;
+    /** A dark hit where the sky light is under this is a hole the sun does not reach: a cave mouth, a mine. */
+    public static final int DARK_SKY = 8;
 
     private static final Map<LivingEntity, VisualMemory> OTHERS = new WeakHashMap<>();
 
@@ -145,14 +160,37 @@ public final class Retina {
             frame = new Pixel[WIDTH * HEIGHT];
         }
         List<Entity> bodies = bodiesAround(world, viewer, eye, Math.min(range, ENTITY_RANGE));
+        BlockPos feet = viewer.getBlockPos();
+        memory.looked(tick);
+        memory.mapa().walked(feet, tick);
 
         for (int band = firstBand; band < firstBand + bands; band++) {
+            // a saccade: the whole band shifts by a fresh sub-pixel offset
+            int k = memory.nextSaccade();
+            double jx = frac(k * 0.7548776662466927) - 0.5;
+            double jy = frac(k * 0.5698402909980532) - 0.5;
             for (int row = band % BANDS; row < HEIGHT; row += BANDS) {
-                double v = (1.0 - (row + 0.5) / HEIGHT * 2.0) * tanV;
+                double v = (1.0 - (row + 0.5 + jy) / HEIGHT * 2.0) * tanV;
                 for (int col = 0; col < WIDTH; col++) {
-                    double u = ((col + 0.5) / WIDTH * 2.0 - 1.0) * tanH;
+                    double u = ((col + 0.5 + jx) / WIDTH * 2.0 - 1.0) * tanH;
                     Vec3d dir = forward.add(right.multiply(u)).add(up.multiply(v)).normalize();
-                    frame[row * WIDTH + col] = pixel(world, viewer, memory, eye, dir, range, night, tick, bodies);
+                    Pixel pixel = pixel(world, viewer, memory, eye, dir, range, night, tick, bodies);
+                    frame[row * WIDTH + col] = pixel;
+                    if (dir.y >= SKY_UP && pixel.sky()) {
+                        memory.sawSky(feet, tick);
+                    }
+                }
+            }
+            // the fovea, over the middle third: memory only
+            for (int row = band % BANDS; row < FOVEA_HEIGHT; row += BANDS) {
+                double v = (1.0 - (row + 0.5 + jy) / FOVEA_HEIGHT * 2.0) * tanV / 3.0;
+                for (int col = 0; col < FOVEA_WIDTH; col++) {
+                    double u = ((col + 0.5 + jx) / FOVEA_WIDTH * 2.0 - 1.0) * tanH / 3.0;
+                    Vec3d dir = forward.add(right.multiply(u)).add(up.multiply(v)).normalize();
+                    Pixel pixel = pixel(world, viewer, memory, eye, dir, range, night, tick, bodies);
+                    if (dir.y >= SKY_UP && pixel.sky()) {
+                        memory.sawSky(feet, tick);
+                    }
                 }
             }
         }
@@ -166,6 +204,15 @@ public final class Retina {
         if ((tick % 200) == 0) {
             memory.prune(tick, 24000);
         }
+    }
+
+    private static double frac(double x) {
+        return x - Math.floor(x);
+    }
+
+    /** The sky light on a face that looks up, the cue that tells sunlit land from a cave floor; -1 otherwise. */
+    static int skyOn(World world, BlockPos pos, @Nullable Direction face) {
+        return face == Direction.UP ? world.getLightLevel(LightType.SKY, pos.up()) : -1;
     }
 
     private static Pixel pixel(World world, LivingEntity viewer, VisualMemory memory, Vec3d eye, Vec3d dir, double range, boolean night, long tick, List<Entity> bodies) {
@@ -201,7 +248,9 @@ public final class Retina {
         int light = lightAt(world, pos, hit.getSide(), state);
         boolean dark = !perceives(light, sight.distance(), night);
         if (!dark) {
-            memory.see(pos, state, hit.getSide(), hit.getPos(), sight.distance(), light, tick, false);
+            memory.see(pos, state, hit.getSide(), hit.getPos(), sight.distance(), light, tick, false, skyOn(world, pos, hit.getSide()));
+        } else if (world.getLightLevel(LightType.SKY, pos.offset(hit.getSide())) < DARK_SKY) {
+            memory.mapa().dark(pos, tick);
         }
         return new Pixel(dark ? null : pos, dark ? null : state, dark ? null : hit.getSide(), hit.getPos(), sight.distance(), light, dark, sight.water(), null);
     }
@@ -237,7 +286,7 @@ public final class Retina {
                         return fluidHit;
                     }
                     if (!water[0] && memory != null) {
-                        memory.see(pos, state, fluidHit.getSide(), fluidHit.getPos(), from.distanceTo(fluidHit.getPos()), world.getLightLevel(pos), tick, true);
+                        memory.see(pos, state, fluidHit.getSide(), fluidHit.getPos(), from.distanceTo(fluidHit.getPos()), world.getLightLevel(pos), tick, true, skyOn(world, pos, fluidHit.getSide()));
                     }
                     water[0] = true;
                 }
@@ -261,7 +310,7 @@ public final class Retina {
                     double d = from.distanceTo(blockHit.getPos());
                     int light = lightAt(world, pos, blockHit.getSide(), state);
                     if (perceives(light, d, night)) {
-                        memory.see(pos, state, blockHit.getSide(), blockHit.getPos(), d, light, tick, true);
+                        memory.see(pos, state, blockHit.getSide(), blockHit.getPos(), d, light, tick, true, skyOn(world, pos, blockHit.getSide()));
                     }
                 }
                 return null;
@@ -307,7 +356,7 @@ public final class Retina {
         BlockState state = world.getBlockState(pos);
         int light = lightAt(world, pos, hit.getSide(), state);
         if (perceives(light, sight.distance(), night)) {
-            memory.see(pos, state, hit.getSide(), hit.getPos(), sight.distance(), light, tick, false);
+            memory.see(pos, state, hit.getSide(), hit.getPos(), sight.distance(), light, tick, false, skyOn(world, pos, hit.getSide()));
         }
     }
 
@@ -356,7 +405,7 @@ public final class Retina {
             return null;
         }
         if (memory != null) {
-            memory.see(pos, state, blockHit.getSide(), blockHit.getPos(), blockDistance, light, tick, seeThrough(world, pos, state));
+            memory.see(pos, state, blockHit.getSide(), blockHit.getPos(), blockDistance, light, tick, seeThrough(world, pos, state), skyOn(world, pos, blockHit.getSide()));
         }
         return new Focus(pos, state, blockHit.getSide(), blockHit.getPos(), blockDistance, null);
     }

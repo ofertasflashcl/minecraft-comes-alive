@@ -46,10 +46,28 @@ public final class VisualMemory {
     private int frameHeight;
     private long frameTick = -1;
     private int interlace;
+    private int saccade;
     @Nullable
     private Retina.Focus focus;
     private String doing = "";
     private long doingTick;
+    private final MapaVisto mapa = new MapaVisto();
+    private long lastLook = Long.MIN_VALUE / 2;
+    private long lastSweep = Long.MIN_VALUE / 2;
+    /** the last time the eye saw open sky nearly straight up, and where its feet were then */
+    private long skyTick = Long.MIN_VALUE / 2;
+    @Nullable
+    private BlockPos skyFeet;
+    /** the last place it stood outside at the level of the land */
+    @Nullable
+    private BlockPos outside;
+    private long outsideTick = Long.MIN_VALUE / 2;
+    /** {@link Entorno}'s answer for one tick, so asking it every tick costs one look-up */
+    long placeTick = Long.MIN_VALUE;
+    @Nullable
+    Lugar place;
+    long depthTick = Long.MIN_VALUE;
+    int depth;
 
     public static final class SeenBlock {
         public final BlockPos pos;
@@ -87,6 +105,12 @@ public final class VisualMemory {
     }
 
     void see(BlockPos pos, BlockState state, Direction face, Vec3d hit, double distance, int light, long tick, boolean seeThrough) {
+        see(pos, state, face, hit, distance, light, tick, seeThrough, -1);
+    }
+
+    /** {@code sky}: the sky light on the face when it looks up, -1 when not known. Feeds the {@link #mapa()} too. */
+    void see(BlockPos pos, BlockState state, Direction face, Vec3d hit, double distance, int light, long tick, boolean seeThrough, int sky) {
+        mapa.saw(pos, state, face, tick, sky);
         long key = pos.asLong();
         SeenBlock seen = blocks.getAndMoveToLast(key);
         if (seen == null) {
@@ -134,6 +158,11 @@ public final class VisualMemory {
         this.frameWidth = width;
         this.frameHeight = height;
         this.frameTick = tick;
+    }
+
+    /** The next term of the saccade sequence. */
+    int nextSaccade() {
+        return ++saccade;
     }
 
     int nextInterlace(int bands) {
@@ -255,6 +284,62 @@ public final class VisualMemory {
 
     public long doingTick() {
         return doingTick;
+    }
+
+    /** The coarse map of the land its eyes have seen, one per villager. */
+    public MapaVisto mapa() {
+        return mapa;
+    }
+
+    /** The eye scanned a band (or a whole frame) at this tick. */
+    void looked(long tick) {
+        lastLook = tick;
+    }
+
+    /** The last tick the eye scanned anything, so a second driver of the eye can stand aside. */
+    public long lastLook() {
+        return lastLook;
+    }
+
+    void swept(long tick) {
+        lastSweep = tick;
+    }
+
+    /** The last tick it looked all around at once ({@link Mirada#lookAround}). */
+    public long lastSweep() {
+        return lastSweep;
+    }
+
+    /** The eye just saw open sky nearly straight overhead while its feet stood at {@code feet}. */
+    void sawSky(BlockPos feet, long tick) {
+        skyTick = tick;
+        skyFeet = feet.toImmutable();
+    }
+
+    public long skyTick() {
+        return skyTick;
+    }
+
+    /** Where its feet were when it last saw the sky overhead, or null. */
+    @Nullable
+    public BlockPos skyFeet() {
+        return skyFeet;
+    }
+
+    /** It stood outside, at the level of the land, here. */
+    void outside(BlockPos feet, long tick) {
+        outside = feet.toImmutable();
+        outsideTick = tick;
+    }
+
+    /** The last place it stood outside at the level of the land, or null. */
+    @Nullable
+    public BlockPos lastOutside() {
+        return outside;
+    }
+
+    public long lastOutsideTick() {
+        return outsideTick;
     }
 
     void prune(long now, int maxAge) {

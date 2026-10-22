@@ -47,7 +47,8 @@ import static net.mca.entity.VillagerLike.VILLAGER_NAME;
  * server thread to the villager it is for (its name, the one looked at, the one already talking, the only one
  * around, or the player's own worker), answered on that villager's own worker lane (one message after the
  * other, within a time budget, with a watchdog), and said back at once as "{@code <Inas> ...}" to the one who
- * asked and to the players near either of them. A villager always answers: when the minds online are slow or
+ * asked and to the players near either of them. Before it answers it looks around ({@link Vistazo#fresh}), on the
+ * server thread like everything that reads the world; only the minds online are asked from the lanes. A villager always answers: when the minds online are slow or
  * down, its own mind ({@link MenteLocal}) does. A villager at work is never steered by chat: it does not walk
  * over or turn its head, so its hands and eyes stay on the job.
  */
@@ -215,6 +216,8 @@ public class ChatAI {
             }
             VillagerEntityMCA villager = to.get().villager();
             MCA.LOGGER.info("[Tropeles] {} → {} ({}): «{}»", speaker.getName().getString(), villager.getName().getString(), to.get().how(), msg);
+            // fresh eyes before it answers (server thread): what it says about its surroundings is what it just saw
+            Vistazo.fresh(villager);
 
             boolean remote = villager.getWorld() != speaker.getWorld() || villager.distanceTo(speaker) > NEAR_RANGE;
             currentConversations.put(speaker.getUuid(), new OpenConversation(villager.getUuid(), System.currentTimeMillis(), remote));

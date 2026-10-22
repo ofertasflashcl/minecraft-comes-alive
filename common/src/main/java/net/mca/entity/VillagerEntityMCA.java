@@ -825,6 +825,14 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
                 }
             }
 
+            // the idle eye: with someone near, it keeps looking at where it is, unless a task already drives the eye
+            if (this.age % 10 == 0 && !isSleeping()) {
+                long now = getWorld().getTime();
+                if (now - visualMemory.lastLook() > 5 && getWorld().getClosestPlayer(this, 48.0) != null) {
+                    net.mca.entity.ai.sense.Retina.look(getWorld(), this);
+                }
+            }
+
             // panic screams
             if (this.age % 90 == 0 && mcaBrain.isPanicking()) {
                 sendChatToAllAround("villager.scream");

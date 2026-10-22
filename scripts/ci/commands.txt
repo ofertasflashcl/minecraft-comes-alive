@@ -19,8 +19,9 @@ mca-prueba hogar
 mca-prueba cultivos
 mca-prueba agua-tunel
 mca-prueba agua-pozo
+mca-prueba explorar
 mca-prueba ia-local
 mca-prueba ia-red
-sleep 200
+sleep 230
 mca-prueba resumen
 sleep 2

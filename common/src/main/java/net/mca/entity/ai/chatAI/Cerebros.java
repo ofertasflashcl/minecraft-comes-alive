@@ -69,8 +69,11 @@ public final class Cerebros {
                        Map<String, String> headers, @Nullable String health) {
     }
 
-    /** What a mind said, raw, and how long it took. */
-    public record Reply(String mind, String content, long millis) {
+    /** What a mind said, raw, how long it took, and whether it was shown the picture of the villager's view. */
+    public record Reply(String mind, String content, long millis, boolean saw) {
+        public Reply(String mind, String content, long millis) {
+            this(mind, content, millis, false);
+        }
     }
 
     /** For the in-game checks: on this thread, never go online, the offline mind answers. */
@@ -80,6 +83,8 @@ public final class Cerebros {
     private static final Map<String, Long> LOCAL_DOWN = new ConcurrentHashMap<>();
     private static final Map<String, Long> LOCAL_UP = new ConcurrentHashMap<>();
     private static final Map<UUID, String> LAST = new ConcurrentHashMap<>();
+    /** Minds that turned down a picture this session: they get the words alone from now on. */
+    private static final Set<String> BLIND = ConcurrentHashMap.newKeySet();
     private static volatile String ollamaModel = "";
 
     private Cerebros() {
@@ -160,6 +165,17 @@ public final class Cerebros {
     @Nullable
     public static Reply ask(List<Mind> minds, Function<Mind, String> system, List<Pair<String, String>> history, String msg,
                             String playerName, String villagerName, @Nullable UUID villager, long deadline) {
+        return ask(minds, system, history, msg, playerName, villagerName, villager, deadline, null);
+    }
+
+    /**
+     * As above; {@code image}, when given (a data URL of the villager's view), goes beside the words to every mind
+     * that speaks the OpenAI chat format and has not turned a picture down before ({@link #canLook}). A mind that
+     * refuses it is asked once more with the words alone, and is not shown pictures again this session.
+     */
+    @Nullable
+    public static Reply ask(List<Mind> minds, Function<Mind, String> system, List<Pair<String, String>> history, String msg,
+                            String playerName, String villagerName, @Nullable UUID villager, long deadline, @Nullable String image) {
         if (OFFLINE.get()) {
             return null;
         }
@@ -183,7 +199,8 @@ public final class Cerebros {
                 // one service hanging must not use up the whole budget: the next one still gets a fair try
                 left = Math.min(left, Math.max(3 * MIN_TRY_MS, left * 3 / 5));
             }
-            Reply reply = once(mind, system.apply(mind), history, msg, playerName, villagerName, left).reply();
+            Reply reply = once(mind, system.apply(mind), history, msg, playerName, villagerName, left,
+                    image != null && canLook(mind) ? image : null).reply();
             if (reply != null) {
                 if (villager != null) {
                     LAST.put(villager, mind.name());
@@ -192,6 +209,21 @@ public final class Cerebros {
             }
         }
         return null;
+    }
+
+    /** Whether a mind may be shown a picture: one that speaks the OpenAI format (not MCA's own) and never turned one down. */
+    public static boolean canLook(Mind mind) {
+        return !mind.inHouse() && !BLIND.contains(mind.name());
+    }
+
+    /** Whether any of these minds may be shown a picture, so it is worth taking one. */
+    public static boolean anyCanLook(List<Mind> minds) {
+        for (Mind mind : minds) {
+            if (canLook(mind)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Whether an online mind after {@code index} could still be asked (not resting). */
@@ -215,6 +247,16 @@ public final class Cerebros {
      */
     private static Try once(Mind mind, String system, List<Pair<String, String>> history, String msg, String playerName, String villagerName,
                             long budgetMs) {
+        return once(mind, system, history, msg, playerName, villagerName, budgetMs, null);
+    }
+
+    /**
+     * As above, with {@code image} beside the words when given. A mind that answers a picture with a refusal (a
+     * 4xx other than "too many requests", a 500, or nothing usable) is marked as one that cannot look and asked
+     * again at once with the words alone, in what is left of the same budget.
+     */
+    private static Try once(Mind mind, String system, List<Pair<String, String>> history, String msg, String playerName, String villagerName,
+                            long budgetMs, @Nullable String image) {
         long start = System.currentTimeMillis();
         String model = mind.model();
         if (mind.name().equals("ollama") && (model == null || model.isBlank())) {
@@ -224,18 +266,32 @@ public final class Cerebros {
                 return new Try(null, "no tiene modelos instalados");
             }
         }
-        String body = body(mind, model == null || model.isBlank() ? "default" : model, system, history, msg, playerName, villagerName);
+        String body = body(mind, model == null || model.isBlank() ? "default" : model, system, history, msg, playerName, villagerName, image);
         int usual = mind.local() ? 90_000 : 30_000;
         int connect = (int) Math.max(300L, Math.min(mind.local() ? 1_500L : 4_000L, budgetMs));
         int read = (int) Math.max(1_000L, Math.min(usual, budgetMs));
         boolean capped = budgetMs < usual;
         Http http = post(mind, body, connect, read, Math.max(1_000L, budgetMs));
         long millis = System.currentTimeMillis() - start;
-        if (http.code() / 100 == 2) {
-            String content = content(http.body());
-            if (content != null && !content.isBlank()) {
-                return new Try(new Reply(mind.name(), content, millis), "");
+        String content = http.code() / 100 == 2 ? content(http.body()) : null;
+        if (content != null && !content.isBlank()) {
+            if (image != null) {
+                MCA.LOGGER.info("[Tropeles] la mente {} miró la foto de lo que ve el aldeano ({} KB) y contestó en {} ms", mind.name(),
+                        image.length() / 1024, millis);
             }
+            return new Try(new Reply(mind.name(), content, millis, image != null), "");
+        }
+        if (image != null && !http.late() && http.code() != 429
+                && (http.code() / 100 == 4 || http.code() == 500 || http.code() / 100 == 2)) {
+            // it cannot look at pictures (or not like this): the words alone, now, and never a picture again
+            BLIND.add(mind.name());
+            String why = http.code() / 100 == 2 ? "respuesta vacía" : error(http);
+            MCA.LOGGER.info("[Tropeles] la mente {} no acepta fotos ({}): se le pregunta solo con palabras", mind.name(), why);
+            long left = budgetMs - (System.currentTimeMillis() - start);
+            if (left >= MIN_TRY_MS) {
+                return once(mind, system, history, msg, playerName, villagerName, left, null);
+            }
+            return new Try(null, why);
         }
         String error = http.code() / 100 == 2 ? "respuesta vacía" : error(http);
         if (http.late() && capped) {
@@ -287,6 +343,19 @@ public final class Cerebros {
 
     /** The request body: plain OpenAI-style chat. Names only go to MCA's own service, the others may refuse them. */
     static String body(Mind mind, String model, String system, List<Pair<String, String>> history, String msg, String playerName, String villagerName) {
+        return body(mind, model, system, history, msg, playerName, villagerName, null);
+    }
+
+    /** Words the picture goes with, so the mind knows whose eyes it is looking through. */
+    private static final String PICTURE_NOTE = "\n\n(The picture is your own view right now; its left is your left. "
+            + "Use it with what the system message lists you see.)";
+
+    /**
+     * As above; with {@code image} (a data URL) the last message is OpenAI-style content parts, the words and the
+     * picture: {"type":"text","text":...}, {"type":"image_url","image_url":{"url":...}}. Never for MCA's own service.
+     */
+    static String body(Mind mind, String model, String system, List<Pair<String, String>> history, String msg, String playerName,
+                       String villagerName, @Nullable String image) {
         JsonObject root = new JsonObject();
         root.addProperty("model", model);
         JsonArray messages = new JsonArray();
@@ -295,7 +364,25 @@ public final class Cerebros {
             boolean user = turn.getLeft().equals("user");
             messages.add(message(turn.getLeft(), turn.getRight(), mind.inHouse() ? (user ? playerName : villagerName) : null));
         }
-        messages.add(message("user", msg, mind.inHouse() ? playerName : null));
+        if (image != null && !mind.inHouse()) {
+            JsonObject m = new JsonObject();
+            m.addProperty("role", "user");
+            JsonArray parts = new JsonArray();
+            JsonObject text = new JsonObject();
+            text.addProperty("type", "text");
+            text.addProperty("text", msg + PICTURE_NOTE);
+            parts.add(text);
+            JsonObject picture = new JsonObject();
+            picture.addProperty("type", "image_url");
+            JsonObject url = new JsonObject();
+            url.addProperty("url", image);
+            picture.add("image_url", url);
+            parts.add(picture);
+            m.add("content", parts);
+            messages.add(m);
+        } else {
+            messages.add(message("user", msg, mind.inHouse() ? playerName : null));
+        }
         root.add("messages", messages);
         if (!mind.inHouse()) {
             root.addProperty("temperature", 0.8);

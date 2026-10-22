@@ -5,6 +5,9 @@ import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.MoveState;
 import net.mca.entity.ai.body.Mining;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
+import net.mca.entity.ai.chatAI.Vistazo;
+import net.mca.entity.ai.sense.Escena;
+import net.mca.entity.ai.sense.Lugar;
 import net.mca.entity.ai.sense.Obras;
 import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
@@ -24,9 +27,14 @@ import java.util.Map;
 
 /**
  * What the villager knows about its own situation right now, from its body, its bag and its eyes (never more
- * than its eyes saw), so a language model talks about the world it is really in.
+ * than its eyes saw), so a language model talks about the world it is really in. The surroundings come from the
+ * scene it understands ({@link Escena#forModel()}: place, depth, light, weather, every thing with its direction and
+ * distance, and what it did not see); only when that cannot be made, from the raw sightings as before.
  */
 public class PerceptionModule {
+    /** The scene for a model, cut after a sentence past this many characters (about 300 tokens). */
+    private static final int MAX_SCENE = 1200;
+
     public static void apply(List<String> input, VillagerEntityMCA villager, ServerPlayerEntity player) {
         World world = villager.getWorld();
         long now = world.getTime();
@@ -62,8 +70,17 @@ public class PerceptionModule {
             input.add("$villager is a bit hurt. ");
         }
         BlockPos feet = villager.getBlockPos();
-        if (!world.isSkyVisible(feet.up()) && feet.getY() < world.getSeaLevel() - 4) {
-            input.add("$villager is underground, at depth y=" + feet.getY() + ". ");
+        Escena scene = Vistazo.escena(villager);
+        if (scene == null) {
+            // no scene: where it is from its sense of place alone, never "underground" for a house roof
+            Lugar lugar = Vistazo.lugar(villager);
+            if (lugar == Lugar.BAJO_TIERRA) {
+                input.add("$villager is underground, about " + Vistazo.profundidad(villager) + " blocks below the land (y=" + feet.getY() + "). ");
+            } else if (lugar == Lugar.BAJO_TECHO) {
+                input.add("$villager is indoors or under a roof, at ground level. ");
+            } else if (lugar == Lugar.AFUERA) {
+                input.add("$villager is outside, under the open sky. ");
+            }
         }
         if (villager.isSubmergedInWater()) {
             input.add("$villager is under water. ");
@@ -105,6 +122,18 @@ public class PerceptionModule {
         if (player.getWorld() == world && villager.distanceTo(player) < Retina.ENTITY_RANGE) {
             input.add(Retina.canSee(world, villager, player) ? "$villager can see $player right now. " : "$villager cannot see $player right now. ");
         }
+        if (scene != null) {
+            String text = null;
+            try {
+                text = scene.forModel();
+            } catch (RuntimeException e) {
+                net.mca.MCA.LOGGER.warn("[Tropeles] la escena de {} no se pudo contar: {}", villager.getName().getString(), e.toString());
+            }
+            if (text != null && !text.isBlank()) {
+                input.add("What $villager sees and knows of the surroundings: " + shorten(text.replace('\n', ' ').trim()) + " ");
+                return;
+            }
+        }
         Map<String, Integer> beings = new LinkedHashMap<>();
         for (VisualMemory.SeenEntity seen : memory.entities(now, 100)) {
             if (seen.type == net.minecraft.entity.EntityType.PLAYER) {
@@ -144,5 +173,14 @@ public class PerceptionModule {
             input.add("$villager saw water close by. ");
         }
 
+    }
+
+    /** At most {@link #MAX_SCENE} characters, cut after a sentence. */
+    private static String shorten(String text) {
+        if (text.length() <= MAX_SCENE) {
+            return text;
+        }
+        int cut = text.lastIndexOf(". ", MAX_SCENE);
+        return cut > 200 ? text.substring(0, cut + 1) : text.substring(0, MAX_SCENE) + "...";
     }
 }

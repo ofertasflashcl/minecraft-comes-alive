@@ -138,6 +138,11 @@ public final class Config extends CommonConfig {
     public int tropelesChatThinkingMs = 1500;
     /** Talking without saying the name: the villager you look at, the one you talk with, the only one near you or your own worker. */
     public boolean tropelesChatImplicit = true;
+    /**
+     * Asked what it sees or what is around, a villager also shows the minds that can look at pictures a small image
+     * of its own view (beside the words); a mind that cannot is asked again with the words alone.
+     */
+    public boolean tropelesChatVision = true;
     /** Villagers speak in chat like players, "<Inas> hola"; off gives MCA's own "Inas (Prospecting): hola". */
     public boolean tropelesPlayerChatFormat = true;
     /** A prospecting villager shows in the Tab list like an online player, and /tp works with its name. */

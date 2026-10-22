@@ -4,6 +4,10 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.body.Mining;
+import net.mca.entity.ai.sense.Entorno;
+import net.mca.entity.ai.sense.Escena;
+import net.mca.entity.ai.sense.Lugar;
+import net.mca.entity.ai.sense.Mirada;
 import net.mca.entity.ai.sense.Obras;
 import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
@@ -23,7 +27,8 @@ import java.util.Locale;
 /**
  * {@code /mca-ojo}: what the nearest villager is seeing right now. The block under its crosshair with the
  * exact state, face and distance (like Jade), the ore it remembers, the bodies in view, what it says it is
- * doing, and with {@code vista} its whole retina drawn in characters.
+ * doing, where it thinks it is and what it would say it sees, with {@code vista} its whole retina drawn in
+ * characters, and with {@code mirar} after a whole look around first.
  */
 public final class OjoCommand {
     private OjoCommand() {
@@ -31,11 +36,12 @@ public final class OjoCommand {
 
     public static void register(CommandDispatcher<ServerCommandSource> dispatcher) {
         dispatcher.register(CommandManager.literal("mca-ojo")
-                .executes(ctx -> show(ctx, false))
-                .then(CommandManager.literal("vista").executes(ctx -> show(ctx, true))));
+                .executes(ctx -> show(ctx, false, false))
+                .then(CommandManager.literal("vista").executes(ctx -> show(ctx, true, false)))
+                .then(CommandManager.literal("mirar").executes(ctx -> show(ctx, false, true))));
     }
 
-    private static int show(CommandContext<ServerCommandSource> ctx, boolean view) {
+    private static int show(CommandContext<ServerCommandSource> ctx, boolean view, boolean around) {
         ServerCommandSource source = ctx.getSource();
         ServerWorld world = source.getWorld();
         Vec3d from = source.getPosition();
@@ -47,6 +53,9 @@ public final class OjoCommand {
         }
         long now = world.getTime();
         VisualMemory memory = Retina.memory(villager);
+        if (around) {
+            Mirada.lookAround(world, villager);
+        }
         Retina.Focus focus = Retina.focus(world, villager, memory, now);
 
         say(source, Text.literal("Ojo de " + villager.getName().getString()).formatted(Formatting.GOLD));
@@ -64,6 +73,12 @@ public final class OjoCommand {
             say(source, Text.literal("  Lo reconoce como: " + kind.label + (Obras.mayBreak(world, villager, focus.pos()) ? " (lo puede romper)" : " (no lo rompe)"))
                     .formatted(kind == Obras.Kind.NATURE || kind == Obras.Kind.TREE ? Formatting.GREEN : Formatting.YELLOW));
         }
+
+        Lugar lugar = Entorno.lugar(world, villager);
+        say(source, Text.literal(String.format(Locale.ROOT, "Lugar: %s, profundidad %d%s, %d celdas en su mapa",
+                lugar.palabra(), Entorno.profundidad(world, villager), Entorno.bajoTierra(world, villager) ? " (bajo tierra para minar)" : "",
+                memory.mapa().size())).formatted(lugar == Lugar.BAJO_TIERRA ? Formatting.YELLOW : Formatting.GREEN));
+        say(source, Text.literal("Dice: " + Escena.of(world, villager, 1200).describe(true)).formatted(Formatting.WHITE));
 
         List<VisualMemory.SeenBlock> ores = memory.blocks(s -> Mining.isOre(s.state));
         ores.sort(Comparator.comparingDouble(s -> s.pos.getSquaredDistance(villager.getBlockPos())));

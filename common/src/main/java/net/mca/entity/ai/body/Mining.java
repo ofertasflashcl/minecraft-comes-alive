@@ -239,6 +239,25 @@ public final class Mining {
         return !walled || sides >= 2;
     }
 
+    /**
+     * The open sky is at most {@code roof} blocks over the feet here and in the four cells beside it: out in the
+     * open or under a roof at the level of the land (a house, an overhang), not at the bottom of a shaft or in a
+     * pocket deep in the rock. Only the shape of the place, for the body's own moves; whether it is "down in the
+     * rock" is {@link net.mca.entity.ai.sense.Entorno}'s to say.
+     */
+    public static boolean nearTheSky(World world, BlockPos feet, int roof) {
+        if (world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, feet.getX(), feet.getZ()) - feet.getY() > roof) {
+            return false;
+        }
+        for (Direction dir : Direction.Type.HORIZONTAL) {
+            BlockPos next = feet.offset(dir);
+            if (world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, next.getX(), next.getZ()) - feet.getY() > roof) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /** Lava right at or beside a cell. Used as the feel of heat on the skin, only for cells the body touches. */
     public static boolean heat(World world, BlockPos pos) {
         if (world.getFluidState(pos).isIn(FluidTags.LAVA)) {

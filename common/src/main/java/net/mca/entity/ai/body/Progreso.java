@@ -1,7 +1,9 @@
 package net.mca.entity.ai.body;
 
 import net.mca.entity.VillagerEntityMCA;
+import net.mca.MCA;
 import net.mca.entity.ai.WorkTools;
+import net.mca.entity.ai.sense.Entorno;
 import net.mca.entity.ai.sense.Obras;
 import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
@@ -12,7 +14,6 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.ItemEntity;
-import net.minecraft.entity.ai.FuzzyTargeting;
 import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.item.AxeItem;
 import net.minecraft.item.Item;
@@ -35,7 +36,6 @@ import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
 import org.jetbrains.annotations.Nullable;
@@ -57,8 +57,9 @@ import java.util.function.Predicate;
  * within reach, and smelting happens in a real furnace placed in the world. Tables and furnaces it put down
  * itself are picked back up, as a player would.
  * <p>
- * Wood only grows outside: underground with nothing to make a pickaxe from it asks to be taken up
- * ({@link #needsSurface()}) instead of wandering the tunnels looking for trees. A tree is felled whole, from the
+ * Wood only grows outside: down in the rock ({@link Entorno#bajoTierra}, never merely under a roof) with nothing to
+ * make a pickaxe from it asks to be taken up ({@link #needsSurface()}) instead of wandering the tunnels looking for
+ * trees. Out on the land with no tree in sight it explores like a player ({@link Explorar}). A tree is felled whole, from the
  * bottom log up, standing in the cut trunk once the lowest logs are gone and building a block up when the top is
  * out of reach; then it gathers what fell and takes its own blocks back.
  */
@@ -66,7 +67,6 @@ public final class Progreso {
     private static final int CRAFT_TICKS = 12;
     private static final int LOGS_TO_START = 5;
     private static final int WOOD_SEARCH = 48;
-    private static final int GIVE_UP_EXPLORING = 2400;
     /** A tree it can no longer get anywhere with after this long is left as it is. */
     private static final int TREE_TICKS = 3000;
     /** How far from the stump it looks for the logs that fell and the logs of the same trunk. */
@@ -163,6 +163,8 @@ public final class Progreso {
     /** Where it stood when it lit the furnace: the way back to it. */
     private BlockPos furnaceStand;
     private final Motor motor = new Motor();
+    /** Looking for trees: where it looked already and which way it was going. */
+    private final Explorar explorar = new Explorar();
     private int craftDelay;
     private int nextCheck;
     private boolean gaveUp;
@@ -473,12 +475,13 @@ public final class Progreso {
     }
 
     /**
-     * Wood within reach of its legs: out in the open (where trees grow), or a tree it saw close by. Underground a
-     * tree remembered from the surface does not count: the rock is in between.
+     * Wood within reach of its legs: at the level of the land (out in the open, or under a roof a few steps from it:
+     * trees grow out there), or a tree it saw close by. Down in the rock a tree remembered from the surface does
+     * not count: the rock is in between.
      */
     public boolean woodHere(ServerWorld world, VillagerEntityMCA villager) {
         BlockPos feet = villager.getBlockPos();
-        if (Mining.outdoors(world, feet)) {
+        if (Entorno.enLaSuperficie(world, villager)) {
             return true;
         }
         BlockPos log = nearestLog(world, villager, Retina.memory(villager), world.getTime());
@@ -719,7 +722,11 @@ public final class Progreso {
             explore(world, villager, memory, now, say);
             return;
         }
+        if (exploreTicks > 0) {
+            MCA.LOGGER.info("[Tropeles] {} encontró un árbol en {} tras {} ticks buscando", villager.getName().getString(), log.toShortString(), exploreTicks);
+        }
         exploreTicks = 0;
+        explorar.reset();
         tree = new Tree(stump(world, log));
         fell(world, villager, memory, now);
     }
@@ -1026,11 +1033,18 @@ public final class Progreso {
         return best;
     }
 
-    /** No tree in memory: walk somewhere new and look around, as a player turns the camera. Only out in the open. */
+    /**
+     * No tree in memory: explore like a player, a look all around first, then the way it knows least about, and
+     * the canopies it glimpses far away (see {@link Explorar}). Only at the level of the land: a house roof over its
+     * head is no reason not to, the rock is.
+     */
     private void explore(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, BiConsumer<String, Object[]> say) {
-        if (!Mining.onSurface(world, villager.getBlockPos())) {
+        if (Entorno.bajoTierra(world, villager)) {
             // no trees grow in the rock: the miner goes up for them, it does not wander the tunnels
+            MCA.LOGGER.info("[Tropeles] {} no busca árboles bajo tierra ({}, {} bloques bajo la superficie){}", villager.getName().getString(),
+                    Entorno.lugar(world, villager).palabra(), Entorno.profundidad(world, villager), goal == WOODEN_PICKAXE ? ": tiene que subir" : "");
             exploreTicks = 0;
+            explorar.reset();
             step = Step.IDLE;
             nextCheck = 600;
             if (goal == WOODEN_PICKAXE) {
@@ -1038,18 +1052,14 @@ public final class Progreso {
             }
             return;
         }
-        memory.doing("buscando árboles", now);
-        float yaw = villager.getHeadYaw() + 9.0F;
-        Vec3d look = Vec3d.fromPolar(-5.0F + 10.0F * MathHelper.sin(exploreTicks * 0.05F), yaw).multiply(8);
-        Hands.aim(villager, villager.getEyePos().add(look));
-        if (++exploreTicks % 80 == 1 || villager.getNavigation().isIdle() && exploreTicks % 20 == 0) {
-            Vec3d target = FuzzyTargeting.find(villager, 24, 6);
-            if (target != null) {
-                villager.getNavigation().startMovingTo(target.x, target.y, target.z, 0.65);
-            }
+        if (exploreTicks++ == 0) {
+            MCA.LOGGER.info("[Tropeles] {} no ve ningún árbol ({}): sale a explorar", villager.getName().getString(), Entorno.lugar(world, villager).palabra());
         }
-        if (exploreTicks > GIVE_UP_EXPLORING) {
+        memory.doing(explorar.sweeping() ? "mirando alrededor buscando árboles" : "buscando árboles", now);
+        if (!explorar.tick(world, villager, Explorar.Busca.ARBOLES)) {
+            // it has seen most of the land around and there is no tree in it
             exploreTicks = 0;
+            explorar.reset();
             if (goal == WOODEN_PICKAXE) {
                 gaveUp = true;
             }
