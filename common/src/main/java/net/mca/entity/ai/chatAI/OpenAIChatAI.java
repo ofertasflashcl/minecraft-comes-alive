@@ -21,21 +21,41 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
  * Villager chat. Every message is first read by the villager's own mind ({@link MenteLocal}): a clear order is
- * carried out at once, on the server thread, whatever happens online. Then the first free language model that
- * is up ({@link Cerebros}) says the answer, knowing what the villager sees, carries and just did; it may also
- * pick an order the local mind did not recognise. When no model answers, the local mind answers itself, so the
- * villager always talks back and always obeys.
+ * carried out at once, on the server thread, whatever happens online, and the villager's own answer is ready
+ * right then. Then the first free language model that is up ({@link Cerebros}) says the answer in the villager's
+ * voice, knowing who it is, what it sees, carries and just did, and the last things it said to this player; it
+ * may also pick an order the local mind did not recognise, and an order it promises in words is carried out too.
+ * What it says about an order is always what really happened. When no model answers in time, the local mind's
+ * answer is said, so the villager always talks back and always obeys.
  */
 public class OpenAIChatAI implements ChatAIStrategy {
-    private static final int MAX_MEMORY = 500;
-    private static final int MAX_MEMORY_TIME = 20 * 60 * 45;
+    /** How much of a conversation with one player a villager keeps: rough tokens, and turns. */
+    private static final int MAX_MEMORY = 600;
+    private static final int MAX_TURNS = 12;
+    /** A conversation untouched this long is forgotten (real time: a sped-up world does not shorten it). */
+    private static final long MAX_MEMORY_MS = 30 * 60_000L;
+    /** The longest line a villager says in chat. */
+    private static final int MAX_LINE = 280;
 
-    private static final Map<UUID, List<Pair<String, String>>> memory = new HashMap<>();
-    private static final Map<UUID, Long> lastInteractions = new HashMap<>();
+    /** Villager -> player -> what they said to each other, oldest first. */
+    private static final Map<UUID, Map<UUID, Talk>> memory = new HashMap<>();
+
+    /** Orders a model may write in other ways ("follow_player", "follow"). */
+    private static final Map<String, String> COMMAND_ALIASES = Map.ofEntries(
+            Map.entry("follow", "follow-player"), Map.entry("follow-me", "follow-player"), Map.entry("stay", "stay-here"),
+            Map.entry("wait", "stay-here"), Map.entry("move", "move-freely"), Map.entry("wander", "move-freely"),
+            Map.entry("mine", "start-mining"), Map.entry("mining", "start-mining"), Map.entry("go-mining", "start-mining"),
+            Map.entry("chop", "start-chopping"), Map.entry("fish", "start-fishing"), Map.entry("harvest", "start-harvesting"),
+            Map.entry("hunt", "start-hunting"), Map.entry("escort", "start-escort"), Map.entry("go-home", "try-go-home"),
+            Map.entry("home", "try-go-home"), Map.entry("stop", "stop-working"), Map.entry("give", "give-item"),
+            Map.entry("store", "store-items"), Map.entry("trade", "open-trade-window"), Map.entry("climb-out", "come-up"),
+            Map.entry("eat", "eat-break")
+    );
 
     public static String translate(String phrase) {
         return phrase.replace("_", " ").toLowerCase(Locale.ROOT).replace("mca.", "");
@@ -45,11 +65,28 @@ public class OpenAIChatAI implements ChatAIStrategy {
     public record StructuredResponse(@Nullable String message, String optionalCommand, String argument) {
     }
 
-    /** Everything read from the world, on the server thread, before any mind is asked. */
+    /**
+     * Everything read from the world, on the server thread, before any mind is asked. {@code local} is the
+     * villager's own answer, true to whatever order was just carried out; {@code done} tells whether that order
+     * really took effect (not refused, not already under way, not impossible).
+     */
     private record Prepared(String playerName, String villagerName, List<Pair<String, String>> history,
-                            MenteLocal.Intent intent, @Nullable String outcome, @Nullable Acciones.Given given,
-                            @Nullable Cofres.Store stored, boolean refused, String open, String inHouse,
-                            List<Cerebros.Mind> minds) {
+                            MenteLocal.Intent intent, @Nullable String outcome, boolean refused, boolean done, String open,
+                            String inHouse, List<Cerebros.Mind> minds, String local) {
+    }
+
+    /**
+     * How an order a model chose went: done, or why not in the villager's words, what was handed or stored, and the
+     * order's own account of it ({@code how}, plain English, when it gave one).
+     */
+    private record Acted(boolean done, @Nullable String failLine, @Nullable Acciones.Given given, @Nullable Cofres.Store stored,
+                         @Nullable String how) {
+    }
+
+    /** One conversation between a villager and one player. */
+    private static final class Talk {
+        final List<Pair<String, String>> turns = new ArrayList<>();
+        long lastMs;
     }
 
     public static String verify(String encodedURL) {
@@ -69,56 +106,179 @@ public class OpenAIChatAI implements ChatAIStrategy {
         }
     }
 
+    /** Answers within the chat budget ({@link Config#tropelesChatBudgetMs}); never empty. Slow: never on the server thread with minds online. */
     public Optional<String> answer(ServerPlayerEntity player, VillagerEntityMCA villager, String msg) {
+        return answer(player, villager, msg, System.currentTimeMillis() + Math.max(1_000L, Config.getInstance().tropelesChatBudgetMs), null);
+    }
+
+    /**
+     * Answers with the online minds done by {@code deadline} (wall clock, ms). {@code early}, when given, gets the
+     * villager's own answer as soon as the world was read (and any order carried out), so the caller can say it
+     * if the minds take too long; the caller then remembers what was really said ({@link #remember}). Never empty.
+     */
+    public Optional<String> answer(ServerPlayerEntity player, VillagerEntityMCA villager, String msg, long deadline, @Nullable Consumer<String> early) {
         MinecraftServer server = player.getServer();
         if (server == null) {
-            return Optional.empty();
+            return Optional.of(MenteLocal.shrug(MenteLocal.spanish(msg)));
         }
         Prepared prep = onServer(server, () -> prepare(player, villager, msg));
         if (prep == null) {
-            return Optional.empty();
+            String line = lastResort(server, player, villager, msg);
+            if (early == null) {
+                remember(villager.getUuid(), player.getUuid(), msg, line);
+            }
+            return Optional.of(line);
+        }
+        if (early != null) {
+            early.accept(prep.local());
         }
 
         String line = null;
-        try {
-            Cerebros.Reply reply = Cerebros.ask(prep.minds(), mind -> mind.inHouse() ? prep.inHouse() : prep.open(),
-                    prep.history(), msg, prep.playerName(), prep.villagerName(), villager.getUuid());
-            if (reply != null) {
-                StructuredResponse said = structured(reply.content(), prep.villagerName());
-                if (said.message() != null && !said.message().isBlank()) {
-                    line = said.message();
+        if (prep.intent().order() && !prep.refused() && !prep.done()) {
+            // an order it could not carry out, or was already doing: its own words say exactly why, and no mind
+            // may dress that up as a yes
+            MCA.LOGGER.info("[Tropeles] {} no pudo con la orden '{}': contesta su propia mente", prep.villagerName(), prep.intent().command());
+        } else {
+            try {
+                Cerebros.Reply reply = Cerebros.ask(prep.minds(), mind -> mind.inHouse() ? prep.inHouse() : prep.open(),
+                        prep.history(), msg, prep.playerName(), prep.villagerName(), villager.getUuid(), deadline);
+                if (reply != null) {
+                    StructuredResponse said = structured(reply.content(), prep.villagerName());
+                    line = speak(server, player, villager, prep, said);
                     MCA.LOGGER.info("[Tropeles] {} pensó con {} en {} ms (orden '{}')", prep.villagerName(), reply.mind(), reply.millis(), said.optionalCommand());
-                    // an order only the language model understood
-                    if (!prep.intent().order() && !prep.refused() && !said.optionalCommand().isBlank()) {
-                        String extra = onServer(server, () -> act(player, villager, said, prep.intent().spanish()));
-                        if (extra != null && !extra.isBlank()) {
-                            line = line + " " + extra;
-                        }
-                    }
                 }
+            } catch (RuntimeException e) {
+                MCA.LOGGER.warn("[Tropeles] las mentes en línea fallaron, contesta la mente local", e);
             }
-        } catch (RuntimeException e) {
-            MCA.LOGGER.warn("[Tropeles] las mentes en línea fallaron, contesta la mente local", e);
         }
 
-        if (line == null) {
+        if (line == null || line.isBlank()) {
             Cerebros.answeredOffline(villager.getUuid());
-            line = onServer(server, () -> MenteLocal.answer(player, villager, prep.intent(), prep.outcome(), prep.given(), prep.stored(), prep.refused()));
+            line = prep.local();
         }
-        if (line != null) {
-            remember(villager.getUuid(), msg, line);
+        if (line == null || line.isBlank()) {
+            line = MenteLocal.shrug(prep.intent().spanish());
         }
-        return Optional.ofNullable(line);
+        line = clip(line);
+        if (early == null) {
+            remember(villager.getUuid(), player.getUuid(), msg, line);
+        }
+        return Optional.of(line);
     }
 
-    /** Runs {@code task} on the server thread, now when already on it, and waits for it. */
+    /**
+     * The words to say from what a model answered, keeping them true: an order it chose or promised in words is
+     * carried out, one that failed is told as it really went, and words that say the opposite of what happened
+     * (agreeing to an order it refused, or in the wrong language) give way to the villager's own answer.
+     */
+    @Nullable
+    private static String speak(MinecraftServer server, ServerPlayerEntity player, VillagerEntityMCA villager, Prepared prep, StructuredResponse said) {
+        boolean es = prep.intent().spanish();
+        String message = said.message() == null ? null : clean(said.message());
+        if (message != null && message.isBlank()) {
+            message = null;
+        }
+        if (message != null && MenteLocal.clearlyNot(message, es)) {
+            MCA.LOGGER.info("[Tropeles] {} contestó en otro idioma, habla su propia mente: «{}»", prep.villagerName(), message);
+            message = null;
+        }
+        if (prep.refused() || prep.intent().order()) {
+            // the order was already handled here: the model only finds the words, and may not claim another one
+            // ("¡Te sigo!" after a refusal, or "me quedo aquí" when it really went mining)
+            String promised = message == null ? null : MenteLocal.promise(message);
+            if (promised != null && (prep.refused() || !sameOrder(promised, prep.intent().command()))) {
+                MCA.LOGGER.info("[Tropeles] {} prometió '{}' pero hizo '{}': habla su propia mente", prep.villagerName(), promised,
+                        prep.refused() ? "nada" : prep.intent().command());
+                return prep.local();
+            }
+            return message;
+        }
+
+        String command = command(said.optionalCommand());
+        if (command.isEmpty() && message != null) {
+            // a promise in words is a command: "¡Claro, te sigo!" with no order still follows
+            String promised = MenteLocal.promise(message);
+            if (promised != null) {
+                MCA.LOGGER.info("[Tropeles] {} prometió '{}' sin ponerlo como orden; lo hace", prep.villagerName(), promised);
+                command = promised;
+            }
+        }
+        if (command.isEmpty()) {
+            return message;
+        }
+        String chosen = command;
+        Acted acted = onServer(server, () -> act(player, villager, chosen, said.argument(), es));
+        if (acted == null) {
+            return message;
+        }
+        if (acted.failLine() != null) {
+            return acted.failLine(); // it could not: say so, never what the model hoped
+        }
+        if (message != null) {
+            String words = MenteLocal.promise(message);
+            if (words == null || sameOrder(words, chosen)) {
+                return message;
+            }
+            // "¡Te sigo!" with stay-here as the order: say what it really did
+            MCA.LOGGER.info("[Tropeles] {} dijo que haría '{}' pero la orden fue '{}': habla su propia mente", prep.villagerName(), words, chosen);
+        }
+        String outcome = acted.how() != null ? acted.how() : acted.done() ? "done" : null;
+        MenteLocal.Intent intent = new MenteLocal.Intent(chosen, said.argument(), null, es);
+        return onServer(server, () -> MenteLocal.answer(player, villager, intent, outcome, acted.given(), acted.stored(), false));
+    }
+
+    /** Whether words promising {@code promised} fit the order really carried out: climbing out of a mine is going home. */
+    private static boolean sameOrder(String promised, @Nullable String done) {
+        if (promised.equals(done)) {
+            return true;
+        }
+        Set<String> home = Set.of("come-up", "try-go-home", "eat-break");
+        return home.contains(promised) && done != null && home.contains(done);
+    }
+
+    /** The order's name as the command list spells it, or "" when it is none of them. */
+    private static String command(@Nullable String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String name = raw.trim().toLowerCase(Locale.ROOT).replace('_', '-').replace(' ', '-');
+        name = COMMAND_ALIASES.getOrDefault(name, name);
+        for (TriggerCommandInfo info : TriggerCommandInfos.triggerCommands) {
+            if (info.command.equals(name)) {
+                return name;
+            }
+        }
+        return "";
+    }
+
+    /**
+     * When nothing else could answer: the villager's own words to a question, or a plain "say again" to an order,
+     * so it never confirms one it may not have carried out.
+     */
+    public static String lastResort(MinecraftServer server, ServerPlayerEntity player, VillagerEntityMCA villager, String msg) {
+        String line = onServer(server, () -> {
+            MenteLocal.Intent intent = MenteLocal.read(msg, villager.getName().getString());
+            return intent.order() ? MenteLocal.shrug(intent.spanish()) : MenteLocal.answer(player, villager, intent, null, null, null, false);
+        });
+        return line == null || line.isBlank() ? MenteLocal.shrug(MenteLocal.spanish(msg)) : clip(line);
+    }
+
+    /**
+     * Runs {@code task} on the server thread, now when already on it, and waits for it; null when it failed.
+     * Never call this with minds online from the server thread itself: it would block the game.
+     */
     @Nullable
     private static <T> T onServer(MinecraftServer server, Supplier<T> task) {
-        if (server.isOnThread()) {
-            return task.get();
-        }
         try {
-            return server.submit(task).get(10, TimeUnit.SECONDS);
+            if (server.isOnThread()) {
+                return task.get();
+            }
+            if (!server.isRunning()) {
+                // shutting down: a stopped server's submit() runs the task right here, off its thread, while the
+                // worlds are being saved; nobody is left to answer anyway
+                return null;
+            }
+            return server.submit(task).get(15, TimeUnit.SECONDS);
         } catch (Exception e) {
             MCA.LOGGER.error("[Tropeles] no se pudo leer el mundo para la charla", e);
             return null;
@@ -131,74 +291,118 @@ public class OpenAIChatAI implements ChatAIStrategy {
         Config config = Config.getInstance();
         String playerName = player.getName().getString();
         String villagerName = villager.getName().getString();
-        List<Pair<String, String>> history = history(villager);
+        List<Pair<String, String>> history = history(villager.getUuid(), player.getUuid());
 
-        // 1. the villager's own mind reads the message; a clear order is carried out right now
-        MenteLocal.Intent intent = resolve(MenteLocal.read(msg), villager);
+        // the language: what the words say (its own name aside); when they do not say ("ok", "sube"), the game's, else Spanish
+        boolean es = MenteLocal.speaksSpanish(msg, villagerName);
+
+        // 1. the villager's own mind reads the message, without its name in it; a clear order is carried out right now
+        MenteLocal.Intent read = MenteLocal.read(msg, villagerName);
+        MenteLocal.Intent intent = resolve(new MenteLocal.Intent(read.command(), read.argument(), read.question(), es), villager, player);
         boolean refused = false;
+        boolean done = false;
         String outcome = null;
         Acciones.Given given = null;
         Cofres.Store stored = null;
         if (intent.order()) {
-            int hearts = villager.getVillagerBrain().getMemoriesForPlayer(player).getHearts();
-            if (hearts < -25 && !"open-trade-window".equals(intent.command())) {
-                refused = true;
-            } else if ("give-item".equals(intent.command())) {
-                given = Acciones.hand(player, villager, intent.argument());
-                outcome = given.english(playerName);
-            } else if ("store-items".equals(intent.command())) {
-                if (villager.getInventory().isEmpty()) {
-                    outcome = "You have nothing in your bag to store.";
+            try {
+                int hearts = villager.getVillagerBrain().getMemoriesForPlayer(player).getHearts();
+                if (hearts < -25 && !"open-trade-window".equals(intent.command())) {
+                    refused = true;
+                } else if ("give-item".equals(intent.command())) {
+                    given = Acciones.hand(player, villager, intent.argument());
+                    outcome = given.english(playerName);
+                    done = given.status() == Acciones.Status.GAVE;
+                } else if ("store-items".equals(intent.command())) {
+                    if (villager.getInventory().isEmpty()) {
+                        outcome = "You have nothing in your bag to store.";
+                    } else {
+                        stored = Cofres.orderStore(villager, player);
+                        outcome = switch (stored) {
+                            case WALKING -> "You are walking to your chest to store your things.";
+                            case PLACED -> "You set your chest down here and are storing your things.";
+                            default -> "You have no chest nearby and none in your bag, so you keep your things.";
+                        };
+                        done = stored != Cofres.Store.NONE;
+                    }
                 } else {
-                    stored = Cofres.orderStore(villager, player);
-                    outcome = switch (stored) {
-                        case WALKING -> "You are walking to your chest to store your things.";
-                        case PLACED -> "You set your chest down here and are storing your things.";
-                        case NONE -> "You have no chest nearby and none in your bag, so you keep your things.";
-                    };
+                    Optional<TriggerCommandInfo> command = TriggerCommandInfos.findCommand(intent.command(), player, villager);
+                    if (command.isPresent()) {
+                        String how = command.get().run(player, villager, intent.argument());
+                        outcome = how != null ? how : "You did it: " + command.get().description + ".";
+                        // "You have no home to go to here": carried out, but nothing happened
+                        done = how == null || !how.startsWith("You have no");
+                    }
                 }
-            } else {
-                Optional<TriggerCommandInfo> command = TriggerCommandInfos.findCommand(intent.command(), player, villager);
-                if (command.isPresent()) {
-                    String how = command.get().run(player, villager, intent.argument());
-                    outcome = how != null ? how : "You did it: " + command.get().description + ".";
-                }
+            } catch (RuntimeException e) {
+                MCA.LOGGER.error("[Tropeles] {} no pudo cumplir la orden '{}'", villagerName, intent.command(), e);
+                outcome = null;
+                done = false;
             }
             MCA.LOGGER.info("[Tropeles] {} entendió la orden '{}' ({}): {}", villagerName, intent.command(), intent.argument(),
                     refused ? "se niega" : outcome == null ? "ya lo estaba haciendo" : outcome);
         }
 
-        // 2. what it knows about itself, the player and the world around it
-        List<String> input = new LinkedList<>();
-        PersonalityModule.apply(input, villager, player);
-        TraitsModule.apply(input, villager, player);
-        RelationModule.apply(input, villager, player);
-        VillageModule.apply(input, villager, player);
-        EnvironmentModule.apply(input, villager, player);
-        PlayerModule.apply(input, villager, player);
-        PerceptionModule.apply(input, villager, player);
-        StringBuilder context = new StringBuilder();
-        for (String s : input) {
-            context.append(s.replace("$player", playerName).replace("$villager", villagerName));
+        // its own answer, ready now: said when no model answers in time
+        String local;
+        try {
+            local = MenteLocal.answer(player, villager, intent, outcome, given, stored, refused);
+        } catch (RuntimeException e) {
+            MCA.LOGGER.error("[Tropeles] la mente local de {} falló", villagerName, e);
+            local = MenteLocal.shrug(es);
         }
+        if (local == null || local.isBlank()) {
+            local = MenteLocal.shrug(es);
+        }
+
+        // 2. who it is, and what it knows about the player and the world around it
+        StringBuilder who = new StringBuilder();
+        module(who, "personalidad", () -> {
+            List<String> input = new LinkedList<>();
+            PersonalityModule.apply(input, villager, player);
+            TraitsModule.apply(input, villager, player);
+            return input;
+        });
+        module(who, "relación", () -> {
+            List<String> input = new LinkedList<>();
+            RelationModule.apply(input, villager, player);
+            PlayerModule.apply(input, villager, player);
+            return input;
+        });
+        StringBuilder world = new StringBuilder();
+        module(world, "aldea", () -> {
+            List<String> input = new LinkedList<>();
+            VillageModule.apply(input, villager, player);
+            EnvironmentModule.apply(input, villager, player);
+            return input;
+        });
+        module(world, "percepción", () -> {
+            List<String> input = new LinkedList<>();
+            PerceptionModule.apply(input, villager, player);
+            return input;
+        });
         if (villager.getWorld() != player.getWorld()) {
-            context.append("\n").append(playerName).append(" is in another dimension and is talking to you from afar, you cannot see them. ");
+            world.append("$player is in another dimension and is talking to you from afar; you cannot see them. ");
         } else if (villager.distanceTo(player) > 16) {
-            context.append("\n").append(playerName).append(" is about ").append((int) villager.distanceTo(player)).append(" blocks away and is talking to you from afar. ");
+            world.append("$player is about ").append((int) villager.distanceTo(player)).append(" blocks away and is talking to you from afar. ");
+        } else {
+            world.append("$player is right here with you, ").append(Math.max(1, (int) villager.distanceTo(player))).append(" blocks away. ");
         }
-        context.append("\nAnswer in the same language ").append(playerName).append(" writes in");
-        context.append(MCA.language != null ? " (" + MCA.language + " when unsure). " : " (Spanish when unsure). ");
+        String context = ("\nWho you are: " + who + "\nWhere you are and what you see: " + world)
+                .replace("$player", playerName).replace("$villager", villagerName);
+
+        String speech = "\nWrite your message in " + (es ? "Spanish" : "English") + ", the language " + playerName + " writes in"
+                + (es ? " (a natural, casual Spanish like a Chilean player's is fine)" : "") + ". "
+                + "One or two short sentences, at most about 25 words, like a line in a game chat. ";
 
         StringBuilder orders = new StringBuilder("\n\n");
         if (refused) {
-            orders.append(playerName).append(" just asked you to do something, but you refuse: you dislike them. Say no in your own words.\n");
-        } else if (intent.order() && outcome == null) {
-            orders.append(playerName).append(" just asked you to do something you were already doing. Tell them so in your own words.\n");
+            orders.append(playerName).append(" just asked you to do something, but you refuse: you dislike them. Say no in your own words. Use no command.\n");
         } else if (intent.order()) {
             orders.append("You have already done what ").append(playerName).append(" just asked. ").append(outcome)
                     .append(" Tell them in your own words, matching what really happened. Use no command.\n");
         }
-        List<TriggerCommandInfo> valid = intent.order() ? List.of() : TriggerCommandInfos.triggerCommands.stream()
+        List<TriggerCommandInfo> valid = intent.order() || refused ? List.of() : TriggerCommandInfos.triggerCommands.stream()
                 .filter(c -> c.isActive == null || c.isActive.test(player, villager))
                 .toList();
         orders.append("Reply with exactly one JSON object and nothing else: {\"message\": \"what you say\", \"optionalCommand\": \"\", \"argument\": \"\"}\n");
@@ -213,7 +417,7 @@ public class OpenAIChatAI implements ChatAIStrategy {
                 orders.append("\n");
             }
             orders.append("If your message says you will do one of these things, optionalCommand must hold it, or you will not really do it. ")
-                    .append("Never claim to do something that is not on this list.\n");
+                    .append("Never claim to do, have or give something that is not true or not on this list.\n");
             valid.stream().filter(c -> c.command.equals("follow-player")).findFirst().ifPresent(c ->
                     orders.append("Example: ").append(playerName).append(" writes \"¿vienes conmigo al río?\" and you answer ")
                             .append("{\"message\": \"¡Claro, vamos!\", \"optionalCommand\": \"follow-player\", \"argument\": \"\"}\n"));
@@ -233,20 +437,41 @@ public class OpenAIChatAI implements ChatAIStrategy {
         if (!config.villagerChatAISystemPrompt.isEmpty()) {
             inHouse.append(config.villagerChatAISystemPrompt).append("\n");
         }
-        inHouse.append(context).append(orders);
+        inHouse.append(context).append(speech).append(orders);
 
         String persona = !config.villagerChatAISystemPrompt.isEmpty() ? config.villagerChatAISystemPrompt
-                : "You are " + villagerName + ", a person living in this world, fully immersed in it. You are not an assistant and you do not know you are in a game. "
-                + "You talk like a real person in a game chat: one or two short sentences, natural and in character; you can be warm, funny, sarcastic or blunt. "
-                + "No emojis, no narrating actions between asterisks, no lists. You only know what you have seen yourself.";
-        String open = persona + "\n" + context + orders;
+                : "You are " + villagerName + ", a person who lives in this world, fully immersed in it. You are not an assistant, "
+                + "you never mention AI, models or games, and you do not know you are in one. You chat with " + playerName
+                + " the way another player would in the game chat: natural, in character, with your own personality and mood; "
+                + "you can be warm, funny, sarcastic or blunt. No emojis, no lists, no narrating actions between asterisks. "
+                + "You only know what you have seen, carry and done yourself: never invent items, places or deeds, and when you "
+                + "do not know something, say so. Keep to what was said before in this conversation.";
+        String open = persona + "\n" + context + speech + orders;
 
-        return new Prepared(playerName, villagerName, history, intent, outcome, given, stored, refused, open, inHouse.toString(),
-                Cerebros.chain(playerName));
+        return new Prepared(playerName, villagerName, history, intent, outcome, refused, done, open, inHouse.toString(),
+                Cerebros.chain(playerName), local);
     }
 
-    /** A bare "stop": stop working when working, otherwise stand still. */
-    private static MenteLocal.Intent resolve(MenteLocal.Intent intent, VillagerEntityMCA villager) {
+    /** Adds what one module knows; a module that fails is logged and left out, the rest still count. */
+    private static void module(StringBuilder into, String name, Supplier<List<String>> module) {
+        try {
+            for (String s : module.get()) {
+                into.append(s);
+            }
+        } catch (RuntimeException e) {
+            MCA.LOGGER.warn("[Tropeles] el módulo de charla '{}' falló", name, e);
+        }
+    }
+
+    /**
+     * What a short order means for this villager: a bare "stop" stops the work when working, otherwise it stands
+     * still; "sube" to one that is not mining but somewhere below the player is "come up here, to me".
+     */
+    private static MenteLocal.Intent resolve(MenteLocal.Intent intent, VillagerEntityMCA villager, ServerPlayerEntity player) {
+        if ("come-up".equals(intent.command()) && villager.getVillagerBrain().getCurrentJob() != Chore.PROSPECT
+                && villager.getWorld() == player.getWorld() && villager.getY() < player.getY() - 1.5) {
+            return new MenteLocal.Intent("follow-player", "", null, intent.spanish());
+        }
         if (!"stop".equals(intent.command())) {
             return intent;
         }
@@ -254,53 +479,80 @@ public class OpenAIChatAI implements ChatAIStrategy {
         return new MenteLocal.Intent(command, "", null, intent.spanish());
     }
 
-    /** Carries out an order a language model chose; says something more only when it could not be done. */
-    @Nullable
-    private static String act(ServerPlayerEntity player, VillagerEntityMCA villager, StructuredResponse said, boolean spanish) {
-        String name = said.optionalCommand().trim();
-        if (name.equals("give-item")) {
-            Acciones.Given given = Acciones.hand(player, villager, said.argument());
-            MCA.LOGGER.info("[Tropeles] {} da '{}': {}", villager.getName().getString(), said.argument(), given.status());
-            return given.status() == Acciones.Status.GAVE ? null
-                    : MenteLocal.answer(player, villager, new MenteLocal.Intent("give-item", said.argument(), null, spanish), "", given, null, false);
+    /**
+     * Carries out an order a language model chose. Not done with no reason to give means it was already doing
+     * it (or it is not possible right now); a reason is the villager's own words for why not.
+     */
+    private static Acted act(ServerPlayerEntity player, VillagerEntityMCA villager, String name, String argument, boolean spanish) {
+        try {
+            if (name.equals("give-item")) {
+                Acciones.Given given = Acciones.hand(player, villager, argument);
+                MCA.LOGGER.info("[Tropeles] {} da '{}': {}", villager.getName().getString(), argument, given.status());
+                boolean gave = given.status() == Acciones.Status.GAVE;
+                return new Acted(gave, gave ? null : MenteLocal.answer(player, villager, new MenteLocal.Intent("give-item", argument, null, spanish), "", given, null, false),
+                        given, null, null);
+            }
+            if (name.equals("store-items")) {
+                if (villager.getInventory().isEmpty()) {
+                    return new Acted(false, MenteLocal.answer(player, villager, new MenteLocal.Intent("store-items", "", null, spanish), "", null, null, false), null, null, null);
+                }
+                Cofres.Store stored = Cofres.orderStore(villager, player);
+                boolean done = stored != Cofres.Store.NONE;
+                return new Acted(done, done ? null : MenteLocal.answer(player, villager, new MenteLocal.Intent("store-items", "", null, spanish), "", null, stored, false),
+                        null, stored, null);
+            }
+            Optional<TriggerCommandInfo> command = TriggerCommandInfos.findCommand(name, player, villager);
+            if (command.isPresent()) {
+                String how = command.get().run(player, villager, argument);
+                MCA.LOGGER.info("[Tropeles] {} hace '{}' ({}): {}", villager.getName().getString(), name, argument, how == null ? "hecho" : how);
+                if (how != null && how.startsWith("You have no")) {
+                    // carried out, but nothing came of it ("no home to go to here"): never let the model say it went
+                    return new Acted(false, MenteLocal.answer(player, villager, new MenteLocal.Intent(name, argument, null, spanish), how, null, null, false),
+                            null, null, how);
+                }
+                return new Acted(true, null, null, null, how);
+            }
+            MCA.LOGGER.info("[Tropeles] {} no hace '{}': ya lo estaba haciendo o no puede ahora", villager.getName().getString(), name);
+            if (name.equals("come-up") || name.equals("eat-break")) {
+                // only a miner climbs out of a mine: "¡Ya subo!" from one that is not in any would be a lie
+                return new Acted(false, MenteLocal.answer(player, villager, new MenteLocal.Intent(name, "", null, spanish), null, null, null, false), null, null, null);
+            }
+            return new Acted(false, null, null, null, null);
+        } catch (RuntimeException e) {
+            MCA.LOGGER.error("[Tropeles] {} no pudo hacer '{}'", villager.getName().getString(), name, e);
+            return new Acted(false, MenteLocal.shrug(spanish), null, null, null);
         }
-        if (name.equals("store-items")) {
-            Cofres.Store stored = Cofres.orderStore(villager, player);
-            return stored != Cofres.Store.NONE ? null
-                    : MenteLocal.answer(player, villager, new MenteLocal.Intent("store-items", "", null, spanish), "", null, stored, false);
-        }
-        Optional<TriggerCommandInfo> command = TriggerCommandInfos.findCommand(name, player, villager);
-        if (command.isPresent()) {
-            MCA.LOGGER.info("[Tropeles] {} hace '{}' ({})", villager.getName().getString(), name, said.argument());
-            command.get().run(player, villager, said.argument());
-        }
-        return null;
     }
 
     // ------------------------------------------------------------------ the conversation so far
 
-    private static List<Pair<String, String>> history(VillagerEntityMCA villager) {
+    /** What this villager and this player said to each other lately, oldest first; forgotten after a long silence. */
+    private static List<Pair<String, String>> history(UUID villager, UUID player) {
         synchronized (memory) {
-            UUID id = villager.getUuid();
-            long time = villager.getWorld().getTime();
-            // forgot about last conversation if it's too long ago
-            if (time > lastInteractions.getOrDefault(id, 0L) + MAX_MEMORY_TIME) {
-                memory.remove(id);
+            Map<UUID, Talk> talks = memory.get(villager);
+            Talk talk = talks == null ? null : talks.get(player);
+            if (talk == null) {
+                return new ArrayList<>();
             }
-            lastInteractions.put(id, time);
-            List<Pair<String, String>> past = memory.computeIfAbsent(id, key -> new LinkedList<>());
-            while (!past.isEmpty() && past.stream().mapToInt(v -> v.getRight().length() / 4).sum() > MAX_MEMORY) {
+            if (System.currentTimeMillis() - talk.lastMs > MAX_MEMORY_MS) {
+                talks.remove(player);
+                return new ArrayList<>();
+            }
+            List<Pair<String, String>> past = talk.turns;
+            while (!past.isEmpty() && (past.size() > MAX_TURNS || past.stream().mapToInt(v -> v.getRight().length() / 4).sum() > MAX_MEMORY)) {
                 past.remove(0);
             }
             return new ArrayList<>(past);
         }
     }
 
-    private static void remember(UUID villager, String msg, String line) {
+    /** Keeps one exchange, what the player said and what the villager really answered. */
+    public static void remember(UUID villager, UUID player, String msg, String line) {
         synchronized (memory) {
-            List<Pair<String, String>> past = memory.computeIfAbsent(villager, key -> new LinkedList<>());
-            past.add(new Pair<>("user", msg));
-            past.add(new Pair<>("assistant", line));
+            Talk talk = memory.computeIfAbsent(villager, key -> new HashMap<>()).computeIfAbsent(player, key -> new Talk());
+            talk.turns.add(new Pair<>("user", msg));
+            talk.turns.add(new Pair<>("assistant", line));
+            talk.lastMs = System.currentTimeMillis();
         }
     }
 
@@ -352,6 +604,8 @@ public class OpenAIChatAI implements ChatAIStrategy {
             return null;
         }
         String text = answer.replace('\n', ' ').replaceAll("\\s+", " ").trim();
+        // "<Name> hello", the way its lines show in chat
+        text = text.replaceFirst("^<[^<>]{1,40}>\\s*", "");
         // "Name: hello" or "**Name**: hello"
         String plain = text.replace("*", "");
         if (plain.regionMatches(true, 0, villagerName + ":", 0, villagerName.length() + 1)) {
@@ -367,11 +621,27 @@ public class OpenAIChatAI implements ChatAIStrategy {
         return text;
     }
 
+    /** A model's line made fit for chat: no acted-out "*smiles*", no emojis the game font cannot draw. */
+    private static String clean(String line) {
+        return line.replaceAll("\\*[^*]{1,60}\\*", " ")
+                .replaceAll("[\\x{1F000}-\\x{1FAFF}\\x{2600}-\\x{27BF}\\x{FE0F}\\x{200D}]", "")
+                .replaceAll("\\s+", " ").trim();
+    }
+
+    /** At most {@link #MAX_LINE} characters, cut after a sentence when it can be. */
+    private static String clip(String line) {
+        String text = line.trim();
+        if (text.length() <= MAX_LINE) {
+            return text;
+        }
+        int cut = Math.max(text.lastIndexOf(". ", MAX_LINE), Math.max(text.lastIndexOf("! ", MAX_LINE), text.lastIndexOf("? ", MAX_LINE)));
+        return cut > 40 ? text.substring(0, cut + 1) : text.substring(0, MAX_LINE - 1) + "…";
+    }
+
     /** For the in-game checks: a fresh start, as if it never talked to anyone. */
     public static void forget(UUID villager) {
         synchronized (memory) {
             memory.remove(villager);
-            lastInteractions.remove(villager);
         }
     }
 

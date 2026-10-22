@@ -17,6 +17,7 @@ import net.minecraft.entity.ai.pathing.Path;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Stay with the player and fight at their side: whatever hurts them, whatever they are hitting, and any
@@ -25,10 +26,17 @@ import net.minecraft.util.math.BlockPos;
  * bridges or pillars with the blocks it carries, the way a player would.
  */
 public class FollowTask extends MultiTickTask<VillagerEntityMCA> {
+    /** Ticks a ward may be off its feet (a jump, a hop down a ledge) and still count as standing where it last stood. */
+    private static final int WARD_AIR_GRACE = 20;
+
     private int stuckTicks;
     private int unreachableTicks;
     private boolean warned;
     private final Motor motor = new Motor();
+    /** Where the ward last stood on something: the goal of a dug or built way, never a point in the air. */
+    @Nullable
+    private BlockPos wardFeet;
+    private long wardFootedAt;
 
     public FollowTask() {
         super(ImmutableMap.of(
@@ -50,6 +58,7 @@ public class FollowTask extends MultiTickTask<VillagerEntityMCA> {
     protected void finishRunning(ServerWorld world, VillagerEntityMCA villager, long time) {
         CombatMind.disengage(villager);
         motor.reset(world, villager);
+        wardFeet = null;
     }
 
     @Override
@@ -124,16 +133,25 @@ public class FollowTask extends MultiTickTask<VillagerEntityMCA> {
         if (distance <= 3.0) {
             unreachableTicks = 0;
         }
-        if (unreachableTicks >= 40 && ward.isOnGround()) {
-            Retina.memory(villager).doing("abriéndose camino hacia " + ward.getName().getString(), world.getTime());
-            Motor.Result result = motor.step(world, villager, ward.getBlockPos(), false, true);
-            if (result == Motor.Result.BLOCKED) {
-                unreachableTicks = 0;
-                motor.reset(world, villager);
-            }
+        long now = world.getTime();
+        if (ward.isOnGround() || ward.isClimbing()) {
+            wardFeet = ward.getBlockPos().toImmutable();
+            wardFootedAt = now;
+        }
+        // a ward flying or falling for long gives no place to build toward: no pillar into the sky after it
+        boolean wardStanding = wardFeet != null && now - wardFootedAt <= WARD_AIR_GRACE;
+        // a jump or a step up already under way is finished first: never cut off in the air
+        if (unreachableTicks >= 40 && wardStanding || motor.midStep(villager)) {
+            Retina.memory(villager).doing("abriéndose camino hacia " + ward.getName().getString(), now);
+            Motor.Result result = motor.step(world, villager, wardFeet != null ? wardFeet : ward.getBlockPos(), false, true);
             if (result != Motor.Result.BLOCKED) {
                 return;
             }
+            unreachableTicks = 0;
+            motor.reset(world, villager);
+        } else if (motor.busy()) {
+            // walking can get there again: no half-made step left behind for next time
+            motor.reset(world, villager);
         }
 
         float dist = (float) distance - 2;

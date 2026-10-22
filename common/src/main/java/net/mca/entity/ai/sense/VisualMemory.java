@@ -2,6 +2,7 @@ package net.mca.entity.ai.sense;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.objects.ObjectIterator;
+import net.mca.entity.ai.body.Mining;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
@@ -12,6 +13,7 @@ import net.minecraft.util.math.Vec3d;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -27,8 +29,15 @@ import java.util.function.Predicate;
 public final class VisualMemory {
     public static final int MAX_BLOCKS = 8192;
     public static final int ENTITY_MEMORY_TICKS = 600;
+    /** Ore sightings kept apart from the rest: a diamond seen an hour ago is still worth remembering. */
+    public static final int MAX_ORES = 1024;
 
     private final Long2ObjectLinkedOpenHashMap<SeenBlock> blocks = new Long2ObjectLinkedOpenHashMap<>();
+    /**
+     * Every ore the eye has seen and not yet seen gone, oldest first. It outlives the block memory's own limit,
+     * and lets the miner look over its ores without going through every block it ever saw.
+     */
+    private final Long2ObjectLinkedOpenHashMap<SeenBlock> ores = new Long2ObjectLinkedOpenHashMap<>();
     private final Map<Integer, SeenEntity> entities = new HashMap<>();
 
     @Nullable
@@ -94,11 +103,20 @@ public final class VisualMemory {
         seen.light = light;
         seen.lastSeen = tick;
         seen.seeThrough = seeThrough;
+        if (Mining.isOre(state)) {
+            ores.putAndMoveToLast(key, seen);
+            if (ores.size() > MAX_ORES) {
+                ores.removeFirst();
+            }
+        } else {
+            ores.remove(key);
+        }
     }
 
     /** A ray went through this cell without touching anything: whatever was remembered there is gone. */
     void empty(BlockPos pos) {
         blocks.remove(pos.asLong());
+        ores.remove(pos.asLong());
     }
 
     void seeEntity(Entity entity, double distance, long tick) {
@@ -129,18 +147,36 @@ public final class VisualMemory {
 
     @Nullable
     public SeenBlock block(BlockPos pos) {
-        return blocks.get(pos.asLong());
+        long key = pos.asLong();
+        SeenBlock seen = blocks.get(key);
+        return seen != null ? seen : ores.get(key);
     }
 
     @Nullable
     public BlockState stateAt(BlockPos pos) {
-        SeenBlock seen = blocks.get(pos.asLong());
+        SeenBlock seen = block(pos);
         return seen == null ? null : seen.state;
     }
 
     public boolean saw(BlockPos pos, long since) {
-        SeenBlock seen = blocks.get(pos.asLong());
+        SeenBlock seen = block(pos);
         return seen != null && seen.lastSeen >= since;
+    }
+
+    /** The ores it remembers, oldest sighting first (a copy: the caller may forget some while going through it). */
+    public Collection<SeenBlock> ores() {
+        return new ArrayList<>(ores.values());
+    }
+
+    /** The ore it remembers at {@code pos}, or null when it remembers none there. */
+    @Nullable
+    public BlockState oreAt(BlockPos pos) {
+        SeenBlock seen = ores.get(pos.asLong());
+        return seen == null ? null : seen.state;
+    }
+
+    public int oreCount() {
+        return ores.size();
     }
 
     public List<SeenBlock> blocks(Predicate<SeenBlock> filter) {
@@ -155,6 +191,7 @@ public final class VisualMemory {
 
     public void forget(BlockPos pos) {
         blocks.remove(pos.asLong());
+        ores.remove(pos.asLong());
     }
 
     public int blockCount() {
@@ -225,6 +262,13 @@ public final class VisualMemory {
         while (it.hasNext()) {
             if (now - it.next().lastSeen > maxAge) {
                 it.remove();
+            }
+        }
+        // an ore stays in mind four times as long as rock does
+        ObjectIterator<SeenBlock> ore = ores.values().iterator();
+        while (ore.hasNext()) {
+            if (now - ore.next().lastSeen > 4L * maxAge) {
+                ore.remove();
             }
         }
     }

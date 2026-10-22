@@ -184,6 +184,41 @@ public final class Cofres {
         return false;
     }
 
+    /** Whether the chest at {@code pos} has room for at least part of {@code stack}. */
+    public static boolean roomFor(ServerWorld world, BlockPos pos, ItemStack stack) {
+        Inventory inv = inventory(world, pos);
+        return inv != null && fits(inv, stack);
+    }
+
+    /**
+     * Its nearest chest within {@code range} of {@code near} that it remembers putting something to eat in (what
+     * it saw inside last time, not what is there now), or null.
+     */
+    @Nullable
+    public static BlockPos withFood(ServerWorld world, VillagerEntityMCA villager, BlockPos near, int range, Predicate<ItemStack> edible) {
+        TropelesMundo mundo = TropelesMundo.get(world);
+        for (BlockPos pos : own(world, villager, near)) {
+            if (!pos.isWithinDistance(near, range)) {
+                break; // nearest first: the rest are farther still
+            }
+            TropelesMundo.Chest chest = mundo.chest(pos);
+            if (chest == null) {
+                continue;
+            }
+            for (Map.Entry<String, Integer> e : chest.snapshot.entrySet()) {
+                Identifier id = Identifier.tryParse(e.getKey());
+                if (id == null || e.getValue() <= 0) {
+                    continue;
+                }
+                Item item = Registries.ITEM.get(id);
+                if (item != Items.AIR && edible.test(new ItemStack(item))) {
+                    return pos;
+                }
+            }
+        }
+        return null;
+    }
+
     /**
      * A gift that does not fit in the bag: into its nearest chest with room, if it has one. True when stored.
      */

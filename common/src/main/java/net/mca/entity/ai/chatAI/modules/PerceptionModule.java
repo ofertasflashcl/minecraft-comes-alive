@@ -43,7 +43,9 @@ public class PerceptionModule {
         }
         String doing = memory.doing();
         if (doing != null && !doing.isBlank() && now - memory.doingTick() < 1200) {
-            input.add("What $villager is doing at this moment (in Spanish): " + doing + ". ");
+            input.add("What $villager is doing at this moment (written in Spanish): " + doing + ". ");
+        } else if (job == Chore.NONE) {
+            input.add("$villager has no work to do right now. ");
         }
         MoveState move = villager.getVillagerBrain().getMoveState();
         if (move == MoveState.FOLLOW) {
@@ -75,12 +77,20 @@ public class PerceptionModule {
             input.add("$villager holds " + hand.getName().getString() + ". ");
         }
         Map<String, Integer> bag = new LinkedHashMap<>();
+        int food = 0;
         SimpleInventory inv = villager.getInventory();
         for (int i = 0; i < inv.size(); i++) {
             ItemStack stack = inv.getStack(i);
             if (!stack.isEmpty()) {
                 bag.merge(stack.getName().getString(), stack.getCount(), Integer::sum);
+                if (stack.isFood()) {
+                    food += stack.getCount();
+                }
             }
+        }
+        if (job == Chore.PROSPECT) {
+            input.add(food == 0 ? "$villager has no food left; when hungry it must climb out to find some. "
+                    : "$villager has " + food + " food to eat in the bag. ");
         }
         if (bag.isEmpty()) {
             input.add("$villager's bag is empty. ");

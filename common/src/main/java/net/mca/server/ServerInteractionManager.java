@@ -2,6 +2,7 @@ package net.mca.server;
 
 import it.unimi.dsi.fastutil.objects.Object2LongArrayMap;
 import net.mca.Config;
+import net.mca.MCA;
 import net.mca.cobalt.network.NetworkHandler;
 import net.mca.entity.ai.relationship.EntityRelationship;
 import net.mca.entity.ai.relationship.RelationshipState;
@@ -12,6 +13,7 @@ import net.mca.server.world.data.PlayerSaveData;
 import net.minecraft.entity.effect.StatusEffectInstance;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
@@ -33,6 +35,9 @@ public class ServerInteractionManager {
      */
     private final Object2LongArrayMap<UUID> procreateMap = new Object2LongArrayMap<>();
 
+    /** Real time of the last logged ProspectorPresence failure, so a recurring one does not flood the log. */
+    private long lastPresenceError;
+
 
     private ServerInteractionManager() {
     }
@@ -45,8 +50,23 @@ public class ServerInteractionManager {
         NetworkHandler.sendToPlayer(new OpenDestinyGuiRequest(player), player);
     }
 
-    public void tick() {
+    /**
+     * Once per server tick, at its end. The server is passed in: on Fabric and Quilt MCA.setServer runs after this
+     * hook, so MCA.getServer() may still be the previous world's server during the first tick.
+     */
+    public void tick(MinecraftServer server) {
         net.mca.server.command.Pruebas.tick();
+        GameSpeed.onTick(server);
+        try {
+            ProspectorPresence.tick(server);
+        } catch (RuntimeException e) {
+            // how a prospector is shown must never take the server down
+            long now = System.currentTimeMillis();
+            if (now - lastPresenceError > 60_000L) {
+                lastPresenceError = now;
+                MCA.LOGGER.error("[Tropeles] no se pudo poner al día la lista de aldeanos en Tab", e);
+            }
+        }
         List<UUID> removals = new ArrayList<>();
         procreateMap.keySet().stream()
                 .filter((k) -> procreateMap.getLong(k) < System.currentTimeMillis())
@@ -78,6 +98,10 @@ public class ServerInteractionManager {
         if (playerData.hasMail()) {
             PlayerSaveData.showMailNotification(player);
         }
+
+        // the prospecting villagers are "online" too, and a sped-up world says so
+        ProspectorPresence.onPlayerJoin(player);
+        GameSpeed.onPlayerJoin(player);
     }
 
     /**

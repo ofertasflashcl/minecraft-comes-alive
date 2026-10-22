@@ -7,6 +7,7 @@ import net.mca.entity.ai.MoveState;
 import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
 import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.util.math.GlobalPos;
 
 import java.util.List;
 import java.util.Optional;
@@ -28,20 +29,44 @@ public class TriggerCommandInfos {
             new TriggerCommandInfo("remove-armor", "Remove all the armor currently equipped",
                     (p, v) -> v.getVillagerBrain().setArmorWear(false),
                     (p, v) -> v.getVillagerBrain().getArmorWear()),
-            new TriggerCommandInfo("try-go-home", "Try to go to your home in the village if possible",
-                    (p, v) -> v.getResidency().goHome(p)),
+            new TriggerCommandInfo("try-go-home", "Go home now (a miner stops digging and climbs out of the mine first)",
+                    null,
+                    TriggerCommandInfos::goHome,
+                    (p, v) -> true),
+            new TriggerCommandInfo("come-up", "Stop digging and climb out of the mine to go home now",
+                    null,
+                    (p, v, ignored) -> {
+                        ProspectingTask.callHome(v, false);
+                        return "You stopped digging and are climbing out of the mine toward home.";
+                    },
+                    (p, v) -> v.getVillagerBrain().getCurrentJob() == Chore.PROSPECT),
+            new TriggerCommandInfo("eat-break", "Stop digging, climb out to find food and eat, then go back to mining",
+                    null,
+                    (p, v, ignored) -> {
+                        ProspectingTask.callHome(v, true);
+                        return "You stopped digging and are going up to find food; after eating you will go back to mining.";
+                    },
+                    (p, v) -> v.getVillagerBrain().getCurrentJob() == Chore.PROSPECT),
             new TriggerCommandInfo("open-trade-window", "Open the trade menu when the player is interested in trading, wants to check your prices or your inventory.",
                     (p, v) -> v.beginTradeWith(p),
                     (p, v) -> v.hasTradeOffers()),
             new TriggerCommandInfo("start-mining", "Start prospecting and play on your own like a real player: chop trees, craft a table and your own tools, then mine for ores",
                     "optional ore to look for first: diamond, iron, gold, coal, copper, redstone, lapis or emerald",
                     (p, v, ore) -> {
-                        ProspectingTask.want(v, ore);
-                        if (v.getVillagerBrain().getCurrentJob() != Chore.PROSPECT) {
+                        // "sigue minando" to one already at it keeps the ore it was asked for; a new ore replaces it
+                        boolean already = v.getVillagerBrain().getCurrentJob() == Chore.PROSPECT;
+                        if (!already || !ore.isBlank()) {
+                            ProspectingTask.want(v, ore);
+                        }
+                        if (!already) {
                             v.getVillagerBrain().assignJob(Chore.PROSPECT, p);
+                        } else {
+                            // "vuelve a la mina" / "sigue minando" to one waiting at home after "sube"
+                            ProspectingTask.backToWork(v);
                         }
                         String wanted = ProspectingTask.wanted(v);
-                        return wanted == null ? "You went mining." : "You went mining, looking for " + wanted.replace('_', ' ') + " first.";
+                        String looking = wanted == null ? "" : ", looking for " + wanted.replace('_', ' ') + " first";
+                        return (already ? "You keep mining" : "You went mining") + looking + ".";
                     },
                     (p, v) -> true),
             job("start-chopping", "Start chopping trees", Chore.CHOP),
@@ -61,10 +86,32 @@ public class TriggerCommandInfos {
                     (p, v, ignored) -> switch (Cofres.orderStore(v, p)) {
                         case WALKING -> "You are walking to your chest to store your things.";
                         case PLACED -> "You set down your chest here and will store your things in it.";
-                        case NONE -> "You have no chest nearby and none in your bag, so you keep your things on you.";
+                        default -> "You have no chest nearby and none in your bag, so you keep your things on you.";
                     },
                     (p, v) -> !v.getInventory().isEmpty())
     );
+
+    /**
+     * Home, the way a villager really gets there: a miner is called out of its mine (it climbs out like a player
+     * and walks home with its haul); anyone else drops its work and walks to its bed's house, when it has one here.
+     */
+    private static String goHome(ServerPlayerEntity player, VillagerEntityMCA villager, String ignored) {
+        if (villager.getVillagerBrain().getCurrentJob() == Chore.PROSPECT) {
+            ProspectingTask.callHome(villager, false);
+            return "You stopped digging and are climbing out of the mine to go home.";
+        }
+        Optional<GlobalPos> home = villager.getResidency().getHome().filter(h -> h.getDimension() == villager.getWorld().getRegistryKey());
+        if (home.isEmpty()) {
+            return "You have no home to go to here, so you stay where you are.";
+        }
+        if (villager.getVillagerBrain().getCurrentJob() != Chore.NONE) {
+            villager.getVillagerBrain().abandonJob();
+        }
+        villager.getVillagerBrain().setMoveState(MoveState.MOVE, player);
+        villager.getInteractions().stopInteracting();
+        villager.moveTowards(home.get().getPos());
+        return "You are walking home.";
+    }
 
     private static TriggerCommandInfo job(String command, String description, Chore chore) {
         return new TriggerCommandInfo(command, description,

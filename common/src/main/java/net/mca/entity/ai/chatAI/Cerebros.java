@@ -23,21 +23,43 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
 /**
  * The minds a villager can think with, asked in turn until one answers. All of them are free: a model running
  * on your own computer (Player2 or Ollama) when there is one, MCA's own service, then public services that need
  * no key. A mind that fails rests a while so the next message does not wait on it again; a local one that is
- * not running is skipped after a quick check. When no mind answers, the caller falls back on the villager's own
- * offline mind ({@link MenteLocal}), so a villager always answers.
+ * not running is skipped after a quick check. Every request has a hard limit in all (not only per read), so a
+ * slow or trickling service never keeps a player waiting past the budget. When no mind answers, the caller falls
+ * back on the villager's own offline mind ({@link MenteLocal}), so a villager always answers.
  */
 public final class Cerebros {
     public static final String MCA_ENDPOINT = "https://api.conczin.net/v1/mca/chat";
     private static final String USER_AGENT = "MCA-Tropeles/7.6.28 (Minecraft villager chat)";
 
-    /** No mind takes longer than this in all, so a player is never left waiting. */
+    /** No mind takes longer than this in all, so a player is never left waiting (callers without a budget). */
     private static final long DEADLINE_MS = 45_000;
+    /** Not worth asking a mind with less time than this left. */
+    private static final long MIN_TRY_MS = 1_500;
+    /** A mind cut off by the budget, not broken, rests only this long. */
+    private static final long SHORT_REST_MS = 15_000;
+
+    /** The chat's clock: cuts off a request when its time is up, and runs the chat's own watchdog. */
+    static final ScheduledThreadPoolExecutor CLOCK = clock();
+
+    private static ScheduledThreadPoolExecutor clock() {
+        ScheduledThreadPoolExecutor clock = new ScheduledThreadPoolExecutor(1, r -> {
+            Thread thread = new Thread(r, "MCA-Chat-Reloj");
+            thread.setDaemon(true);
+            return thread;
+        });
+        clock.setRemoveOnCancelPolicy(true);
+        return clock;
+    }
 
     /**
      * One mind: where to ask, with which model, and how. {@code inHouse} is MCA's own service, which adds the
@@ -128,22 +150,40 @@ public final class Cerebros {
     @Nullable
     public static Reply ask(List<Mind> minds, Function<Mind, String> system, List<Pair<String, String>> history, String msg,
                             String playerName, String villagerName, @Nullable UUID villager) {
+        return ask(minds, system, history, msg, playerName, villagerName, villager, System.currentTimeMillis() + DEADLINE_MS);
+    }
+
+    /**
+     * As above, with every online mind done by {@code deadline} (wall clock, ms). A mind on this computer may go on
+     * until {@link Config#tropelesChatLocalBudgetMs} after the start, so a model that is still loading gets used.
+     */
+    @Nullable
+    public static Reply ask(List<Mind> minds, Function<Mind, String> system, List<Pair<String, String>> history, String msg,
+                            String playerName, String villagerName, @Nullable UUID villager, long deadline) {
         if (OFFLINE.get()) {
             return null;
         }
         long start = System.currentTimeMillis();
-        for (Mind mind : minds) {
+        long localEnd = Math.max(deadline, start + Math.max(0L, Config.getInstance().tropelesChatLocalBudgetMs));
+        for (int i = 0; i < minds.size(); i++) {
+            Mind mind = minds.get(i);
+            long end = mind.local() ? localEnd : deadline;
             long now = System.currentTimeMillis();
-            if (now - start > DEADLINE_MS) {
-                break;
-            }
-            if (RESTING.getOrDefault(mind.name(), 0L) > now) {
-                continue;
+            if (end - now < MIN_TRY_MS || RESTING.getOrDefault(mind.name(), 0L) > now) {
+                continue; // not "break": a mind on this computer may still have time
             }
             if (mind.local() && !running(mind)) {
                 continue;
             }
-            Reply reply = once(mind, system.apply(mind), history, msg, playerName, villagerName).reply();
+            long left = end - System.currentTimeMillis();
+            if (left < MIN_TRY_MS) {
+                continue;
+            }
+            if (!mind.local() && anotherOnline(minds, i)) {
+                // one service hanging must not use up the whole budget: the next one still gets a fair try
+                left = Math.min(left, Math.max(3 * MIN_TRY_MS, left * 3 / 5));
+            }
+            Reply reply = once(mind, system.apply(mind), history, msg, playerName, villagerName, left).reply();
             if (reply != null) {
                 if (villager != null) {
                     LAST.put(villager, mind.name());
@@ -154,11 +194,27 @@ public final class Cerebros {
         return null;
     }
 
+    /** Whether an online mind after {@code index} could still be asked (not resting). */
+    private static boolean anotherOnline(List<Mind> minds, int index) {
+        long now = System.currentTimeMillis();
+        for (int j = index + 1; j < minds.size(); j++) {
+            Mind next = minds.get(j);
+            if (!next.local() && RESTING.getOrDefault(next.name(), 0L) <= now) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private record Try(@Nullable Reply reply, String error) {
     }
 
-    /** One try at one mind; no reply and a rest when it does not answer. */
-    private static Try once(Mind mind, String system, List<Pair<String, String>> history, String msg, String playerName, String villagerName) {
+    /**
+     * One try at one mind within {@code budgetMs} in all; no reply and a rest when it does not answer. A mind cut
+     * off by a budget shorter than its usual wait rests only a little: it was slow for this message, not broken.
+     */
+    private static Try once(Mind mind, String system, List<Pair<String, String>> history, String msg, String playerName, String villagerName,
+                            long budgetMs) {
         long start = System.currentTimeMillis();
         String model = mind.model();
         if (mind.name().equals("ollama") && (model == null || model.isBlank())) {
@@ -169,7 +225,11 @@ public final class Cerebros {
             }
         }
         String body = body(mind, model == null || model.isBlank() ? "default" : model, system, history, msg, playerName, villagerName);
-        Http http = post(mind, body);
+        int usual = mind.local() ? 90_000 : 30_000;
+        int connect = (int) Math.max(300L, Math.min(mind.local() ? 1_500L : 4_000L, budgetMs));
+        int read = (int) Math.max(1_000L, Math.min(usual, budgetMs));
+        boolean capped = budgetMs < usual;
+        Http http = post(mind, body, connect, read, Math.max(1_000L, budgetMs));
         long millis = System.currentTimeMillis() - start;
         if (http.code() / 100 == 2) {
             String content = content(http.body());
@@ -178,7 +238,9 @@ public final class Cerebros {
             }
         }
         String error = http.code() / 100 == 2 ? "respuesta vacía" : error(http);
-        if (error.contains("limit") || http.code() == 429) {
+        if (http.late() && capped) {
+            rest(mind, SHORT_REST_MS, "sin tiempo, " + error);
+        } else if (error.contains("limit") || http.code() == 429) {
             rest(mind, 20 * 60_000, error);
         } else if (http.code() == 401 || http.code() == 403 || http.code() == 404) {
             rest(mind, 10 * 60_000, error);
@@ -321,15 +383,26 @@ public final class Cerebros {
 
     // ------------------------------------------------------------------ http
 
-    private record Http(int code, String body) {
+    /** An HTTP answer; {@code late} when it was cut off for taking too long. */
+    private record Http(int code, String body, boolean late) {
     }
 
-    private static Http post(Mind mind, String body) {
+    /**
+     * POSTs {@code body}. The connect and read timeouts only bound each step (a read timeout restarts with every
+     * byte), so the clock also disconnects the request {@code totalMs} after it began: a true limit in all.
+     */
+    private static Http post(Mind mind, String body, int connectMs, int readMs, long totalMs) {
+        AtomicBoolean cut = new AtomicBoolean();
+        ScheduledFuture<?> watchdog = null;
         try {
             HttpURLConnection con = (HttpURLConnection) new URL(mind.url()).openConnection();
+            watchdog = CLOCK.schedule(() -> {
+                cut.set(true);
+                con.disconnect();
+            }, totalMs, TimeUnit.MILLISECONDS);
             con.setRequestMethod("POST");
-            con.setConnectTimeout(mind.local() ? 1500 : 5000);
-            con.setReadTimeout(mind.local() ? 90_000 : 30_000);
+            con.setConnectTimeout(connectMs);
+            con.setReadTimeout(readMs);
             con.setRequestProperty("Accept-Charset", StandardCharsets.UTF_8.toString());
             con.setRequestProperty("Content-Type", "application/json");
             con.setRequestProperty("Accept", "application/json");
@@ -347,7 +420,13 @@ public final class Cerebros {
             }
             return read(con);
         } catch (Exception e) {
-            return new Http(-1, e.getClass().getSimpleName() + ": " + e.getMessage());
+            boolean late = cut.get() || e instanceof java.net.SocketTimeoutException;
+            return new Http(-1, late ? "sin tiempo tras " + totalMs + " ms (" + e.getClass().getSimpleName() + ")"
+                    : e.getClass().getSimpleName() + ": " + e.getMessage(), late);
+        } finally {
+            if (watchdog != null) {
+                watchdog.cancel(false);
+            }
         }
     }
 
@@ -362,7 +441,7 @@ public final class Cerebros {
             }
             return read(con);
         } catch (Exception e) {
-            return new Http(-1, e.getClass().getSimpleName() + ": " + e.getMessage());
+            return new Http(-1, e.getClass().getSimpleName() + ": " + e.getMessage(), e instanceof java.net.SocketTimeoutException);
         }
     }
 
@@ -370,7 +449,7 @@ public final class Cerebros {
         int code = con.getResponseCode();
         InputStream stream = code >= 400 ? con.getErrorStream() : con.getInputStream();
         String text = stream == null ? "" : IOUtils.toString(stream, StandardCharsets.UTF_8);
-        return new Http(code, text);
+        return new Http(code, text, false);
     }
 
     // ------------------------------------------------------------------ for the in-game checks
@@ -391,7 +470,7 @@ public final class Cerebros {
                 }
             }
             RESTING.remove(mind.name());
-            Try attempt = once(mind, system, List.of(), msg, playerName, "Aldeano");
+            Try attempt = once(mind, system, List.of(), msg, playerName, "Aldeano", 35_000);
             if (attempt.reply() != null) {
                 String text = attempt.reply().content().replace('\n', ' ');
                 results.put(mind.name(), "ok " + attempt.reply().millis() + " ms «" + (text.length() > 140 ? text.substring(0, 140) : text) + "»");

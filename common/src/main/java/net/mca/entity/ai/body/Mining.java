@@ -12,7 +12,11 @@ import net.minecraft.registry.tag.TagKey;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.world.Heightmap;
 import net.minecraft.world.World;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * What counts as ore, as rock a miner may cut, as floor and as open space. Ore is told apart by the
@@ -34,6 +38,12 @@ public final class Mining {
     private static final TagKey<Block> FORGE_SAND = blockTag("forge", "sand");
     private static final TagKey<Block> FORGE_DIRT = blockTag("forge", "dirt");
     private static final TagKey<Block> FORGE_NETHERRACK = blockTag("forge", "netherrack");
+
+    /**
+     * Blocks whose registry name reads like an ore ("..._ore", "ore_..."). Names never change while the game runs,
+     * so each block is looked up once; the tags are checked live, as a datapack reload may change them.
+     */
+    private static final Map<Block, Boolean> NAMED_ORE = new ConcurrentHashMap<>();
 
     private Mining() {
     }
@@ -63,11 +73,12 @@ public final class Mining {
         if (state.isIn(C_ORES) || state.isIn(FORGE_ORES)) {
             return 25;
         }
-        String path = Registries.BLOCK.getId(state.getBlock()).getPath();
-        if (path.endsWith("_ore") || path.contains("_ore_") || path.startsWith("ore_")) {
-            return 25;
-        }
-        return 0;
+        return NAMED_ORE.computeIfAbsent(state.getBlock(), Mining::namedOre) ? 25 : 0;
+    }
+
+    private static boolean namedOre(Block block) {
+        String path = Registries.BLOCK.getId(block).getPath();
+        return path.endsWith("_ore") || path.contains("_ore_") || path.startsWith("ore_");
     }
 
     public static boolean isOre(BlockState state) {
@@ -163,6 +174,41 @@ public final class Mining {
         }
         BlockState here = memory.stateAt(pos);
         return here != null && here.getFluidState().isIn(FluidTags.LAVA);
+    }
+
+    /**
+     * Out in the open, the way a player feels it: nothing over its head but leaves, water and sky, and a neighbouring
+     * cell it could step out to that is not walled in either. True on the ground under a tree and wading or swimming
+     * at the top of a pond or a river; false at the bottom of an open one-wide shaft, in a flooded hole, or in a
+     * ravine with walls on every side.
+     */
+    public static boolean outdoors(World world, BlockPos feet) {
+        int top = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, feet.getX(), feet.getZ());
+        if (feet.getY() < top) {
+            // the heightmap counts water: only water up to the open sky over the feet is still no roof
+            if (top - feet.getY() > 8) {
+                return false;
+            }
+            BlockPos.Mutable cell = feet.mutableCopy();
+            for (int y = feet.getY(); y < top; y++) {
+                cell.setY(y);
+                if (!world.getFluidState(cell).isIn(FluidTags.WATER) || !passable(world, cell)) {
+                    return false;
+                }
+            }
+        }
+        for (Direction dir : Direction.Type.HORIZONTAL) {
+            BlockPos next = feet.offset(dir);
+            if (world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, next.getX(), next.getZ()) <= feet.getY() + 1 && passable(world, next.up())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Outdoors and near the level of the land, not out in a deep pit open to the sky. */
+    public static boolean onSurface(World world, BlockPos feet) {
+        return outdoors(world, feet) && feet.getY() >= world.getSeaLevel() - 12;
     }
 
     /** Lava right at or beside a cell. Used as the feel of heat on the skin, only for cells the body touches. */

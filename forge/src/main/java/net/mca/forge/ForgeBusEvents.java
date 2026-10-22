@@ -41,7 +41,7 @@ public class ForgeBusEvents {
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.side == LogicalSide.SERVER && event.phase == TickEvent.Phase.END) {
-            ServerInteractionManager.getInstance().tick();
+            ServerInteractionManager.getInstance().tick(event.getServer());
         }
         MCA.setServer(event.getServer());
     }

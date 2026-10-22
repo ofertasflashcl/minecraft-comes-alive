@@ -18,6 +18,7 @@ import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.item.BlockItem;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemPlacementContext;
 import net.minecraft.item.ItemStack;
 import net.minecraft.registry.tag.BlockTags;
@@ -38,6 +39,9 @@ import net.minecraft.world.RaycastContext;
 import net.minecraft.world.World;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.WeakHashMap;
 import java.util.function.Predicate;
 
 /**
@@ -47,10 +51,19 @@ import java.util.function.Predicate;
  * with that tool, fortune and silk touch included.
  */
 public final class Hands {
+    /** Items each villager threw away on purpose, with the world time until which they are left on the ground. */
+    private static final Map<VillagerEntityMCA, Map<Item, Long>> REFUSED = new WeakHashMap<>();
+    /** Ticks nobody can pick up an item a player throws (the Q key). */
+    public static final int TOSS_DELAY = 40;
+
     private Hands() {
     }
 
-    /** Turns head and eyes exactly toward a point, so the next sight ray goes through it. */
+    /**
+     * Turns head and eyes exactly toward a point, so the next sight ray goes through it. A point (nearly) straight
+     * above or below only tilts the head: the body keeps facing the way it is going, as a player looking down at
+     * their feet while jumping still moves forward.
+     */
     public static void aim(MobEntity entity, Vec3d point) {
         Vec3d eye = entity.getEyePos();
         double dx = point.x - eye.x;
@@ -59,13 +72,15 @@ public final class Hands {
         double horizontal = Math.sqrt(dx * dx + dz * dz);
         float yaw = (float) (MathHelper.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
         float pitch = (float) -(MathHelper.atan2(dy, horizontal) * (180.0 / Math.PI));
-        entity.setHeadYaw(yaw);
         entity.setPitch(MathHelper.clamp(pitch, -90.0F, 90.0F));
-        if (Math.abs(MathHelper.wrapDegrees(yaw - entity.getBodyYaw())) > 45.0F) {
-            entity.setBodyYaw(yaw);
-        }
-        if (entity.getNavigation().isIdle()) {
-            entity.setYaw(yaw);
+        if (horizontal > 0.3) {
+            entity.setHeadYaw(yaw);
+            if (Math.abs(MathHelper.wrapDegrees(yaw - entity.getBodyYaw())) > 45.0F) {
+                entity.setBodyYaw(yaw);
+            }
+            if (entity.getNavigation().isIdle()) {
+                entity.setYaw(yaw);
+            }
         }
         entity.getLookControl().lookAt(point.x, point.y, point.z, 360.0F, 360.0F);
         entity.getBrain().remember(MemoryModuleType.LOOK_TARGET, new BlockPosLookTarget(point));
@@ -130,6 +145,7 @@ public final class Hands {
         private int stage = -1;
         private int ticks;
         private int blindTicks;
+        private int airTicks;
 
         @Nullable
         public BlockPos target() {
@@ -149,9 +165,19 @@ public final class Hands {
             stage = -1;
             ticks = 0;
             blindTicks = 0;
+            airTicks = 0;
         }
 
+        /** One tick of breaking {@code target}; only with its feet on something, like a player who lands before swinging. */
         public int tick(ServerWorld world, VillagerEntityMCA miner, BlockPos target) {
+            return tick(world, miner, target, false);
+        }
+
+        /**
+         * One tick of breaking {@code target}. Off its feet (jumping, falling) it does not swing and the cracks stay
+         * as they are, unless {@code urgent} (buried by sand or gravel: it digs out wherever it is).
+         */
+        public int tick(ServerWorld world, VillagerEntityMCA miner, BlockPos target, boolean urgent) {
             BlockState state = world.getBlockState(target);
             if (state.isAir() || !state.getFluidState().isEmpty() && state.getCollisionShape(world, target).isEmpty()) {
                 reset(world, miner);
@@ -171,6 +197,14 @@ public final class Hands {
                 pos = target.toImmutable();
                 holdBestTool(miner, state);
             }
+            if (!urgent && !miner.isOnGround() && !miner.isTouchingWater() && !miner.isClimbing() && !miner.hasVehicle()) {
+                if (++airTicks > 100) {
+                    reset(world, miner);
+                    return FAILED;
+                }
+                return RUNNING;
+            }
+            airTicks = 0;
             BlockHitResult face = Retina.visibleFace(world, miner, target, Retina.BLOCK_REACH);
             if (face == null) {
                 // a player cannot hit what the crosshair cannot reach; give the body a moment to settle
@@ -257,9 +291,19 @@ public final class Hands {
         }
     }
 
-    /** Picks up loose items around a spot, the way walking over them would. */
+    /** Picks up loose items around a spot, the way walking over them would. What it threw away stays on the ground. */
     public static void collect(ServerWorld world, VillagerEntityMCA villager, BlockPos around, double radius) {
+        collect(world, villager, around, radius, stack -> true);
+    }
+
+    /** Picks up the loose items around a spot that {@code accept} wants; what it threw away stays on the ground. */
+    public static void collect(ServerWorld world, VillagerEntityMCA villager, BlockPos around, double radius, Predicate<ItemStack> accept) {
+        long now = world.getTime();
         for (ItemEntity item : world.getEntitiesByClass(ItemEntity.class, new Box(around).expand(radius), e -> e.isAlive() && !e.getStack().isEmpty())) {
+            ItemStack stack = item.getStack();
+            if (!accept.test(stack) || refused(villager, stack, now)) {
+                continue;
+            }
             ItemStack leftover = villager.getInventory().addStack(item.getStack().copy());
             if (leftover.isEmpty()) {
                 item.discard();
@@ -372,6 +416,71 @@ public final class Hands {
     public static ItemStack buildingBlock(VillagerEntityMCA villager) {
         int slot = findSlot(villager.getInventory(), Hands::isBuildingBlock);
         return slot < 0 ? ItemStack.EMPTY : villager.getInventory().getStack(slot);
+    }
+
+    /** How many building blocks the bag holds in all. */
+    public static int buildingBlockCount(VillagerEntityMCA villager) {
+        int count = 0;
+        SimpleInventory inventory = villager.getInventory();
+        for (int i = 0; i < inventory.size(); i++) {
+            ItemStack stack = inventory.getStack(i);
+            if (isBuildingBlock(stack)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    /**
+     * It threw this kind of item away on purpose: {@link #collect} leaves it on the ground until {@code until}
+     * (world time), as a player does not pick back up the cobble they just dropped.
+     */
+    public static void refuse(VillagerEntityMCA villager, Item item, long until) {
+        REFUSED.computeIfAbsent(villager, v -> new HashMap<>()).put(item, until);
+    }
+
+    /** It wants everything again (it ran short of blocks): every refusal is lifted. */
+    public static void unrefuse(VillagerEntityMCA villager) {
+        REFUSED.remove(villager);
+    }
+
+    /** Whether it threw this kind of item away and does not want it back yet. */
+    public static boolean refused(VillagerEntityMCA villager, ItemStack stack, long now) {
+        Map<Item, Long> items = REFUSED.get(villager);
+        if (items == null) {
+            return false;
+        }
+        Long until = items.get(stack.getItem());
+        if (until == null) {
+            return false;
+        }
+        if (until < now) {
+            items.remove(stack.getItem());
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Throws the stack in {@code slot} out of the bag the way a player drops an item: it falls at its feet,
+     * nobody can pick it up for {@link #TOSS_DELAY} ticks, and the villager itself leaves that kind of item on the
+     * ground for {@code refuseTicks}. False when the slot is empty.
+     */
+    public static boolean toss(ServerWorld world, VillagerEntityMCA villager, int slot, long refuseTicks) {
+        ItemStack stack = villager.getInventory().removeStack(slot);
+        if (stack.isEmpty()) {
+            return false;
+        }
+        Item kind = stack.getItem();
+        ItemEntity dropped = villager.dropStack(stack);
+        if (dropped != null) {
+            dropped.setPickupDelay(TOSS_DELAY);
+        }
+        if (refuseTicks > 0) {
+            refuse(villager, kind, world.getTime() + refuseTicks);
+        }
+        villager.swingHand(Hand.MAIN_HAND);
+        return true;
     }
 
     /** The context a player would make by right-clicking that face; yaw and look come from the villager. */

@@ -178,7 +178,9 @@ public final class Obras {
     /**
      * Whether the log at {@code pos} belongs to a tree the world grew. Walks the whole trunk with its branches
      * and asks for natural leaves on it and nothing made against it; the answer is shared by every log of the
-     * trunk for a while.
+     * trunk for a while. Trodden or tilled ground (a path, farmland) and what villagers put there themselves (a
+     * torch, the block a chopper stands on to reach the top logs) do not make a tree a building; anything a player
+     * placed does.
      */
     public static boolean tree(ServerWorld world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
@@ -216,6 +218,9 @@ public final class Obras {
                         }
                         n.set(log.getX() + dx, log.getY() + dy, log.getZ() + dz);
                         BlockState near = world.getBlockState(n);
+                        if (mundo != null && !near.isIn(BlockTags.LOGS) && mundo.placedBy(n) != null && !mundo.isPlayerPlaced(n)) {
+                            continue; // a villager's own torch or pillar block beside the trunk
+                        }
                         if (near.isIn(BlockTags.LOGS)) {
                             if (trunk.size() < TREE_LIMIT && trunk.add(n.asLong())) {
                                 open.add(n.toImmutable());
@@ -229,7 +234,7 @@ public final class Obras {
                             }
                         } else if (near.isIn(BlockTags.WART_BLOCKS) || near.isOf(Blocks.SHROOMLIGHT)) {
                             leaves = true;
-                        } else if (made(near) && !near.isIn(BlockTags.MANGROVE_LOGS_CAN_GROW_THROUGH)) {
+                        } else if (made(near) && !near.isIn(BlockTags.MANGROVE_LOGS_CAN_GROW_THROUGH) && !ground(near)) {
                             madeNear = true;
                             break;
                         }
@@ -244,6 +249,11 @@ public final class Obras {
             cache.put(log, until);
         }
         return result;
+    }
+
+    /** Ground people walk or farm on: a path or farmland is trodden earth, not a build. */
+    private static boolean ground(BlockState state) {
+        return state.getBlock() instanceof FarmlandBlock || state.isOf(Blocks.DIRT_PATH);
     }
 
     /** What the eye makes of the block at {@code pos}, from the point of view of {@code villager} (may be null). */

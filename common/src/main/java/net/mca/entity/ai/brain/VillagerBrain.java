@@ -1,6 +1,7 @@
 package net.mca.entity.ai.brain;
 
 import net.mca.Config;
+import net.mca.MCA;
 import net.mca.advancement.criterion.CriterionMCA;
 import net.mca.entity.Status;
 import net.mca.entity.VillagerEntityMCA;
@@ -8,6 +9,7 @@ import net.mca.entity.VillagerLike;
 import net.mca.entity.ai.*;
 import net.mca.entity.ai.relationship.AgeState;
 import net.mca.entity.ai.relationship.Personality;
+import net.mca.server.ProspectorPresence;
 import net.mca.util.network.datasync.CDataManager;
 import net.mca.util.network.datasync.CDataParameter;
 import net.mca.util.network.datasync.CEnumParameter;
@@ -18,6 +20,7 @@ import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import org.jetbrains.annotations.Nullable;
@@ -117,19 +120,31 @@ public class VillagerBrain<E extends MobEntity & VillagerLike<E>> {
         return entity.getTrackedValue(ACTIVE_CHORE);
     }
 
+    /** The one who gave the job, when that player is in the villager's own world. */
     public Optional<PlayerEntity> getJobAssigner() {
         return entity.getTrackedValue(CHORE_ASSIGNING_PLAYER).map(id -> entity.getWorld().getPlayerByUuid(id));
+    }
+
+    /** The UUID of the one who gave the job, even while that player is in another dimension or offline. */
+    public Optional<UUID> getJobAssignerUuid() {
+        return entity.getTrackedValue(CHORE_ASSIGNING_PLAYER);
     }
 
     /**
      * Tells the villager to stop doing whatever it's doing.
      */
     public void abandonJob() {
+        boolean wasProspecting = getCurrentJob() == Chore.PROSPECT;
         entity.getBrain().doExclusively(Activity.IDLE);
         entity.setTrackedValue(ACTIVE_CHORE, Chore.NONE);
         entity.setTrackedValue(CHORE_ASSIGNING_PLAYER, Optional.empty());
 
         resetsBrain();
+
+        if (wasProspecting) {
+            // it leaves the Tab list as soon as it stops, like a player logging off
+            refreshPresence();
+        }
     }
 
     /**
@@ -143,6 +158,25 @@ public class VillagerBrain<E extends MobEntity & VillagerLike<E>> {
         entity.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
 
         resetsBrain();
+
+        if (chore == Chore.PROSPECT) {
+            // in Tab and "<Inas> ..." in chat from its very first word, not up to a second later
+            refreshPresence();
+        }
+    }
+
+    /** Brings the Tab list of prospecting villagers ({@link ProspectorPresence}) up to date now, on the server thread. */
+    private void refreshPresence() {
+        MinecraftServer server = entity.getServer();
+        if (server == null || !server.isOnThread()) {
+            return;
+        }
+        try {
+            ProspectorPresence.refreshNow(server);
+        } catch (RuntimeException e) {
+            // how it is shown must never undo the job change itself
+            MCA.LOGGER.error("[Tropeles] no se pudo poner al día a {} en Tab", entity.getName().getString(), e);
+        }
     }
 
     public void randomize() {

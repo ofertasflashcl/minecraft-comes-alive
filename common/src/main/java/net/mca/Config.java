@@ -128,6 +128,22 @@ public final class Config extends CommonConfig {
     public String tropelesOllamaUrl = "http://127.0.0.1:11434/";
     /** Empty: the first model Ollama has installed. */
     public String tropelesOllamaModel = "";
+    /** Other players this close to a villager also read its chat answers; -1 is the whole server. */
+    public int tropelesChatHearRange = 24;
+    /** The longest the online minds may think about one message before the villager's own mind answers. */
+    public long tropelesChatBudgetMs = 12000;
+    /** A mind on your own computer (Ollama, Player2) may take this long, so a model that is still loading gets used. */
+    public long tropelesChatLocalBudgetMs = 30000;
+    /** After this long without an answer, "Inas está pensando…" shows above the hotbar of the one who asked. */
+    public int tropelesChatThinkingMs = 1500;
+    /** Talking without saying the name: the villager you look at, the one you talk with, the only one near you or your own worker. */
+    public boolean tropelesChatImplicit = true;
+    /** Villagers speak in chat like players, "<Inas> hola"; off gives MCA's own "Inas (Prospecting): hola". */
+    public boolean tropelesPlayerChatFormat = true;
+    /** A prospecting villager shows in the Tab list like an online player, and /tp works with its name. */
+    public boolean prospectorListedAsPlayer = true;
+    /** A prospecting villager keeps the chunks around it loaded, like a player, so it keeps working when nobody is near. */
+    public boolean prospectorLoadsChunks = true;
 
     //InworldAI
     public String inworldAIToken = "";
@@ -330,11 +346,12 @@ public final class Config extends CommonConfig {
                 if (config == null || config.version != VERSION) {
                     config = new Config();
                 }
-                if (config.tropelesChatDefaults < 1) {
-                    // villagers talk and take orders by chat from the start, also in worlds made before
+                if (config.tropelesChatDefaults < 2) {
+                    // villagers talk and take orders by chat from the start, also in worlds made before, and again
+                    // after an old "/mca chatAI disable" (step 2: chat answers come straight, like a player's)
                     config.enableVillagerChatAI = true;
                     config.villagerChatAIUseTools = true;
-                    config.tropelesChatDefaults = 1;
+                    config.tropelesChatDefaults = 2;
                 }
                 config.save();
                 return config;

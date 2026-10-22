@@ -16,6 +16,7 @@ import net.mca.network.c2s.InteractionVillagerMessage;
 import net.mca.resources.Names;
 import net.mca.resources.Rank;
 import net.mca.resources.Tasks;
+import net.mca.server.ProspectorPresence;
 import net.mca.server.world.data.FamilyTree;
 import net.mca.server.world.data.FamilyTreeNode;
 import net.mca.server.world.data.Village;
@@ -110,6 +111,8 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
 
     public final ConversationManager conversationManager = new ConversationManager(this);
     private final VillagerBrain<VillagerEntityMCA> mcaBrain = new VillagerBrain<>(this);
+    /** While set, getDisplayName() is the bare name, as a player's would be (no " (Prospecting)", no colour). */
+    private boolean plainDisplayName;
     private final LongTermMemory longTermMemory = new LongTermMemory(this);
     private final Genetics genetics = new Genetics(this);
     private final Traits traits = new Traits(this);
@@ -948,15 +951,30 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
             this.equipStack(slot, ItemStack.EMPTY);
         }
 
-        //death message
+        //death message, read before super.onDeath clears the damage record
+        Text playerLikeDeath = null;
         if (!getWorld().isClient) {
-            getResidency().getHomeVillage().flatMap(Village::getCivilRegistry).ifPresent(r -> r.addText(getDamageTracker().getDeathMessage()));
+            Text registryLine = getDamageTracker().getDeathMessage();
+            getResidency().getHomeVillage().flatMap(Village::getCivilRegistry).ifPresent(r -> r.addText(registryLine));
+            if (ProspectorPresence.isListed(this)) {
+                // shown like a player's death: "Inés Prueba was slain by Zombie", without " (Prospecting)"
+                plainDisplayName = true;
+                try {
+                    playerLikeDeath = getDamageTracker().getDeathMessage();
+                } finally {
+                    plainDisplayName = false;
+                }
+            }
         }
 
         super.onDeath(cause);
 
         if (getWorld().isClient) {
             return;
+        }
+
+        if (playerLikeDeath != null && isDead()) {
+            ProspectorPresence.onDeath(this, playerLikeDeath);
         }
 
         //drop stuff
@@ -1160,6 +1178,9 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
     @Override
     public final Text getDisplayName() {
         Text name = super.getDisplayName();
+        if (plainDisplayName) {
+            return name;
+        }
 
         if (getVillagerBrain() != null) {
             MoveState state = getVillagerBrain().getMoveState();

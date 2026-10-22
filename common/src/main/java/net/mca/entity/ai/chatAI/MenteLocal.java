@@ -1,5 +1,6 @@
 package net.mca.entity.ai.chatAI;
 
+import net.mca.MCA;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.MoveState;
@@ -20,6 +21,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -40,12 +42,22 @@ public final class MenteLocal {
     private static final String ORES = "diamantes?|hierro|oro|carbon|cobre|esmeraldas?|lapislazuli|lapis|redstone|cuarzo|netherita|"
             + "diamonds?|iron|gold|coal|copper|emeralds?|quartz|netherite|ancient debris";
 
-    /** Orders, most specific first: "no me sigas" must win over "sigueme". */
+    /**
+     * Orders, most specific first: "no me sigas" must win over "sigueme", and "sal de la mina" or "deja de minar
+     * y sube" (climb out and go home) over "deja de minar" (stop right where it is).
+     */
     private static final List<Map.Entry<String, Pattern>> ORDERS = List.of(
+            order("eat-break", "(ve|anda|sal|salte|sube|subete|vete|andate)( de (la )?mina| de ahi( abajo)?)? (a|para) comer( algo)?|"
+                    + "buscar? comida|come algo|tienes que comer|go (eat|get (some )?food)|get some food|grab (some food|a bite)|eat something"),
+            order("come-up", "sal de (la )?mina|salte de (la )?mina|sal de ahi( abajo)?|sal del (hoyo|pozo|tunel)|sal afuera|sube( ya)?|subete|"
+                    + "ven (para |pa )?arriba|vuelve (a la superficie|arriba)|deja la mina|deja de (minar|cavar|picar) y (sube|sal|vuelve)|"
+                    + "(ya )?puedes (subir|salir)( de (la )?mina)?|te espero (arriba|afuera)|"
+                    + "come up|come back up|get out of (the )?(mine|hole|cave)|climb (out|up)"),
             order("move-freely", "no me sigas|deja de seguirme|dejame (solo|sola|tranquilo|tranquila)|anda(te)? libre|puedes irte|ya puedes irte|"
                     + "vete (tranquilo|tranquila)|haz lo tuyo|anda a pasear|stop following|leave me alone|you can go|move freely|go away|do your thing"),
             order("stop-working", "deja de (trabajar|minar|talar|pescar|cosechar|cazar)|para de (trabajar|minar|talar|pescar|cosechar|cazar)|"
                     + "detente|deten el trabajo|basta de trabajar|ya no (mines|trabajes|tales|peques|caces)|"
+                    + "no sigas (minando|trabajando|cavando|picando|talando|pescando|cazando)|"
                     + "stop (working|mining|chopping|fishing|harvesting|hunting)|quit (working|mining)"),
             order("remove-armor", "quitate (la |tu )?armadura|sacate (la |tu )?armadura|take off (your |the )?armou?r|remove (your |the )?armou?r"),
             order("wear-armor", "ponte (la |tu )?armadura|equipate|vistete (con )?(la |tu )?armadura|wear (your |the )?armou?r|put on (your |the )?armou?r"),
@@ -56,11 +68,17 @@ public final class MenteLocal {
             order("follow-player", "sigueme|seguime|siguenos|seguirme|ven conmigo|vente conmigo|vienes conmigo|venir conmigo|vamos juntos|vamonos|"
                     + "vamos a (explorar|caminar|pasear|dar una vuelta)|acompaname|acompanarme|acompaneme|me acompanas|me acompanarias|"
                     + "quedate conmigo|camina conmigo|no te (alejes|separes|despegues) de mi|pegate a mi|ven (aca|aqui|para aca|pa ca|para aqui)|"
+                    // a bare "ven" (once its name is taken out: "Inas, ven") is "come to me"
+                    + "^((oye|hey|ey|che|hola) )?(ven|vente)( ya| rapido| porfa| por favor)?$|"
                     + "follow me|come with me|come along|come here|tag along|walk with me|accompany me|join me|stick with me|stay (close|with me)|"
                     + "let'?s go together"),
             order("stay-here", "quedate|esperame (aqui|aca|ahi)|espera (aqui|aca|ahi)|no te muevas|stay here|stay there|wait here|wait for me|don'?t move"),
-            order("start-mining", "ve a minar|vete a minar|anda a minar|ponte a minar|ve a la mina|a minar|mina|minar|excava|"
-                    + "go mine|go mining|start mining|mine for|dig for|"
+            // a bare "mina" is the order ("mina hierro"), not the noun ("la mina esta oscura", "sal de la mina")
+            order("start-mining", "ve a minar|vete a minar|anda a minar|ponte a minar|ve a la mina|vete a la mina|anda a la mina|baja a la mina|ven a la mina|"
+                    + "vamos a (la mina|minar)|a minar|minar|(?<!(la|una|esa|esta|tu|mi|su|de|en|al|del) )mina|excava|"
+                    // going on, or back down after a break: "sigue bajando", "vuelve a la mina"
+                    + "sigue (minando|bajando|cavando|picando)|baja mas|vuelve a (la mina|minar)|"
+                    + "go mine|go mining|start mining|mine for|dig for|keep (mining|digging)|go back (down|to the mine|to mining)|"
                     + "(busca|buscame|consigue|consigueme|encuentra|encuentrame|traeme|trae|saca|sacame|find|get me|look for|search for|go get) .*(" + ORES + ")"),
             order("start-chopping", "tala|talar|ve a talar|corta (arboles|madera|troncos|lena)|consigue madera|trae madera|chop|cut (down )?trees|get (some )?wood"),
             order("start-fishing", "pesca|pescar|ve a pescar|go fish(ing)?|start fishing|catch (some )?fish"),
@@ -70,7 +88,16 @@ public final class MenteLocal {
             order("open-trade-window", "comerciar|tradear|intercambiar|que vendes|que tienes para vender|quiero comprar|let'?s trade|trade|what do you sell")
     );
 
+    /** A start-* order said with a "no" before it: "no vayas a la mina", "nunca mines aqui", "don't go mining". */
+    private static final Pattern NEGATED_START = Pattern.compile("(?<![a-z])(no|nunca|ni)( [a-z]+){0,2} (vayas|vaya|vayan|mines|minar|bajes|sigas|"
+            + "tales|talar|peques|pescar|caces|cazar|cosech[a-z]*|excaves|a la mina)(?![a-z])"
+            + "|(?<![a-z])(don'?t|do not|never) (go )?(mine|mining|chop|fish|hunt|harvest)");
+
     private static final List<Map.Entry<String, Pattern>> QUESTIONS = List.of(
+            order("bye", "adios|chao|chau|nos vemos|hasta luego|hasta pronto|hasta manana|bye|goodbye|good bye|see you|see ya"),
+            order("hungry", "tienes hambre|tienes comida|te queda comida|has comido|are you hungry|do you have (any )?food|have you eaten"),
+            order("found", "(encontraste|has encontrado|hallaste|conseguiste) (algo|algun|minerales|diamantes|hierro)|que (encontraste|has encontrado|conseguiste)|"
+                    + "found anything|what did you find|did you find"),
             order("doing", "que (estas haciendo|haces|andas haciendo)|en que andas|en que estas|what are you doing|what('re| are) you up to"),
             order("bag", "que (tienes|llevas|traes|cargas)|tu inventario|tu mochila|que hay en tu mochila|what do you have|what are you carrying|your inventory|your bag"),
             order("health", "como estas|estas bien|como te sientes|que tal estas|how are you|are you (ok|okay|alright)|you (ok|okay)"),
@@ -82,10 +109,43 @@ public final class MenteLocal {
             order("greet", "hola|buenas|buenos dias|buenas tardes|buenas noches|ola|que tal|hey|hi|hello")
     );
 
+    /**
+     * What a language model said it will do, in its own words, when it forgot to put the order in its answer.
+     * Only clear first-person promises count.
+     */
+    private static final List<Map.Entry<String, Pattern>> PROMISES = List.of(
+            order("follow-player", "te sigo|voy contigo|me voy contigo|te acompano|camino (a tu lado|contigo)|voy detras de ti|"
+                    + "i('?ll| will) follow( you)?|following you|coming with you|i('?ll| will) come with you|right behind you|lead the way|"
+                    + "i('?ll| will) walk with you"),
+            order("stay-here", "me quedo (aqui|aca|quieto|quieta)|aqui te espero|te espero aqui|i('?ll| will) (stay|wait) (here|right here)"),
+            order("come-up", "ya subo|salgo de la mina|voy subiendo|coming up|i('?ll| will) come up|i'?m coming up|climbing out"),
+            order("try-go-home", "me voy a casa|vuelvo a casa|i'?m heading home|i('?ll| will) go home"),
+            order("start-mining", "voy a minar|me voy a minar|bajo a la mina|me pongo a minar|i('?ll| will) go mining|off to the mine|"
+                    + "i('?ll| will) start mining"),
+            order("start-chopping", "voy a talar|me pongo a talar|i('?ll| will) (go )?chop"),
+            order("start-fishing", "voy a pescar|me voy a pescar|i('?ll| will) go fishing")
+    );
+
+    /**
+     * A promise with one of these just before it is a refusal: "no puedo seguirte", "I can't follow you". ("puedo"
+     * alone is a yes: "¡Claro que puedo, te sigo!")
+     */
+    private static final Set<String> NEGATIONS = Set.of("no", "nunca", "jamas", "ni", "not", "never", "cant", "can't",
+            "cannot", "won't", "wont", "don't", "dont");
+
+    /**
+     * Said with one of these around it, a promise is for later, not now: "esta noche me voy a casa", "cuando termine
+     * te sigo", "I'll go home later". Talk about plans is not an order.
+     */
+    private static final Pattern LATER = Pattern.compile("(?<![a-z])(esta noche|mas tarde|al rato|(?<!(desde|hasta) )luego|despues|manana|"
+            + "cuando|quizas|tal vez|later|tonight|tomorrow|when|maybe)(?![a-z])");
+
     private static final Pattern SPANISH = Pattern.compile("\\b(el|la|los|las|que|de|por|favor|hola|tu|tus|me|mi|dame|ven|sigueme|quedate|"
-            + "como|donde|tienes|estas|gracias|aqui|aca|busca|mina|tala|pesca|guarda|para|con|una?|y|si|no|vamos|oye|porfa)\\b");
+            + "como|donde|tienes|estas|gracias|aqui|aca|busca|mina|tala|pesca|guarda|para|con|una?|y|si|no|vamos|oye|porfa|"
+            // the short orders said to a miner carry no other Spanish word: "sube ya", "sal de ahi", "sigue bajando"
+            + "algo|ya|sube|subete|sal|ahi|arriba|abajo|sigue|baja|bajando|casa|comer|comida|hambre|ahora|bien|mas|muy|pero|eso|dime)\\b");
     private static final Pattern ENGLISH = Pattern.compile("\\b(the|you|your|me|my|please|follow|stay|give|what|where|how|are|is|do|have|"
-            + "hello|hi|thanks|thank|here|go|come|stop|mine|find|get|can|let'?s|i)\\b");
+            + "hello|hi|thanks|thank|here|go|come|stop|mine|find|get|can|let'?s|i|keep|mining|it|to|of|and|up|out|back|now)\\b");
 
     private MenteLocal() {
     }
@@ -107,6 +167,53 @@ public final class MenteLocal {
         return count(SPANISH, t) >= count(ENGLISH, t);
     }
 
+    /** "Spanish" or "English" when the words clearly say which, null when they do not (a bare "sube"). */
+    @Nullable
+    public static String language(String text) {
+        String t = clean(text);
+        int es = count(SPANISH, t) + (text.matches("(?s).*[ñáéíóúü¿¡].*") ? 2 : 0);
+        int en = count(ENGLISH, t);
+        if (es > en) {
+            return "Spanish";
+        }
+        return en > es ? "English" : null;
+    }
+
+    /**
+     * Whether to answer {@code text} in Spanish: what its words say, leaving out the villager's own name (an "Inés"
+     * says nothing about the player's language); when they do not say ("ok", "sube"), the game's language, else Spanish.
+     */
+    public static boolean speaksSpanish(String text, @Nullable String villagerName) {
+        String language = language(withoutRawName(text, villagerName));
+        if (language != null) {
+            return language.equals("Spanish");
+        }
+        return !(MCA.language != null && MCA.language.startsWith("en"));
+    }
+
+    /** {@code text} as it was written (accents kept), without the words of {@code name}. */
+    private static String withoutRawName(String text, @Nullable String name) {
+        if (name == null || name.isBlank()) {
+            return text;
+        }
+        String out = text;
+        for (String part : name.trim().split("\\s+")) {
+            if (part.length() >= 2) {
+                out = Pattern.compile("(?<![\\p{L}\\p{N}])" + Pattern.quote(part) + "(?![\\p{L}\\p{N}])",
+                        Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE).matcher(out).replaceAll(" ");
+            }
+        }
+        return out;
+    }
+
+    /** Whether an answer is clearly in the other language than the one the player wrote in. */
+    public static boolean clearlyNot(String answer, boolean spanish) {
+        String t = clean(answer);
+        int es = count(SPANISH, t) + (answer.matches("(?s).*[ñáéíóúü¿¡].*") ? 2 : 0);
+        int en = count(ENGLISH, t);
+        return spanish ? en >= 3 && es == 0 : es >= 3 && en == 0;
+    }
+
     private static int count(Pattern pattern, String text) {
         Matcher m = pattern.matcher(text);
         int n = 0;
@@ -114,6 +221,42 @@ public final class MenteLocal {
             n++;
         }
         return n;
+    }
+
+    /**
+     * The message without the villager's name, so "Mina, ven aqui" is not read as an order to mine and
+     * "Inas sal de la mina" is "sal de la mina". Only the first time the name is said is it taken out:
+     * "Rosa, dame la rosa" still asks for the rose.
+     */
+    public static String withoutName(String msg, @Nullable String villagerName) {
+        String text = Acciones.normalize(msg);
+        if (villagerName == null || villagerName.isBlank()) {
+            return text;
+        }
+        String name = Acciones.normalize(villagerName).trim().replaceAll("\\s+", " ");
+        String stripped = removeFirst(text, name);
+        if (stripped.equals(text)) {
+            for (String part : name.split(" ")) {
+                if (part.length() >= 2) {
+                    stripped = removeFirst(stripped, part);
+                }
+            }
+        }
+        return stripped.replaceAll("\\s+", " ").trim();
+    }
+
+    private static String removeFirst(String text, String word) {
+        if (word.isEmpty()) {
+            return text;
+        }
+        Matcher m = Pattern.compile("(?<![\\p{L}\\p{N}])" + Pattern.quote(word) + "(?![\\p{L}\\p{N}])").matcher(text);
+        return m.find() ? text.substring(0, m.start()) + " " + text.substring(m.end()) : text;
+    }
+
+    /** Reads what the player said to {@code villagerName}: the order and the language without the name ({@link #speaksSpanish}). */
+    public static Intent read(String text, @Nullable String villagerName) {
+        Intent intent = read(withoutName(text, villagerName));
+        return new Intent(intent.command(), intent.argument(), intent.question(), speaksSpanish(text, villagerName));
     }
 
     /** Reads the message: which order or question it is, if any. */
@@ -127,6 +270,9 @@ public final class MenteLocal {
         for (Map.Entry<String, Pattern> entry : ORDERS) {
             Matcher m = entry.getValue().matcher(t);
             if (m.find()) {
+                if (entry.getKey().startsWith("start-") && NEGATED_START.matcher(t).find()) {
+                    continue; // "no vayas a la mina" is not an order to go
+                }
                 String argument = "";
                 if (entry.getKey().equals("give-item")) {
                     argument = t.substring(m.end()).trim();
@@ -143,6 +289,36 @@ public final class MenteLocal {
             }
         }
         return new Intent(null, "", null, spanish);
+    }
+
+    /** The order a model's own words promise ("¡Claro, te sigo!"), or null; never one said with a "no" before it. */
+    @Nullable
+    public static String promise(String said) {
+        String t = clean(said);
+        for (Map.Entry<String, Pattern> entry : PROMISES) {
+            Matcher m = entry.getValue().matcher(t);
+            if (m.find()) {
+                String[] before = t.substring(0, m.start()).trim().split(" ");
+                for (int i = Math.max(0, before.length - 3); i < before.length; i++) {
+                    if (NEGATIONS.contains(before[i])) {
+                        return null;
+                    }
+                }
+                String[] after = t.substring(m.end()).trim().split(" ");
+                String around = String.join(" ", java.util.Arrays.copyOfRange(before, Math.max(0, before.length - 4), before.length))
+                        + " | " + String.join(" ", java.util.Arrays.copyOfRange(after, 0, Math.min(3, after.length)));
+                if (LATER.matcher(around).find()) {
+                    return null;
+                }
+                return entry.getKey();
+            }
+        }
+        return null;
+    }
+
+    /** When nothing better can be said: it heard something, but did not get it. */
+    public static String shrug(boolean es) {
+        return es ? "¿Mm? Perdona, me distraje. ¿Qué decías?" : "Hm? Sorry, I got distracted. What was that?";
     }
 
     // ------------------------------------------------------------------ answering, from what it really knows
@@ -171,6 +347,10 @@ public final class MenteLocal {
             case "see" -> see(villager, es);
             case "name" -> es ? "Me llamo " + villager.getName().getString() + "." : "I'm " + villager.getName().getString() + ".";
             case "help" -> help(es);
+            case "bye" -> pick(villager, es ? new String[]{"¡Nos vemos, " + name + "!", "¡Chao! Cuídate.", "Hasta luego, " + name + "."}
+                    : new String[]{"See you, " + name + "!", "Bye! Take care.", "Later, " + name + "."});
+            case "hungry" -> hungry(villager, es);
+            case "found" -> found(villager, es);
             case "thanks" -> pick(villager, es ? new String[]{"¡De nada!", "Cuando quieras.", "Para eso estamos."}
                     : new String[]{"You're welcome!", "Any time.", "No problem."});
             case "greet" -> pick(villager, es ? new String[]{"¡Hola, " + name + "!", "¡Buenas, " + name + "! ¿Qué necesitas?", "Hola. " + doing(villager, true)}
@@ -184,10 +364,21 @@ public final class MenteLocal {
     private static String order(VillagerEntityMCA villager, Intent intent, @Nullable String outcome, @Nullable Acciones.Given given,
                                 @Nullable Cofres.Store stored, boolean es, String name) {
         String command = intent.command();
+        boolean mining = villager.getVillagerBrain().getCurrentJob() == Chore.PROSPECT;
+        if (outcome == null && "come-up".equals(command)) {
+            // only a miner climbs out of a mine
+            return es ? "No estoy en ninguna mina ahora mismo." : "I'm not down in a mine right now.";
+        }
+        if (outcome == null && "eat-break".equals(command)) {
+            return es ? "Estoy bien, todavía no tengo hambre." : "I'm fine, I'm not hungry yet.";
+        }
         if (outcome == null && !"give-item".equals(command) && !"store-items".equals(command)) {
             return pick(villager, es ? new String[]{"Ya estoy en eso.", "Eso ya lo estoy haciendo."} : new String[]{"Already on it.", "I'm already doing that."});
         }
         return switch (command) {
+            case "come-up" -> pick(villager, es ? new String[]{"Voy subiendo, salgo de la mina.", "Vale, dejo de picar y subo."}
+                    : new String[]{"Coming up, I'm getting out of the mine.", "Okay, I'll stop digging and come up."});
+            case "eat-break" -> es ? "Subo a comer algo y luego vuelvo a la mina." : "I'll go up and eat something, then head back down.";
             case "follow-player" -> pick(villager, es ? new String[]{"¡Vamos! Te sigo.", "Voy contigo, " + name + ".", "Detrás tuyo."}
                     : new String[]{"Let's go! I'm right behind you.", "Coming with you, " + name + "."});
             case "stay-here" -> pick(villager, es ? new String[]{"Me quedo aquí.", "Aquí te espero."} : new String[]{"I'll stay here.", "I'll wait right here."});
@@ -195,6 +386,11 @@ public final class MenteLocal {
             case "stop-working", "stop" -> pick(villager, es ? new String[]{"Listo, dejo lo que estaba haciendo.", "Vale, paro."} : new String[]{"Okay, I'll stop.", "Fine, stopping."});
             case "start-mining" -> {
                 String ore = ProspectingTask.wanted(villager);
+                if (outcome.startsWith("You keep")) {
+                    // already a miner: it goes on (or back down after a break), it does not start over
+                    yield ore == null ? (es ? "Sigo en la mina, picando." : "I'll keep at it down in the mine.")
+                            : (es ? "Sigo minando, buscando " + oreName(ore, true) + "." : "I'll keep mining for " + oreName(ore, false) + ".");
+                }
                 yield ore == null
                         ? (es ? "¡A la mina! Me armo mis herramientas y busco minerales." : "Off to the mine! I'll make my tools and look for ores.")
                         : (es ? "Voy a minar y busco " + oreName(ore, true) + " primero." : "I'll go mining and look for " + oreName(ore, false) + " first.");
@@ -204,7 +400,10 @@ public final class MenteLocal {
             case "start-harvesting" -> es ? "Voy a cosechar." : "I'll go harvest.";
             case "start-hunting" -> es ? "Voy de caza." : "I'll go hunting.";
             case "start-escort" -> es ? "Te escolto." : "I'll escort you.";
-            case "try-go-home" -> es ? "Me voy a casa." : "Heading home.";
+            case "try-go-home" -> mining ? (es ? "Dejo de picar y vuelvo a casa." : "I'll stop digging and head home.")
+                    : outcome.startsWith("You have no home") || villager.getResidency().getHome().isEmpty()
+                    ? (es ? "No tengo casa a la que volver." : "I don't have a home to go to.")
+                    : (es ? "Me voy a casa." : "Heading home.");
             case "wear-armor" -> es ? "Me pongo la armadura." : "Putting my armor on.";
             case "remove-armor" -> es ? "Me quito la armadura." : "Taking my armor off.";
             case "open-trade-window" -> es ? "Mira lo que tengo." : "Here's what I've got.";
@@ -212,7 +411,7 @@ public final class MenteLocal {
             case "store-items" -> stored == null ? (es ? "No tengo nada que guardar." : "I've got nothing to store.") : switch (stored) {
                 case WALKING -> es ? "Voy a guardar mis cosas en mi cofre." : "I'll put my things in my chest.";
                 case PLACED -> es ? "Pongo mi cofre aquí y guardo mis cosas." : "I'll set my chest down here and store my things.";
-                case NONE -> es ? "No tengo ningún cofre cerca, así que me quedo con mis cosas." : "I have no chest nearby, so I'll keep my things.";
+                default -> es ? "No tengo ningún cofre cerca, así que me quedo con mis cosas." : "I have no chest nearby, so I'll keep my things.";
             };
             default -> es ? "Hecho." : "Done.";
         };
@@ -330,8 +529,55 @@ public final class MenteLocal {
     }
 
     private static String help(boolean es) {
-        return es ? "Puedo seguirte, quedarme aquí, ir a minar (dime qué buscar), talar, pescar, cosechar, cazar, darte cosas o guardarlas en mi cofre."
-                : "I can follow you, stay here, go mining (tell me what to look for), chop trees, fish, harvest, hunt, hand you things or store them in my chest.";
+        return es ? "Puedo seguirte, quedarme aquí, ir a minar (dime qué buscar) y subir cuando me llames, talar, pescar, cosechar, cazar, darte cosas o guardarlas en mi cofre."
+                : "I can follow you, stay here, go mining (tell me what to look for) and come up when you call, chop trees, fish, harvest, hunt, hand you things or store them in my chest.";
+    }
+
+    /** The food in its own bag. */
+    private static String hungry(VillagerEntityMCA villager, boolean es) {
+        int meals = 0;
+        ItemStack kind = ItemStack.EMPTY;
+        SimpleInventory inv = villager.getInventory();
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack stack = inv.getStack(i);
+            if (!stack.isEmpty() && stack.isFood()) {
+                meals += stack.getCount();
+                if (kind.isEmpty() || stack.getCount() > kind.getCount()) {
+                    kind = stack;
+                }
+            }
+        }
+        if (meals == 0) {
+            return villager.getVillagerBrain().getCurrentJob() == Chore.PROSPECT
+                    ? (es ? "No me queda nada de comer; cuando me dé hambre subo a buscar comida." : "I've got no food left; when I get hungry I'll go up for some.")
+                    : (es ? "No llevo nada de comer encima." : "I'm not carrying any food.");
+        }
+        return es ? "Llevo " + amount(meals, kind, true) + " para comer, estoy bien." : "I've got " + amount(meals, kind, false) + " to eat, I'm fine.";
+    }
+
+    /** The ore it carries, and the ore its eyes saw lately. */
+    private static String found(VillagerEntityMCA villager, boolean es) {
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        Map<String, ItemStack> kinds = new LinkedHashMap<>();
+        SimpleInventory inv = villager.getInventory();
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack stack = inv.getStack(i);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            String id = Registries.ITEM.getId(stack.getItem()).getPath();
+            if (id.startsWith("raw_") || id.endsWith("_ingot") || id.equals("coal") || id.equals("diamond") || id.equals("emerald")
+                    || id.equals("lapis_lazuli") || id.equals("redstone") || id.equals("quartz") || id.equals("ancient_debris")) {
+                counts.merge(id, stack.getCount(), Integer::sum);
+                kinds.putIfAbsent(id, stack);
+            }
+        }
+        List<String> parts = new ArrayList<>();
+        counts.forEach((id, n) -> parts.add(amount(n, kinds.get(id), es)));
+        String carried = parts.isEmpty() ? (es ? "Todavía no he sacado nada bueno." : "I haven't dug up anything good yet.")
+                : (es ? "Llevo " : "I've got ") + join(parts.subList(0, Math.min(6, parts.size())), es) + ".";
+        String seen = see(villager, es);
+        return seen.startsWith(es ? "Veo " : "I can see ") ? carried + " " + seen : carried;
     }
 
     private static String join(List<String> parts, boolean es) {

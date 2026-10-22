@@ -219,14 +219,7 @@ public final class Agua {
     }
 
     private static int blocks(VillagerEntityMCA villager) {
-        int count = 0;
-        for (int i = 0; i < villager.getInventory().size(); i++) {
-            ItemStack stack = villager.getInventory().getStack(i);
-            if (Hands.isBuildingBlock(stack)) {
-                count += stack.getCount();
-            }
-        }
-        return count;
+        return Hands.buildingBlockCount(villager);
     }
 
     /** In water in a hole three or more sides walled. */
