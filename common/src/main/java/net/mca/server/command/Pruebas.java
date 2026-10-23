@@ -825,7 +825,7 @@ public final class Pruebas {
         @Override
         String state() {
             return "en " + v.getBlockPos().toShortString() + ", haciendo: " + Retina.memory(v).doing() + ", cortados " + order
-                    + ", troncos " + v.getInventory().count(Items.OAK_LOG) + ", agachado " + v.isSneaking();
+                    + ", troncos " + v.getInventory().count(Items.OAK_LOG) + ", agachado " + v.isSneaking() + ", " + progreso.debugTree();
         }
 
         @Override

@@ -143,6 +143,10 @@ public final class Progreso {
         final Set<Long> cutCells = new HashSet<>();
         /** Since the last log it cut it looked up the trunk from beside it: no log hidden in the crown is left over it. */
         boolean lookedUp;
+        /** It looked up the trunk from on the bottom log, straight up the cut column, past the crown's leaves. */
+        boolean lookedFromLog;
+        /** What it last made of the bottom log's turn: for the log of a check. */
+        String why = "";
         int ticks;
         int side;
         int leaves;
@@ -852,13 +856,21 @@ public final class Progreso {
         double dx = villager.getX() - stump.x;
         double dz = villager.getZ() - stump.z;
         boolean beside = t.big || dx * dx + dz * dz <= 1.75 * 1.75;
-        if (!t.big && target.equals(t.base) && !t.lookedUp && beside && footed) {
-            // before the last log goes: a look up the trunk, the way a player checks nothing is left up there
-            lookUp(world, villager, t);
-            memory.doing("mira hacia arriba por si queda tronco", now);
-            t.lookedUp = true;
-            t.next = null;
-            return;
+        if (!t.big && target.equals(t.base)) {
+            boolean onStump = feet.getX() == t.base.getX() && feet.getZ() == t.base.getZ() && feet.getY() > t.base.getY();
+            if (!t.lookedUp && beside && footed) {
+                // before the last log goes: a look up the trunk, the way a player checks nothing is left up there
+                lookUp(world, villager, memory, now, t);
+                memory.doing("mira hacia arriba por si queda tronco", now);
+                t.lookedUp = true;
+                t.lookedFromLog |= onStump;
+                t.why = onStump ? "miró desde el primer tronco" : "miró desde el lado";
+                t.next = null;
+                return;
+            }
+            if (t.lookedUp && !t.lookedFromLog && hopToLook(world, villager, memory, now, t, feet, footed, onStump)) {
+                return;
+            }
         }
         if (footed && !under && beside && Retina.visibleFace(world, villager, target, Retina.BLOCK_REACH) != null) {
             Motor.standStill(villager);
@@ -956,16 +968,99 @@ public final class Progreso {
     }
 
     /** Looks up the trunk from where it stands: every cell over what it cut (and the arms beside it) is peeked at. */
-    private static void lookUp(ServerWorld world, VillagerEntityMCA villager, Tree t) {
+    private static void lookUp(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, Tree t) {
+        int top = topCut(t);
+        for (int y = t.base.getY() + 1; y <= top + 4; y++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BlockPos cell = new BlockPos(t.base.getX() + dx, y, t.base.getZ() + dz);
+                    if (dx == 0 && dz == 0) {
+                        Retina.peek(world, villager, cell);
+                    }
+                    BlockState state = world.getBlockState(cell);
+                    if (!state.isIn(BlockTags.LOGS)) {
+                        continue;
+                    }
+                    // a log its eye can put a crosshair on, near or far: seen (every face point, not only the centre,
+                    // as a player looks up past the leaves at the underside of the next log)
+                    BlockHitResult face = Retina.visibleFace(world, villager, cell, 16.0);
+                    if (face != null) {
+                        memory.see(cell, state, face.getSide(), face.getPos(), villager.getEyePos().distanceTo(face.getPos()),
+                                world.getLightLevel(cell.offset(face.getSide())), now);
+                    }
+                }
+            }
+        }
+        Hands.aim(villager, Vec3d.ofCenter(t.base.up(Math.max(1, top + 1 - t.base.getY()))));
+    }
+
+    /** The highest cell of the trunk it cut so far (the stump cell when none). */
+    private static int topCut(Tree t) {
         int top = t.base.getY();
         for (long cell : t.cutCells) {
             top = Math.max(top, BlockPos.fromLong(cell).getY());
         }
-        for (int y = t.base.getY() + 1; y <= top + 3; y++) {
-            BlockPos cell = new BlockPos(t.base.getX(), y, t.base.getZ());
-            Retina.peek(world, villager, cell);
+        return top;
+    }
+
+    /**
+     * The look from beside the trunk found nothing over the cut, but the crown may hide logs from there: up onto the
+     * bottom log for a look straight up the cut column, the way a player hops on the stump. True while at it.
+     */
+    private boolean hopToLook(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, Tree t, BlockPos feet,
+                              boolean footed, boolean onStump) {
+        BlockPos onLog = t.base.up();
+        if (topCut(t) - t.base.getY() < 2) {
+            t.lookedFromLog = true; // a short cut trunk: from beside it the eye sees the top
+            t.why = "tronco corto, no hace falta subir";
+            return false;
         }
-        Hands.aim(villager, Vec3d.ofCenter(t.base.up(Math.max(1, top + 1 - t.base.getY()))));
+        if (onStump && footed) {
+            lookUp(world, villager, memory, now, t);
+            memory.doing("mira hacia arriba desde el primer tronco", now);
+            t.lookedFromLog = true;
+            t.why = "miró desde el primer tronco";
+            t.next = null;
+            return true;
+        }
+        if (!fits(world, onLog)) {
+            t.lookedFromLog = true;
+            t.why = "no cabe sobre el primer tronco";
+            return false;
+        }
+        memory.doing("se sube al primer tronco para mirar arriba", now);
+        t.why = "subiendo al primer tronco";
+        if (++t.walk > 200) {
+            t.walk = 0;
+            t.lookedFromLog = true;
+            t.why = "no llegó a subirse al primer tronco";
+            motor.reset(world, villager);
+            return false;
+        }
+        if (feet.isWithinDistance(onLog, 2.5)) {
+            villager.getNavigation().stop();
+            motorGoal = onLog;
+            if (motor.step(world, villager, onLog, false, true) == Motor.Result.BLOCKED) {
+                motor.reset(world, villager);
+                t.lookedFromLog = true;
+                t.why = "el motor no pudo subirlo al primer tronco";
+                return false;
+            }
+        } else if (t.walk % 20 == 1 || villager.getNavigation().isIdle()) {
+            villager.getNavigation().startMovingTo(onLog.getX() + 0.5, onLog.getY(), onLog.getZ() + 0.5, 0.65);
+        }
+        return true;
+    }
+
+    /** What the felling is at, for the log of a check. */
+    public String debugTree() {
+        Tree t = tree;
+        if (t == null) {
+            return "paso " + step + ", sin árbol";
+        }
+        return "paso " + step + ", árbol " + t.base.toShortString() + (t.big ? " grueso" : "") + ", siguiente " + (t.next == null ? "-" : t.next.toShortString())
+                + ", troncos conocidos " + t.members.size() + ", cortados " + t.cutCells.size() + ", miró arriba " + t.lookedUp
+                + ", desde el tronco " + t.lookedFromLog + " (" + t.why + "), bloques propios " + t.pillar.size() + ", talado " + t.felled;
     }
 
     /** Standing on top of {@code block}: its feet are on that block's top face. */
