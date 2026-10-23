@@ -56,7 +56,10 @@ public class OpenAIChatAI implements ChatAIStrategy {
             Map.entry("home", "try-go-home"), Map.entry("stop", "stop-working"), Map.entry("give", "give-item"),
             Map.entry("store", "store-items"), Map.entry("trade", "open-trade-window"), Map.entry("climb-out", "come-up"),
             Map.entry("eat", "eat-break"), Map.entry("consider", "consider-return"), Map.entry("consider-going-back", "consider-return"),
-            Map.entry("consider-going-home", "consider-return"), Map.entry("weigh-return", "consider-return"), Map.entry("think-about-it", "consider-return")
+            Map.entry("consider-going-home", "consider-return"), Map.entry("weigh-return", "consider-return"), Map.entry("think-about-it", "consider-return"),
+            Map.entry("careful", "alert"), Map.entry("be-careful", "alert"), Map.entry("halt", "alert"), Map.entry("freeze", "alert"),
+            Map.entry("stop-and-look", "alert"), Map.entry("continue", "carry-on"), Map.entry("resume", "carry-on"), Map.entry("go-on", "carry-on"),
+            Map.entry("carry", "carry-on"), Map.entry("own-life", "free"), Map.entry("free-will", "free"), Map.entry("do-your-thing", "free")
     );
 
     public static String translate(String phrase) {
@@ -213,6 +216,11 @@ public class OpenAIChatAI implements ChatAIStrategy {
                 }
                 return message;
             }
+            if (message != null && !prep.refused() && "alert".equals(prep.intent().command()) && !message.contains("?")) {
+                // stopped by a warning it asks what is going on: words that do not ask are not what it did
+                MCA.LOGGER.info("[Tropeles] {} se detuvo pero no preguntó qué pasa: habla su propia mente («{}»)", prep.villagerName(), message);
+                return prep.local();
+            }
             if (promised != null && (prep.refused() || !sameOrder(promised, prep.intent().command()))) {
                 MCA.LOGGER.info("[Tropeles] {} prometió '{}' pero hizo '{}': habla su propia mente", prep.villagerName(), promised,
                         prep.refused() ? "nada" : prep.intent().command());
@@ -248,7 +256,7 @@ public class OpenAIChatAI implements ChatAIStrategy {
             boolean fits = message != null && agrees(message, acted.goesBack()) && !contradicts(message, acted.goesBack());
             return fits ? message : onServer(server, () -> MenteLocal.answer(player, villager, weighed, acted.how(), null, null, false));
         }
-        if (message != null) {
+        if (message != null && !("alert".equals(chosen) && !message.contains("?"))) {
             String words = MenteLocal.promise(message);
             if (words == null || sameOrder(words, chosen)) {
                 return message;
@@ -386,7 +394,9 @@ public class OpenAIChatAI implements ChatAIStrategy {
 
         // 1. the villager's own mind reads the message, without its name in it; a clear order is carried out right now
         MenteLocal.Intent read = MenteLocal.read(msg, villagerName);
-        MenteLocal.Intent intent = resolve(new MenteLocal.Intent(read.command(), read.argument(), read.question(), es), villager, player);
+        // a connected villager's will hears it first: an alert is still being talked about, and it answers in this language
+        net.mca.entity.ai.mente.Voluntad.oyo(villager, player, es);
+        MenteLocal.Intent intent = resolve(new MenteLocal.Intent(read.command(), read.argument(), read.question(), es), villager, player, msg);
         boolean refused = false;
         boolean done = false;
         String outcome = null;
@@ -575,17 +585,28 @@ public class OpenAIChatAI implements ChatAIStrategy {
 
     /**
      * What a short order means for this villager: a bare "stop" stops the work when working, otherwise it stands
-     * still; "sube" to one that is not mining but somewhere below the player is "come up here, to me".
+     * still; to a connected villager it is a warning (it stops dead and asks what is going on), and so is "detente"
+     * to one with no job; "tranquilo, sigue" to one stopped by a warning carries it on; "sube" to one that is not
+     * mining but somewhere below the player is "come up here, to me".
      */
-    private static MenteLocal.Intent resolve(MenteLocal.Intent intent, VillagerEntityMCA villager, ServerPlayerEntity player) {
+    private static MenteLocal.Intent resolve(MenteLocal.Intent intent, VillagerEntityMCA villager, ServerPlayerEntity player, String msg) {
+        boolean connected = net.mca.entity.ai.mente.Voluntad.conectado(villager);
+        if (connected && !intent.order() && net.mca.entity.ai.mente.Voluntad.of(villager).modo() == net.mca.entity.ai.mente.Voluntad.Modo.ALERTA
+                && MenteLocal.calma(msg)) {
+            return new MenteLocal.Intent("carry-on", "", null, intent.spanish());
+        }
         if ("come-up".equals(intent.command()) && villager.getVillagerBrain().getCurrentJob() != Chore.PROSPECT
                 && villager.getWorld() == player.getWorld() && villager.getY() < player.getY() - 1.5) {
             return new MenteLocal.Intent("follow-player", "", null, intent.spanish());
         }
+        if ("alert".equals(intent.command()) && !connected && villager.getVillagerBrain().getCurrentJob() != Chore.NONE) {
+            // "detente" to one chopping or fishing still stops its work, as it always did
+            return new MenteLocal.Intent("stop-working", "", null, intent.spanish());
+        }
         if (!"stop".equals(intent.command())) {
             return intent;
         }
-        String command = villager.getVillagerBrain().getCurrentJob() != Chore.NONE ? "stop-working" : "stay-here";
+        String command = connected ? "alert" : villager.getVillagerBrain().getCurrentJob() != Chore.NONE ? "stop-working" : "stay-here";
         return new MenteLocal.Intent(command, "", null, intent.spanish());
     }
 

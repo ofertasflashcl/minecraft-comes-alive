@@ -42,6 +42,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -59,9 +60,12 @@ import java.util.function.Predicate;
  * <p>
  * Wood only grows outside: down in the rock ({@link Entorno#bajoTierra}, never merely under a roof) with nothing to
  * make a pickaxe from it asks to be taken up ({@link #needsSurface()}) instead of wandering the tunnels looking for
- * trees. Out on the land with no tree in sight it explores like a player ({@link Explorar}). A tree is felled whole, from the
- * bottom log up, standing in the cut trunk once the lowest logs are gone and building a block up when the top is
- * out of reach; then it gathers what fell and takes its own blocks back.
+ * trees. Out on the land with no tree in sight it explores like a player ({@link Explorar}). A tree is felled whole, one
+ * trunk at a time, the way a player does it: standing beside the trunk it keeps the bottom log and cuts the logs above
+ * it as high as it reaches from the ground, then hops onto that bottom log (a natural step) to reach the higher ones,
+ * sets a block under its feet only when even that does not reach (and takes it back), and cuts the bottom log last,
+ * from beside it, never from on top of it. Then it gathers every log that fell before going anywhere else. A thick
+ * 2x2 trunk is felled the older way, from the bottom up, standing in the cut trunk.
  */
 public final class Progreso {
     private static final int CRAFT_TICKS = 12;
@@ -71,6 +75,10 @@ public final class Progreso {
     private static final int TREE_TICKS = 3000;
     /** How far from the stump it looks for the logs that fell and the logs of the same trunk. */
     private static final int TREE_REACH = 6;
+    /** How far a branch of the same tree reaches out from the trunk (an acacia's crooked arms). */
+    private static final int BRANCH_REACH = 4;
+    /** Logs above the bottom one it cuts from the ground beside the trunk before it hops onto the bottom log. */
+    private static final int GROUND_LOGS = 3;
 
     /** Raw food a furnace turns into a meal, by registry name (the same in every version). */
     private static final Set<String> RAW_FOOD = Set.of("beef", "porkchop", "chicken", "mutton", "rabbit", "cod", "salmon", "potato");
@@ -120,10 +128,19 @@ public final class Progreso {
 
     private enum Step {IDLE, WOOD, TABLE, SMELT, COLLECT, PACK_UP}
 
-    /** The tree it is felling: one trunk, bottom log first, then what fell, then its own blocks back. */
+    /**
+     * The tree it is felling: one trunk, the bottom log kept to stand on and cut last, then what fell, then its own
+     * blocks back (a 2x2 trunk: bottom log first).
+     */
     private static final class Tree {
         /** The stump cell: where the lowest log of the trunk stood. */
         final BlockPos base;
+        /** A 2x2 trunk (dark oak, a big spruce or jungle tree): felled the older way, bottom first. */
+        final boolean big;
+        /** Logs it knows are this tree's: they stay its even once the leaves are gone from them (the last bottom log). */
+        final Set<Long> members = new HashSet<>();
+        /** Cells of this tree it cut already: the trunk goes on from them. */
+        final Set<Long> cutCells = new HashSet<>();
         int ticks;
         int side;
         int leaves;
@@ -141,8 +158,10 @@ public final class Progreso {
         /** No log of this trunk left that it knows of: gather what fell and come down. */
         boolean felled;
 
-        Tree(BlockPos base) {
+        Tree(BlockPos base, boolean big) {
             this.base = base;
+            this.big = big;
+            members.add(base.asLong());
         }
     }
 
@@ -727,7 +746,10 @@ public final class Progreso {
         }
         exploreTicks = 0;
         explorar.reset();
-        tree = new Tree(stump(world, log));
+        BlockPos base = stump(world, log);
+        tree = new Tree(base, thick(world, base));
+        tree.members.add(log.asLong());
+        MCA.LOGGER.info("[Tropeles] {} va a talar el árbol de {}{}", villager.getName().getString(), base.toShortString(), tree.big ? " (tronco grueso)" : "");
         fell(world, villager, memory, now);
     }
 
@@ -745,6 +767,20 @@ public final class Progreso {
         return base.toImmutable();
     }
 
+    /** A 2x2 trunk: a log beside the bottom one that goes up too. */
+    private static boolean thick(ServerWorld world, BlockPos base) {
+        if (!world.getBlockState(base).isIn(BlockTags.LOGS)) {
+            return false;
+        }
+        for (Direction d : Direction.Type.HORIZONTAL) {
+            BlockPos n = base.offset(d);
+            if (world.getBlockState(n).isIn(BlockTags.LOGS) && world.getBlockState(n.up()).isIn(BlockTags.LOGS)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * One tick of felling the current tree. True while the tree still keeps it busy: a log to cut, the leaves in
      * the way, a block to stand on for the top, what fell to pick up, its own blocks to take back.
@@ -756,8 +792,8 @@ public final class Progreso {
         }
         BlockPos feet = villager.getBlockPos();
         if (motor.midStep(villager)) {
-            // up a block of its own in the trunk: the jump finishes before anything else
-            motor.step(world, villager, t.rising != null ? t.rising.up() : feet, false, true);
+            // up a block of its own in the trunk, or onto the bottom log: the jump finishes before anything else
+            motor.step(world, villager, t.rising != null ? t.rising.up() : motorGoal != null ? motorGoal : feet, false, true);
             return true;
         }
         if (t.rising != null) {
@@ -786,21 +822,33 @@ public final class Progreso {
                 dropTicks = 10;
                 return true;
             }
+            if (!t.big && t.next.equals(t.base) && !t.pillar.isEmpty()) {
+                // only the bottom log is left: first its own blocks back, then down beside the stump to cut it
+                takeBack(world, villager, memory, now, t);
+                return true;
+            }
             chop(world, villager, memory, now, t, t.next, feet);
             return true;
         }
         return gather(world, villager, memory, now, t, feet);
     }
 
+    /** Where the last call to the motor was going, for the jump that is still under way. */
+    @Nullable
+    private BlockPos motorGoal;
+
     private void chop(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, Tree t, BlockPos target, BlockPos feet) {
         boolean footed = Motor.settled(villager);
-        if (footed && Retina.visibleFace(world, villager, target, Retina.BLOCK_REACH) != null) {
+        // never the log under its own feet: a player steps off the bottom log before cutting it
+        boolean under = standsOn(villager, target);
+        if (footed && !under && Retina.visibleFace(world, villager, target, Retina.BLOCK_REACH) != null) {
             Motor.standStill(villager);
             InventoryUtils.holdMain(villager, s -> s.getItem() instanceof AxeItem);
             memory.doing("talando " + world.getBlockState(target).getBlock().getName().getString(), now);
             int r = breaker.tick(world, villager, target);
             if (r == Hands.Breaker.DONE) {
                 t.cut++;
+                t.cutCells.add(target.asLong());
                 t.next = null;
                 t.walk = 0;
                 t.side = 0;
@@ -812,7 +860,11 @@ public final class Progreso {
             }
             return;
         }
-        BlockPos leaf = footed ? leafInTheWay(world, villager, target) : null;
+        BlockPos stand = standFor(world, villager, t, target, feet);
+        boolean there = stand != null && feet.equals(stand);
+        // the leaves are cut only where they stand between it and the log from where it should be: from the bottom
+        // log it reaches up past them
+        BlockPos leaf = footed && !under && (t.big || there || stand == null) ? leafInTheWay(world, villager, target) : null;
         if (leaf != null && t.leaves < 24) {
             Motor.standStill(villager);
             memory.doing("quitando hojas para llegar al tronco", now);
@@ -825,8 +877,6 @@ public final class Progreso {
             }
             return;
         }
-        boolean inTrunk = feet.getX() == t.base.getX() && feet.getZ() == t.base.getZ();
-        BlockPos stand = standFor(world, villager, t, target, feet);
         if (stand == null || t.side > 8) {
             ignored.put(target.asLong(), now + 2400);
             t.next = null;
@@ -836,9 +886,12 @@ public final class Progreso {
             }
             return;
         }
-        if (feet.equals(stand) && footed) {
-            if (inTrunk && target.getY() - feet.getY() >= 5) {
-                // out of reach even from the stump: a block under its feet, like a player, never a log
+        if (there && footed) {
+            boolean inColumn = feet.getX() == t.base.getX() && feet.getZ() == t.base.getZ()
+                    && (t.big || feet.getY() > t.base.getY() || !world.getBlockState(t.base).isIn(BlockTags.LOGS));
+            boolean tooHigh = t.big ? target.getY() - feet.getY() >= 5 : target.getY() - villager.getEyeY() > Retina.BLOCK_REACH - 0.3;
+            if (inColumn && tooHigh) {
+                // out of reach even from the bottom log: a block under its feet, like a player, never a log
                 if (Hands.buildingBlock(villager).isEmpty() || t.pillar.size() >= 8) {
                     ignored.put(target.asLong(), now + 2400);
                     t.next = null;
@@ -847,6 +900,7 @@ public final class Progreso {
                 }
                 memory.doing("pone un bloque bajo los pies para alcanzar el tronco", now);
                 t.rising = feet.toImmutable();
+                motorGoal = feet.up();
                 Motor.Result r = motor.step(world, villager, feet.up(), false, true);
                 if (r == Motor.Result.BLOCKED) {
                     t.rising = null;
@@ -861,7 +915,8 @@ public final class Progreso {
             t.side++;
             return;
         }
-        memory.doing("yendo al árbol", now);
+        boolean ontoLog = !t.big && stand.equals(t.base.up());
+        memory.doing(ontoLog ? "se sube al primer tronco para llegar más alto" : "yendo al árbol", now);
         if (++t.walk > 200) {
             t.side++;
             t.walk = 0;
@@ -870,6 +925,7 @@ public final class Progreso {
         }
         if (feet.isWithinDistance(stand, 2.5)) {
             villager.getNavigation().stop();
+            motorGoal = stand;
             if (motor.step(world, villager, stand, false, true) == Motor.Result.BLOCKED) {
                 motor.reset(world, villager);
                 t.side++;
@@ -879,42 +935,63 @@ public final class Progreso {
         }
     }
 
-    /** Down from its own blocks, then the logs that fell are picked up walking over them. True while at it. */
-    private boolean gather(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, Tree t, BlockPos feet) {
-        if (!t.pillar.isEmpty()) {
-            BlockPos top = t.pillar.get(t.pillar.size() - 1);
-            if (!world.getBlockState(top).isReplaceable() && Obras.kind(world, villager, top) == Obras.Kind.OWN
-                    && Motor.settled(villager) && Retina.visibleFace(world, villager, top, Retina.BLOCK_REACH) != null) {
-                // its own block comes back into the bag; standing on it, it just drops one block
-                Motor.standStill(villager);
-                holdBestPick(villager);
-                memory.doing("recogiendo el bloque que puso", now);
-                int r = breaker.tick(world, villager, top);
-                if (r == Hands.Breaker.DONE) {
-                    t.pillar.remove(t.pillar.size() - 1);
-                    dropTicks = 6;
-                } else if (r == Hands.Breaker.FAILED) {
-                    t.pillar.clear();
-                }
-                return true;
-            }
-            t.pillar.remove(t.pillar.size() - 1); // gone already, or out of reach: left where it is
-            return true;
-        }
-        if (++t.sweep > 240) {
+    /** Standing on top of {@code block}: its feet are on that block's top face. */
+    private static boolean standsOn(VillagerEntityMCA villager, BlockPos block) {
+        Box body = villager.getBoundingBox();
+        double top = block.getY() + 1.0;
+        if (body.minY < top - 0.05 || body.minY > top + 0.3) {
             return false;
         }
+        return body.maxX > block.getX() && body.minX < block.getX() + 1 && body.maxZ > block.getZ() && body.minZ < block.getZ() + 1;
+    }
+
+    /** Its own blocks of the trunk back into the bag, top first; standing on one it just drops onto the next. True while at it. */
+    private boolean takeBack(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, Tree t) {
+        if (t.pillar.isEmpty()) {
+            return false;
+        }
+        BlockPos top = t.pillar.get(t.pillar.size() - 1);
+        if (!world.getBlockState(top).isReplaceable() && Obras.kind(world, villager, top) == Obras.Kind.OWN
+                && Motor.settled(villager) && Retina.visibleFace(world, villager, top, Retina.BLOCK_REACH) != null) {
+            // its own block comes back into the bag; standing on it, it just drops one block
+            Motor.standStill(villager);
+            holdBestPick(villager);
+            memory.doing("recogiendo el bloque que puso", now);
+            int r = breaker.tick(world, villager, top);
+            if (r == Hands.Breaker.DONE) {
+                t.pillar.remove(t.pillar.size() - 1);
+                dropTicks = 6;
+            } else if (r == Hands.Breaker.FAILED) {
+                t.pillar.clear();
+            }
+            return true;
+        }
+        t.pillar.remove(t.pillar.size() - 1); // gone already, or out of reach: left where it is
+        return true;
+    }
+
+    /** Down from its own blocks, then the logs that fell are picked up walking over them. True while at it. */
+    private boolean gather(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, Tree t, BlockPos feet) {
+        if (takeBack(world, villager, memory, now, t)) {
+            return true;
+        }
+        ++t.sweep;
         ItemEntity nearest = null;
         double best = Double.MAX_VALUE;
+        boolean logs = false;
         for (ItemEntity item : world.getEntitiesByClass(ItemEntity.class, new Box(t.base).expand(TREE_REACH, 8, TREE_REACH),
                 e -> e.isAlive() && !e.getStack().isEmpty() && !Hands.refused(villager, e.getStack(), now))) {
+            boolean log = item.getStack().isIn(ItemTags.LOGS);
             double d = item.squaredDistanceTo(villager);
-            if (d < best) {
+            // the wood first: saplings and sticks are picked up on the way, never waited for
+            if (log && !logs || log == logs && d < best) {
                 best = d;
                 nearest = item;
+                logs |= log;
             }
         }
-        if (nearest == null) {
+        // every log that fell comes along before it goes on (a little longer for those); the rest only for a while
+        if (nearest == null || t.sweep > (logs ? 600 : 240)) {
             return false;
         }
         memory.doing("juntando la leña que cayó", now);
@@ -928,9 +1005,89 @@ public final class Progreso {
         return true;
     }
 
-    /** The lowest log of this trunk it knows of: the column of the stump and the logs touching it. */
+    /**
+     * The next log of this tree to cut, from what it saw. A 1x1 trunk: the lowest log above the bottom one (the trunk
+     * and the arms that grow out of it, an acacia's too), and the bottom log only when nothing else of it is left. A
+     * 2x2 trunk: the lowest log of the four columns.
+     */
     @Nullable
     private BlockPos nextLog(ServerWorld world, VisualMemory memory, Tree t, long now) {
+        if (t.big) {
+            return nextLogThick(world, memory, t, now);
+        }
+        // the logs of this tree it knows of grow from what it sees: a log touching one of the tree (or a cell of it it
+        // cut) and still part of a tree the world grew
+        List<BlockPos> seen = new ArrayList<>();
+        for (VisualMemory.SeenBlock block : memory.blocks(s -> s.state.isIn(BlockTags.LOGS))) {
+            BlockPos pos = block.pos;
+            int dx = pos.getX() - t.base.getX();
+            int dz = pos.getZ() - t.base.getZ();
+            int dy = pos.getY() - t.base.getY();
+            if (Math.abs(dx) <= BRANCH_REACH && Math.abs(dz) <= BRANCH_REACH && dy >= 0 && dy <= 30 && !t.members.contains(pos.asLong())) {
+                seen.add(pos);
+            }
+        }
+        boolean grew = true;
+        for (int pass = 0; pass < 8 && grew && !seen.isEmpty(); pass++) {
+            grew = false;
+            for (int i = seen.size() - 1; i >= 0; i--) {
+                BlockPos pos = seen.get(i);
+                if (!world.getBlockState(pos).isIn(BlockTags.LOGS) || !touchesTree(t, pos)) {
+                    continue;
+                }
+                seen.remove(i);
+                if (Obras.tree(world, pos) && !Obras.inVillageBuilding(world, pos)) {
+                    t.members.add(pos.asLong());
+                    grew = true;
+                }
+            }
+        }
+        BlockPos best = null;
+        double bestScore = Double.MAX_VALUE;
+        boolean bottom = false;
+        for (long packed : t.members) {
+            BlockPos pos = BlockPos.fromLong(packed);
+            if (ignored.getOrDefault(packed, 0L) > now || !world.getBlockState(pos).isIn(BlockTags.LOGS)) {
+                continue;
+            }
+            if (pos.equals(t.base)) {
+                bottom = true;
+                continue; // kept to stand on: cut last
+            }
+            int dy = pos.getY() - t.base.getY();
+            double score = dy * 4 + Math.abs(pos.getX() - t.base.getX()) + Math.abs(pos.getZ() - t.base.getZ());
+            if (score < bestScore) {
+                bestScore = score;
+                best = pos;
+            }
+        }
+        if (best == null && bottom) {
+            return t.base;
+        }
+        return best;
+    }
+
+    /** Next to a log of the tree or a cell of it already cut (the 26 cells around, as branches grow). */
+    private static boolean touchesTree(Tree t, BlockPos pos) {
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    if (dx == 0 && dy == 0 && dz == 0) {
+                        continue;
+                    }
+                    long n = BlockPos.asLong(pos.getX() + dx, pos.getY() + dy, pos.getZ() + dz);
+                    if (t.members.contains(n) || t.cutCells.contains(n)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /** The lowest log of a 2x2 trunk it knows of: the columns of the stump and the logs touching them. */
+    @Nullable
+    private BlockPos nextLogThick(ServerWorld world, VisualMemory memory, Tree t, long now) {
         BlockPos best = null;
         double bestScore = Double.MAX_VALUE;
         for (VisualMemory.SeenBlock seen : memory.blocks(s -> s.state.isIn(BlockTags.LOGS))) {
@@ -958,18 +1115,34 @@ public final class Progreso {
     }
 
     /**
-     * Where to stand to cut {@code log}: where it stands now if that is in the cut trunk below it, the stump cell
-     * once the lowest two logs are gone (every log above is in sight straight up from there), else beside the
-     * trunk, going round it side by side.
+     * Where to stand to cut {@code log}. A 1x1 trunk: on the kept bottom log (or its own block on it) under the rest of
+     * the trunk once it is up there; beside the trunk on the ground for the lowest logs above the bottom one; on the
+     * bottom log for the higher ones; and beside the trunk again, off it, for the bottom log itself. A 2x2 trunk: in
+     * the cut trunk below it, the stump cell once the lowest two logs are gone, else beside the trunk.
      */
     @Nullable
     private static BlockPos standFor(ServerWorld world, VillagerEntityMCA villager, Tree t, BlockPos log, BlockPos feet) {
-        if (feet.getX() == t.base.getX() && feet.getZ() == t.base.getZ() && feet.getY() >= t.base.getY() && feet.getY() < log.getY() - 1
-                && fits(world, feet)) {
-            return feet;
-        }
-        if (log.getY() > t.base.getY() + 1 && fits(world, t.base)) {
-            return t.base;
+        if (t.big) {
+            if (feet.getX() == t.base.getX() && feet.getZ() == t.base.getZ() && feet.getY() >= t.base.getY() && feet.getY() < log.getY() - 1
+                    && fits(world, feet)) {
+                return feet;
+            }
+            if (log.getY() > t.base.getY() + 1 && fits(world, t.base)) {
+                return t.base;
+            }
+        } else if (!log.equals(t.base)) {
+            boolean bottomLog = world.getBlockState(t.base).isIn(BlockTags.LOGS);
+            boolean inColumn = feet.getX() == t.base.getX() && feet.getZ() == t.base.getZ() && (feet.getY() > t.base.getY() || !bottomLog);
+            if (inColumn && feet.getY() < log.getY() && fits(world, feet)) {
+                return feet;
+            }
+            if (log.getY() > t.base.getY() + GROUND_LOGS) {
+                // up onto the bottom log it kept; a trunk whose foot someone else cut: in the stump cell under it
+                BlockPos onLog = bottomLog ? t.base.up() : t.base;
+                if (fits(world, onLog)) {
+                    return onLog;
+                }
+            }
         }
         Direction[] sides = {Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST};
         for (int k = 0; k < 4; k++) {

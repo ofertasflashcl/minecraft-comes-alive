@@ -89,6 +89,9 @@ public final class Pruebas {
                 case "pelea-muro" -> start(new PeleaMuro(world));
                 case "ia-local" -> start(new IaLocal(world));
                 case "ia-red" -> start(new IaRed(world));
+                case "conectar" -> start(new Conectar(world));
+                case "tala" -> start(new Tala(world));
+                case "puente" -> start(new Puente(world));
                 case "resumen" -> resumen();
                 default -> {
                     ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | progreso | nombre | obras | robo | regalo | arco-cerca | horno | hogar | cultivos | agua-tunel | agua-pozo | explorar | ia-local | ia-red | resumen"));
@@ -516,6 +519,400 @@ public final class Pruebas {
         void cleanup() {
             miner.discard();
             zombie.discard();
+        }
+    }
+
+    /**
+     * A connected villager living its own life in a dark stone room. "Sígueme": it comes to the player's side.
+     * "¡Cuidado!" with a zombie behind glass: within a few ticks it stops dead, turns to the player, crouches (in the
+     * rock) and asks what is going on. "Tranquilo, sigue": it stands up and follows again. Every step must hold.
+     */
+    private static final class Conectar extends Scenario {
+        private final ProspectingTask task = new ProspectingTask();
+        private final VillagerEntityMCA v;
+        private final net.minecraft.server.network.ServerPlayerEntity p;
+        private final BlockPos o;
+        @Nullable
+        private ZombieEntity zombie;
+        private int stage;
+        private int mark;
+        private double before;
+        private String said = "";
+        private String alerted = "";
+
+        Conectar(ServerWorld world) {
+            super("conectar", world, 1100);
+            o = new BlockPos(4200, 100, 0);
+            load(world, o, 24);
+            fill(world, o.add(-5, -3, -6), o.add(20, 5, 6), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-3, 0, -3), o.add(16, 2, 3), Blocks.AIR.getDefaultState());
+            // the zombie's cell, behind glass: it can be seen, it cannot reach anyone
+            fill(world, o.add(12, 0, -3), o.add(12, 2, 3), Blocks.GLASS.getDefaultState());
+            v = villager(world, o, Direction.EAST, "Lía Conecta");
+            v.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            v.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+            v.getInventory().addStack(new ItemStack(Items.BREAD, 8));
+            v.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 16));
+            p = fakePlayer(world, "Prueba_Conecta", Vec3d.ofBottomCenter(o.east(8)));
+            face(v, -90.0F, 0.0F);
+        }
+
+        private String say(String msg) {
+            net.mca.entity.ai.chatAI.Cerebros.OFFLINE.set(true);
+            try {
+                String answer = new net.mca.entity.ai.chatAI.OpenAIChatAI().answer(p, v, msg).orElse("");
+                MCA.LOGGER.info("PRUEBA conectar t=" + ticks + ": «" + msg + "» -> «" + answer + "», " + state());
+                return answer;
+            } finally {
+                net.mca.entity.ai.chatAI.Cerebros.OFFLINE.set(false);
+            }
+        }
+
+        private net.mca.entity.ai.mente.Voluntad.Modo mode() {
+            return net.mca.entity.ai.mente.Voluntad.of(v).modo();
+        }
+
+        /** Crouched for a reason ({@link net.mca.entity.ai.body.Postura}); false while that is still a stub. */
+        private boolean crouched() {
+            try {
+                return net.mca.entity.ai.body.Postura.agachado(v);
+            } catch (RuntimeException e) {
+                return false;
+            }
+        }
+
+        @Override
+        Boolean step() {
+            if (!v.isAlive()) {
+                fail(name, "el aldeano murió; " + state());
+                return Boolean.FALSE;
+            }
+            if (ticks < 20) {
+                return null;
+            }
+            // its own life, run as the brain would: the will first, then the task
+            task.practice(world, v);
+            switch (stage) {
+                case 0 -> {
+                    if (ticks < 80) {
+                        return null;
+                    }
+                    boolean own = mode() == net.mca.entity.ai.mente.Voluntad.Modo.LIBRE && net.mca.entity.ai.mente.Voluntad.conectado(v);
+                    before = v.distanceTo(p);
+                    said = say("Lía, sígueme");
+                    boolean follows = mode() == net.mca.entity.ai.mente.Voluntad.Modo.SIGUIENDO;
+                    if (!own || !follows || said.isBlank()) {
+                        fail(name, "conectada y a lo suyo: " + own + ", con «sígueme» pasa a seguir: " + follows + " («" + said + "»); " + state());
+                        return Boolean.FALSE;
+                    }
+                    stage = 1;
+                    mark = ticks;
+                }
+                case 1 -> {
+                    double d = v.distanceTo(p);
+                    if (d < 4.0 && d < before - 1.0) {
+                        stage = 2;
+                    } else if (ticks - mark > 400) {
+                        fail(name, "dijo «" + said + "» pero no se acercó: de " + fmt(before) + " a " + fmt(d) + " bloques; " + state());
+                        return Boolean.FALSE;
+                    }
+                }
+                case 2 -> {
+                    zombie = zombie(world, Vec3d.ofBottomCenter(o.add(14, 0, 0)), false);
+                    alerted = say("¡cuidado!");
+                    mark = ticks;
+                    stage = 3;
+                }
+                case 3 -> {
+                    if (ticks - mark < 5) {
+                        return null;
+                    }
+                    Vec3d eye = p.getEyePos();
+                    float want = (float) (MathHelper.atan2(eye.z - v.getZ(), eye.x - v.getX()) * (180.0 / Math.PI)) - 90.0F;
+                    float head = Math.abs(MathHelper.wrapDegrees(v.getHeadYaw() - want));
+                    float body = Math.abs(MathHelper.wrapDegrees(v.getBodyYaw() - want));
+                    boolean alert = mode() == net.mca.entity.ai.mente.Voluntad.Modo.ALERTA;
+                    boolean still = v.getNavigation().isIdle() && v.getVelocity().horizontalLength() < 0.08;
+                    boolean asks = alerted.contains("?");
+                    boolean low = crouched();
+                    if (!(alert && still && head <= 30 && body <= 30 && asks && low)) {
+                        fail(name, "con «¡cuidado!»: alerta " + alert + ", quieta " + still + ", cabeza a " + fmt(head) + "° y cuerpo a " + fmt(body)
+                                + "° del jugador, agachada " + low + ", pregunta «" + alerted + "» " + asks + "; " + state());
+                        return Boolean.FALSE;
+                    }
+                    MCA.LOGGER.info("PRUEBA conectar: alerta a los " + (ticks - mark) + " ticks, cabeza a " + fmt(head) + "°, cuerpo a " + fmt(body)
+                            + "°, agachada, «" + alerted + "»");
+                    zombie.discard();
+                    zombie = null;
+                    // the player has stepped back meanwhile: following again means coming over
+                    p.refreshPositionAndAngles(o.getX() + 0.5, o.getY(), o.getZ() + 0.5, 0, 0);
+                    before = v.distanceTo(p);
+                    said = say("tranquilo, sigue");
+                    mark = ticks;
+                    stage = 4;
+                }
+                case 4 -> {
+                    if (ticks - mark == 3) {
+                        boolean follows = mode() == net.mca.entity.ai.mente.Voluntad.Modo.SIGUIENDO;
+                        boolean up = !crouched();
+                        if (!follows || !up) {
+                            fail(name, "con «tranquilo, sigue» («" + said + "»): vuelve a seguir " + follows + ", de pie " + up + "; " + state());
+                            return Boolean.FALSE;
+                        }
+                    }
+                    double d = v.distanceTo(p);
+                    if (ticks - mark > 3 && d < 4.0 && d < before - 1.0) {
+                        ok(name, "a lo suyo -> «sígueme» la trajo a mi lado -> «¡cuidado!» se detuvo, me miró, se agachó y preguntó «" + alerted
+                                + "» -> «tranquilo, sigue» («" + said + "») se paró y me siguió de nuevo (" + fmt(before) + " -> " + fmt(d) + " bloques)");
+                        return Boolean.TRUE;
+                    }
+                    if (ticks - mark > 400) {
+                        fail(name, "volvió a seguir pero no se acercó: de " + fmt(before) + " a " + fmt(d) + " bloques; " + state());
+                        return Boolean.FALSE;
+                    }
+                }
+                default -> {
+                }
+            }
+            return null;
+        }
+
+        @Override
+        String state() {
+            return "etapa " + stage + ", en " + v.getBlockPos().toShortString() + ", " + net.mca.entity.ai.mente.Voluntad.resumen(v)
+                    + ", tarea " + task.debug() + ", haciendo: " + Retina.memory(v).doing();
+        }
+
+        @Override
+        void cleanup() {
+            v.discard();
+            if (zombie != null) {
+                zombie.discard();
+            }
+            net.mca.entity.ai.chatAI.OpenAIChatAI.forget(v.getUuid());
+        }
+    }
+
+    /**
+     * Felling like a player: a seven-log oak with a real crown (leaves from the fourth log up) on open grass and an
+     * empty-handed villager. One whole tree, the bottom log kept to stand on and cut last, every log picked up, and
+     * nothing else of the place touched but, at most, one block of its own it stood on and took back.
+     */
+    private static final class Tala extends Scenario {
+        private final net.mca.entity.ai.body.Progreso progreso = new net.mca.entity.ai.body.Progreso();
+        private final VillagerEntityMCA v;
+        private final BlockPos o;
+        private final BlockPos base;
+        private final BlockPos low;
+        private final BlockPos high;
+        private final List<BlockPos> trunk = new ArrayList<>();
+        private final java.util.Set<BlockPos> treeCells = new java.util.HashSet<>();
+        private final Map<BlockPos, BlockState> before = new LinkedHashMap<>();
+        /** Cells that held, at some tick, a block that was neither there before nor of the tree. */
+        private final java.util.Set<BlockPos> foreign = new java.util.HashSet<>();
+        private final java.util.Set<BlockPos> cut = new java.util.HashSet<>();
+        private final List<String> order = new ArrayList<>();
+        private int lastLogAt = -1;
+        private boolean onBottomLog;
+
+        Tala(ServerWorld world) {
+            super("tala", world, 2600);
+            o = new BlockPos(4600, 100, 0);
+            load(world, o, 16);
+            low = o.add(-8, -1, -8);
+            high = o.add(8, 12, 8);
+            fill(world, o.add(-8, -4, -8), o.add(8, -2, 8), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-8, -1, -8), o.add(8, -1, 8), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-8, 0, -8), high, Blocks.AIR.getDefaultState());
+            base = o.add(3, 0, 0);
+            // under a trunk the ground is dirt
+            world.setBlockState(base.down(), Blocks.DIRT.getDefaultState(), 2);
+            BlockState leaves = Blocks.OAK_LEAVES.getDefaultState().with(net.minecraft.block.LeavesBlock.DISTANCE, 1);
+            // an oak's crown: two wide layers from the fourth log, two narrow ones, a cap over the top log
+            for (int dy = 3; dy <= 7; dy++) {
+                int r = dy <= 4 ? 2 : 1;
+                for (int dx = -r; dx <= r; dx++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        boolean corner = Math.abs(dx) == r && Math.abs(dz) == r;
+                        if (r == 2 && corner || dy == 7 && corner) {
+                            continue;
+                        }
+                        BlockPos leaf = base.add(dx, dy, dz);
+                        world.setBlockState(leaf, leaves, 2);
+                        treeCells.add(leaf);
+                    }
+                }
+            }
+            for (int dy = 0; dy < 7; dy++) {
+                BlockPos log = base.up(dy);
+                world.setBlockState(log, Blocks.OAK_LOG.getDefaultState(), 2);
+                trunk.add(log);
+                treeCells.add(log);
+            }
+            for (BlockPos pos : BlockPos.iterate(low, high)) {
+                before.put(pos.toImmutable(), world.getBlockState(pos));
+            }
+            v = villager(world, o, Direction.EAST);
+            // free to walk to the tree
+            v.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            face(v, -90.0F, 0.0F);
+            Retina.lookAll(world, v);
+        }
+
+        private static boolean ground(BlockState state) {
+            return state.isOf(Blocks.GRASS_BLOCK) || state.isOf(Blocks.DIRT);
+        }
+
+        /** Every cell as it should be: the tree's own cells empty or still leaves, everything else as it was. */
+        private void watch() {
+            for (Map.Entry<BlockPos, BlockState> e : before.entrySet()) {
+                BlockPos pos = e.getKey();
+                BlockState now = world.getBlockState(pos);
+                BlockState was = e.getValue();
+                if (now == was || ground(now) && ground(was)) {
+                    continue;
+                }
+                if (treeCells.contains(pos) && (now.isAir() || now.isIn(net.minecraft.registry.tag.BlockTags.LEAVES) || now.isOf(Blocks.OAK_LOG))) {
+                    continue;
+                }
+                foreign.add(pos);
+            }
+            for (BlockPos log : trunk) {
+                if (!cut.contains(log) && !world.getBlockState(log).isOf(Blocks.OAK_LOG)) {
+                    cut.add(log);
+                    order.add((log.getY() - base.getY() + 1) + "@" + ticks);
+                    lastLogAt = log.getY() - base.getY();
+                }
+            }
+            onBottomLog |= v.getBlockPos().equals(base.up()) && world.getBlockState(base).isOf(Blocks.OAK_LOG) && v.isOnGround();
+        }
+
+        @Override
+        Boolean step() {
+            if (!v.isAlive()) {
+                fail(name, "el aldeano murió; " + state());
+                return Boolean.FALSE;
+            }
+            progreso.tick(world, v, (key, args) -> {
+            });
+            watch();
+            if (ticks % 200 == 0) {
+                MCA.LOGGER.info("PRUEBA tala t=" + ticks + ": " + state());
+            }
+            if (cut.size() < trunk.size()) {
+                return null;
+            }
+            boolean logsLeft = !world.getEntitiesByClass(net.minecraft.entity.ItemEntity.class, new net.minecraft.util.math.Box(base).expand(10),
+                    e -> e.isAlive() && e.getStack().isIn(net.minecraft.registry.tag.ItemTags.LOGS)).isEmpty();
+            if (logsLeft) {
+                return null; // what fell is picked up before it goes anywhere
+            }
+            boolean bottomLast = lastLogAt == 0;
+            boolean restored = true;
+            for (BlockPos pos : foreign) {
+                BlockState now = world.getBlockState(pos);
+                BlockState was = before.get(pos);
+                restored &= now == was || ground(now) && ground(was) || treeCells.contains(pos) && now.isAir();
+            }
+            int logs = v.getInventory().count(Items.OAK_LOG);
+            boolean passed = bottomLast && foreign.size() <= 1 && restored && logs >= trunk.size();
+            check(name, passed, "tronco talado en " + ticks + " ticks, orden (tronco@tick) " + order + ", el de abajo el último: " + bottomLast
+                    + ", se subió al primer tronco: " + onBottomLog + ", bloques ajenos " + foreign.size() + " " + foreign + " devueltos: " + restored
+                    + ", troncos en la mochila " + logs + "/" + trunk.size() + "; " + state());
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "en " + v.getBlockPos().toShortString() + ", haciendo: " + Retina.memory(v).doing() + ", cortados " + order
+                    + ", troncos " + v.getInventory().count(Items.OAK_LOG) + ", agachado " + v.isSneaking();
+        }
+
+        @Override
+        void cleanup() {
+            v.discard();
+        }
+    }
+
+    /**
+     * Bridging like a player: a goal across a six-wide, ten-deep gap that runs wall to wall (barrier), so there is no
+     * way round. The motor alone must bridge it crouched, never fall, never get hurt.
+     */
+    private static final class Puente extends Scenario {
+        private final net.mca.entity.ai.body.Motor motor = new net.mca.entity.ai.body.Motor();
+        private final VillagerEntityMCA v;
+        private final BlockPos o;
+        private final BlockPos goal;
+        private final float health;
+        private final java.util.Set<BlockPos> placed = new java.util.HashSet<>();
+        private int placedStanding;
+        private int blocked;
+        private float lowest;
+
+        Puente(ServerWorld world) {
+            super("puente", world, 1400);
+            o = new BlockPos(4800, 100, 0);
+            load(world, o, 24);
+            fill(world, o.add(-4, -12, -3), o.add(15, 6, 3), Blocks.BARRIER.getDefaultState());
+            fill(world, o.add(-3, -12, -2), o.add(14, -1, 2), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-3, 0, -2), o.add(14, 6, 2), Blocks.AIR.getDefaultState());
+            // the gap: six wide, ten deep, from wall to wall
+            fill(world, o.add(3, -10, -2), o.add(8, -1, 2), Blocks.AIR.getDefaultState());
+            for (int x = -2; x <= 13; x += 3) {
+                world.setBlockState(o.add(x, 5, 0), Blocks.GLOWSTONE.getDefaultState(), 2);
+            }
+            goal = o.add(11, 0, 0);
+            v = villager(world, o, Direction.EAST);
+            v.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 32));
+            face(v, -90.0F, 0.0F);
+            Retina.lookAll(world, v);
+            health = v.getHealth();
+            lowest = health;
+        }
+
+        @Override
+        Boolean step() {
+            if (!v.isAlive()) {
+                fail(name, "el aldeano murió; " + state());
+                return Boolean.FALSE;
+            }
+            lowest = Math.min(lowest, v.getHealth());
+            if (v.getY() < o.getY() - 1.5) {
+                fail(name, "se cayó al hueco; " + state());
+                return Boolean.FALSE;
+            }
+            net.mca.entity.ai.body.Motor.Result r = motor.step(world, v, goal, false, true);
+            for (int x = 3; x <= 8; x++) {
+                for (int z = -2; z <= 2; z++) {
+                    BlockPos cell = o.add(x, -1, z);
+                    if (!world.getBlockState(cell).isAir() && placed.add(cell) && !v.isSneaking()) {
+                        placedStanding++;
+                    }
+                }
+            }
+            if (r == net.mca.entity.ai.body.Motor.Result.BLOCKED && ++blocked > 30) {
+                fail(name, "el motor se rindió " + blocked + " veces; " + state());
+                return Boolean.FALSE;
+            }
+            if (r != net.mca.entity.ai.body.Motor.Result.ARRIVED) {
+                return null;
+            }
+            boolean unhurt = lowest >= health;
+            boolean passed = unhurt && placed.size() >= 6 && placedStanding == 0;
+            check(name, passed, "cruzó el hueco en " + ticks + " ticks, bloques del puente " + placed.size() + ", puestos sin agacharse "
+                    + placedStanding + ", vida " + lowest + "/" + health + ", veces bloqueado " + blocked + "; " + state());
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "en " + String.format(Locale.ROOT, "%.2f %.2f %.2f", v.getX(), v.getY(), v.getZ()) + ", haciendo: " + motor.doing()
+                    + ", agachado " + v.isSneaking() + ", piedra " + v.getInventory().count(Items.COBBLESTONE);
+        }
+
+        @Override
+        void cleanup() {
+            v.discard();
         }
     }
 

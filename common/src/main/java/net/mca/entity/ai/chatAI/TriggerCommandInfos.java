@@ -6,6 +6,7 @@ import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.MoveState;
 import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
+import net.mca.entity.ai.mente.Voluntad;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.util.math.GlobalPos;
 import org.jetbrains.annotations.Nullable;
@@ -17,15 +18,53 @@ import java.util.WeakHashMap;
 
 public class TriggerCommandInfos {
     public static final List<TriggerCommandInfo> triggerCommands = ImmutableList.of(
+            // a connected villager is never taken off its life by talking to it: these go to its will ({@link Voluntad})
             new TriggerCommandInfo("follow-player", "Follow the player talking to you and fight at their side",
-                    (p, v) -> v.getVillagerBrain().setMoveState(MoveState.FOLLOW, p),
-                    (p, v) -> v.getVillagerBrain().getMoveState() != MoveState.FOLLOW),
-            new TriggerCommandInfo("stay-here", "Stay here for a while",
-                    (p, v) -> v.getVillagerBrain().setMoveState(MoveState.STAY, p),
-                    (p, v) -> v.getVillagerBrain().getMoveState() != MoveState.STAY),
+                    null,
+                    (p, v, ignored) -> {
+                        if (Voluntad.conectado(v)) {
+                            return Voluntad.seguir(v, p, spanish(v));
+                        }
+                        v.getVillagerBrain().setMoveState(MoveState.FOLLOW, p);
+                        return null;
+                    },
+                    (p, v) -> Voluntad.conectado(v) ? !(Voluntad.of(v).modo() == Voluntad.Modo.SIGUIENDO && p.getUuid().equals(Voluntad.of(v).quien()))
+                            : v.getVillagerBrain().getMoveState() != MoveState.FOLLOW),
+            new TriggerCommandInfo("stay-here", "Stay and wait right here until told otherwise",
+                    null,
+                    (p, v, ignored) -> {
+                        if (Voluntad.conectado(v)) {
+                            return Voluntad.esperar(v, p, spanish(v));
+                        }
+                        v.getVillagerBrain().setMoveState(MoveState.STAY, p);
+                        return null;
+                    },
+                    (p, v) -> Voluntad.conectado(v) ? Voluntad.of(v).modo() != Voluntad.Modo.ESPERANDO : v.getVillagerBrain().getMoveState() != MoveState.STAY),
             new TriggerCommandInfo("move-freely", "Move freely when asked to leave, move, or done talking",
-                    (p, v) -> v.getVillagerBrain().setMoveState(MoveState.MOVE, p),
-                    (p, v) -> v.getVillagerBrain().getMoveState() != MoveState.MOVE),
+                    null,
+                    (p, v, ignored) -> {
+                        if (Voluntad.conectado(v)) {
+                            return Voluntad.libre(v, p, spanish(v));
+                        }
+                        v.getVillagerBrain().setMoveState(MoveState.MOVE, p);
+                        return null;
+                    },
+                    (p, v) -> Voluntad.conectado(v) ? Voluntad.of(v).modo() != Voluntad.Modo.LIBRE : v.getVillagerBrain().getMoveState() != MoveState.MOVE),
+            new TriggerCommandInfo("alert", "Stop dead at once and be careful: the player says careful, stop, wait, freeze, quiet, or warns you of "
+                    + "danger. You stand still, turn to face them and ask what is going on",
+                    null,
+                    TriggerCommandInfos::alert,
+                    (p, v) -> true),
+            new TriggerCommandInfo("carry-on", "Carry on with what you were doing before you stopped, when the player says it was nothing, "
+                    + "a false alarm, all is fine, or to go on",
+                    null,
+                    (p, v, ignored) -> Voluntad.seguirComoAntes(v, p, spanish(v)),
+                    (p, v) -> Voluntad.conectado(v) && Voluntad.of(v).modo() == Voluntad.Modo.ALERTA),
+            new TriggerCommandInfo("free", "Go back to your own life and your own plans (when told to do your own thing, that you are free, "
+                    + "or to go back to what you were doing): you stop following or waiting",
+                    null,
+                    (p, v, ignored) -> Voluntad.libre(v, p, spanish(v)),
+                    (p, v) -> Voluntad.conectado(v) && Voluntad.of(v).modo() != Voluntad.Modo.LIBRE),
             new TriggerCommandInfo("wear-armor", "Equip any armor you have",
                     (p, v) -> v.getVillagerBrain().setArmorWear(true),
                     (p, v) -> !v.getVillagerBrain().getArmorWear()),
@@ -44,6 +83,7 @@ public class TriggerCommandInfos {
             new TriggerCommandInfo("come-up", "Stop digging and climb out of the mine to go home now",
                     null,
                     (p, v, ignored) -> {
+                        ownLife(v, p);
                         ProspectingTask.callHome(v, false);
                         return "You stopped digging and are climbing out of the mine toward home.";
                     },
@@ -51,6 +91,7 @@ public class TriggerCommandInfos {
             new TriggerCommandInfo("eat-break", "Stop digging, climb out to find food and eat, then go back to mining",
                     null,
                     (p, v, ignored) -> {
+                        ownLife(v, p);
                         ProspectingTask.callHome(v, true);
                         return "You stopped digging and are going up to find food; after eating you will go back to mining.";
                     },
@@ -69,7 +110,8 @@ public class TriggerCommandInfos {
                         if (!already) {
                             v.getVillagerBrain().assignJob(Chore.PROSPECT, p);
                         } else {
-                            // "vuelve a la mina" / "sigue minando" to one waiting at home after "sube"
+                            // "vuelve a la mina" / "sigue minando" to one waiting at home after "sube", or following someone
+                            ownLife(v, p);
                             ProspectingTask.backToWork(v);
                         }
                         String wanted = ProspectingTask.wanted(v);
@@ -82,7 +124,8 @@ public class TriggerCommandInfos {
             job("start-harvesting", "Start harvesting crops", Chore.HARVEST),
             job("start-hunting", "Start hunting animals", Chore.HUNT),
             job("start-escort", "Start escorting", Chore.ESCORT),
-            new TriggerCommandInfo("stop-working", "Stop the work you are doing",
+            new TriggerCommandInfo("stop-working", "Stop the work you are doing for good (a connected villager disconnects); not for a quick "
+                    + "\"stop!\" or \"careful!\", that is alert",
                     (p, v) -> v.getVillagerBrain().abandonJob(),
                     (p, v) -> v.getVillagerBrain().getCurrentJob() != Chore.NONE),
             new TriggerCommandInfo("give-item", "Hand the player something you are carrying, when they ask for it and you are willing",
@@ -153,6 +196,7 @@ public class TriggerCommandInfos {
      */
     private static String goHome(ServerPlayerEntity player, VillagerEntityMCA villager, String ignored) {
         if (villager.getVillagerBrain().getCurrentJob() == Chore.PROSPECT) {
+            ownLife(villager, player);
             ProspectingTask.callHome(villager, false);
             return "You stopped digging and are climbing out of the mine to go home.";
         }
@@ -167,6 +211,32 @@ public class TriggerCommandInfos {
         villager.getInteractions().stopInteracting();
         villager.moveTowards(home.get().getPos());
         return "You are walking home.";
+    }
+
+    /** A connected villager following or waiting goes back to its own life, so an order for that life is carried out. */
+    private static void ownLife(VillagerEntityMCA villager, ServerPlayerEntity player) {
+        if (Voluntad.conectado(villager) && Voluntad.of(villager).modo() != Voluntad.Modo.LIBRE) {
+            Voluntad.libre(villager, player, spanish(villager));
+        }
+    }
+
+    /** The language the villager last heard ({@link Voluntad#oyo}, told by the chat right before the order runs). */
+    private static boolean spanish(VillagerEntityMCA villager) {
+        return Voluntad.of(villager).spanish();
+    }
+
+    /**
+     * "¡Cuidado!", "¡para!": a connected villager's will stops it, turns it to the player and has it ask what is going
+     * on ({@link Voluntad#alerta}); anyone else just stops where it is and turns to them.
+     */
+    private static String alert(ServerPlayerEntity player, VillagerEntityMCA villager, String ignored) {
+        if (Voluntad.conectado(villager)) {
+            return Voluntad.alerta(villager, player, spanish(villager));
+        }
+        villager.getNavigation().stop();
+        villager.getBrain().forget(net.minecraft.entity.ai.brain.MemoryModuleType.WALK_TARGET);
+        net.mca.entity.ai.body.Hands.aim(villager, player.getEyePos());
+        return "You stopped where you are and turned to " + player.getName().getString() + ". Ask them what is going on, in a short question.";
     }
 
     private static TriggerCommandInfo job(String command, String description, Chore chore) {

@@ -60,6 +60,7 @@ public final class OjoCommand {
 
         say(source, Text.literal("Ojo de " + villager.getName().getString()).formatted(Formatting.GOLD));
         say(source, Text.literal("Haciendo: " + (memory.doing() == null || memory.doing().isEmpty() ? "nada en particular" : memory.doing())));
+        say(source, Text.literal("Voluntad: " + net.mca.entity.ai.mente.Voluntad.resumen(villager)));
         if (focus == null) {
             say(source, Text.literal("Mira: nada (cielo o demasiado oscuro)"));
         } else if (focus.entity() != null) {

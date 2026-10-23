@@ -825,6 +825,9 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
                 }
             }
 
+            // the crouch: reasons nobody renewed run out, the body and the pose follow the rest
+            net.mca.entity.ai.body.Postura.tick(this);
+
             // the idle eye: with someone near, it keeps looking at where it is, unless a task already drives the eye
             if (this.age % 10 == 0 && !isSleeping()) {
                 long now = getWorld().getTime();
@@ -934,6 +937,18 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
         return -0.35;
     }
 
+    /** Crouched it walks like a sneaking player: 0.3 of the speed (see {@link net.mca.entity.ai.body.Postura}). */
+    @Override
+    public void travel(Vec3d movementInput) {
+        super.travel(net.mca.entity.ai.body.Postura.slowed(this, movementInput));
+    }
+
+    /** Crouched, its feet never walk off an edge, like a sneaking player's (see {@link net.mca.entity.ai.body.Postura#edge}). */
+    @Override
+    protected Vec3d adjustMovementForSneaking(Vec3d movement, net.minecraft.entity.MovementType type) {
+        return net.mca.entity.ai.body.Postura.edge(this, super.adjustMovementForSneaking(movement, type), type);
+    }
+
     @Override
     public EntityDimensions getDimensions(EntityPose pose) {
 
@@ -980,6 +995,8 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
         if (getWorld().isClient) {
             return;
         }
+
+        net.mca.entity.ai.body.Postura.erguir(this);
 
         if (playerLikeDeath != null && isDead()) {
             ProspectorPresence.onDeath(this, playerLikeDeath);

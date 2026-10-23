@@ -7,6 +7,7 @@ import net.mca.entity.ai.body.Mining;
 import net.mca.entity.ai.body.Progreso;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
 import net.mca.entity.ai.chatAI.Vistazo;
+import net.mca.entity.ai.mente.Voluntad;
 import net.mca.entity.ai.sense.Escena;
 import net.mca.entity.ai.sense.Lugar;
 import net.mca.entity.ai.sense.Obras;
@@ -44,7 +45,8 @@ public class PerceptionModule {
         // what it is up to
         Chore job = villager.getVillagerBrain().getCurrentJob();
         if (job != Chore.NONE) {
-            input.add("$villager is working: " + job.name().toLowerCase(Locale.ROOT) + ". ");
+            input.add(job == Chore.PROSPECT ? "$villager is connected: it plays on its own like a player (gear, wood, mining, food, home). "
+                    : "$villager is working: " + job.name().toLowerCase(Locale.ROOT) + ". ");
             String ore = ProspectingTask.wanted(villager);
             if (job == Chore.PROSPECT && ore != null) {
                 input.add("$villager was asked to look for " + ore.replace('_', ' ') + " first. ");
@@ -57,7 +59,12 @@ public class PerceptionModule {
             input.add("$villager has no work to do right now. ");
         }
         MoveState move = villager.getVillagerBrain().getMoveState();
-        if (move == MoveState.FOLLOW) {
+        boolean connected = Voluntad.conectado(villager);
+        if (connected) {
+            // connected: it lives on its own, and its will says what it is set on and why
+            input.add("Your current mode and what you are thinking: "
+                    + Voluntad.forModel(villager, player.getName().getString()) + " ");
+        } else if (move == MoveState.FOLLOW) {
             input.add("$villager is following $player. ");
         } else if (move == MoveState.STAY) {
             input.add("$villager is waiting in place until told otherwise. ");

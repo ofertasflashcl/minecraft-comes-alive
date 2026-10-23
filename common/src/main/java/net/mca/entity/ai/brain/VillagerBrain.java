@@ -7,6 +7,7 @@ import net.mca.entity.Status;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.VillagerLike;
 import net.mca.entity.ai.*;
+import net.mca.entity.ai.mente.Voluntad;
 import net.mca.entity.ai.relationship.AgeState;
 import net.mca.entity.ai.relationship.Personality;
 import net.mca.server.ProspectorPresence;
@@ -41,9 +42,11 @@ public class VillagerBrain<E extends MobEntity & VillagerLike<E>> {
     private static final CDataParameter<Optional<UUID>> CHORE_ASSIGNING_PLAYER = CParameter.create("choreAssigningPlayer", Optional.empty());
     private static final CDataParameter<Boolean> PANICKING = CParameter.create("isPanicking", false);
     private static final CDataParameter<Boolean> WEAR_ARMOR = CParameter.create("wearArmor", false);
+    /** What a connected villager's will is set on, kept across a relog ({@link Voluntad}): "", "SIGUIENDO uuid", "ESPERANDO x y z". */
+    private static final CDataParameter<String> WILL = CParameter.create("tropelesVoluntad", "");
 
     public static <E2 extends Entity> CDataManager.Builder<E2> createTrackedData(CDataManager.Builder<E2> builder) {
-        return builder.addAll(MEMORIES, PERSONALITY, MOOD, MOVE_STATE, ACTIVE_CHORE, CHORE_ASSIGNING_PLAYER, PANICKING, WEAR_ARMOR);
+        return builder.addAll(MEMORIES, PERSONALITY, MOOD, MOVE_STATE, ACTIVE_CHORE, CHORE_ASSIGNING_PLAYER, PANICKING, WEAR_ARMOR, WILL);
     }
 
     private static final long GRIEVE_COOLDOWN = 24000 * 7;
@@ -138,6 +141,10 @@ public class VillagerBrain<E extends MobEntity & VillagerLike<E>> {
         entity.getBrain().doExclusively(Activity.IDLE);
         entity.setTrackedValue(ACTIVE_CHORE, Chore.NONE);
         entity.setTrackedValue(CHORE_ASSIGNING_PLAYER, Optional.empty());
+        if (entity instanceof VillagerEntityMCA villager) {
+            // disconnected: its will (following, waiting) ends with the connection
+            Voluntad.olvidar(villager);
+        }
 
         resetsBrain();
 
@@ -156,6 +163,10 @@ public class VillagerBrain<E extends MobEntity & VillagerLike<E>> {
         entity.setTrackedValue(CHORE_ASSIGNING_PLAYER, Optional.of(player.getUuid()));
         entity.getBrain().forget(MemoryModuleTypeMCA.PLAYER_FOLLOWING.get());
         entity.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+        if (entity instanceof VillagerEntityMCA villager) {
+            // a new connection (or another job) starts in its own life, not in the last one's mode
+            Voluntad.olvidar(villager);
+        }
 
         resetsBrain();
 
@@ -265,6 +276,16 @@ public class VillagerBrain<E extends MobEntity & VillagerLike<E>> {
         if (entity.asEntity() instanceof VillagerEntityMCA villager) {
             villager.reinitializeBrain((ServerWorld)villager.getWorld());
         }
+    }
+
+    /** The will of a connected villager as saved ({@link Voluntad}). */
+    public String getWill() {
+        String will = entity.getTrackedValue(WILL);
+        return will == null ? "" : will;
+    }
+
+    public void setWill(String will) {
+        entity.setTrackedValue(WILL, will == null ? "" : will);
     }
 
     public void setArmorWear(boolean s) {

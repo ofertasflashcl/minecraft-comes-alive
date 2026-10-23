@@ -15,6 +15,7 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.FallingBlockEntity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
+import net.minecraft.entity.ai.pathing.Path;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.registry.tag.FluidTags;
@@ -39,6 +40,12 @@ import java.util.List;
  * against the side of the one it stands on (edging out like a sneaking player), climbs ladders, and
  * pillars straight up by jumping and placing under its feet. Every block it breaks or places goes
  * through {@link Hands}, so it only touches what its eye can put a crosshair on within reach.
+ * <p>
+ * Careful like a player at a drop: it never walks off one that would hurt (more than three blocks with no water at
+ * the bottom), it crouches ({@link Postura}, "borde") while it works at the edge of one, and it bridges crouched
+ * ("puente"), backing out over the gap facing the way it came and setting each block against the side of the one
+ * under its feet. Before it bridges a real gap it looks for a walking way round ({@link #DETOUR_RATIO}) and takes
+ * that when it is not much longer.
  * <p>
  * Each step is a small machine anchored to the cell the feet were in when it was planned ({@code from}):
  * every cell of the step hangs off that origin, never off where the body happens to be mid-jump. It
@@ -89,6 +96,15 @@ public final class Motor {
      */
     private static final double WADE = 0.014;
 
+    /** A way round a gap is walked instead of bridging when it is at most this many times the straight line... */
+    private static final double DETOUR_RATIO = 2.5;
+    /** ...and no longer than this many blocks. */
+    private static final int MAX_DETOUR = 40;
+    /** Ticks before it looks again for a way round toward (about) the same goal. */
+    private static final int DETOUR_RECHECK = 200;
+    /** A fall of more than this many blocks onto something hard hurts (a player takes damage past three). */
+    public static final int SAFE_DROP = 3;
+
     private final Hands.Breaker breaker = new Hands.Breaker();
     private final Deque<BlockPos> safeTrail = new ArrayDeque<>();
     /** The feet when the step was planned: every cell of the step hangs off it. */
@@ -126,6 +142,20 @@ public final class Motor {
     private BlockPos justBroken;
     private int plugTicks;
     private String doing = "";
+    /** The way round a gap it is walking instead of bridging, node by node. */
+    @Nullable
+    private Path detour;
+    @Nullable
+    private BlockPos detourGoal;
+    private int detourTicks;
+    @Nullable
+    private BlockPos detourCheckedFor;
+    private long detourCheckedAt = Long.MIN_VALUE / 2;
+    /** This step's floor is a block it set itself over the gap: it backs onto it crouched. */
+    private boolean bridged;
+    /** The crouch this tick asks for: over a gap it is bridging, at the edge of a drop it is working by. */
+    private boolean wantPuente;
+    private boolean wantBorde;
 
     public String doing() {
         return doing;
@@ -141,7 +171,10 @@ public final class Motor {
         lastFeet = null;
         settleTicks = 0;
         airTicks = 0;
-        villager.setSneaking(false);
+        detour = null;
+        detourGoal = null;
+        Postura.agachar(villager, "puente", false);
+        Postura.agachar(villager, "borde", false);
     }
 
     /** The step is over (made, or given up): the next call plans a new one. */
@@ -160,6 +193,7 @@ public final class Motor {
         headroom = false;
         wasAirborne = false;
         dropOk = false;
+        bridged = false;
     }
 
     // ------------------------------------------------------------------ what other code may ask
@@ -214,6 +248,23 @@ public final class Motor {
      * spend building blocks from the bag on bridges and pillars.
      */
     public Result step(ServerWorld world, VillagerEntityMCA villager, BlockPos goal, boolean dig, boolean build) {
+        wantPuente = false;
+        wantBorde = false;
+        Result r = stepBody(world, villager, goal, dig, build);
+        if (r == Result.RUNNING && from != null && phase == Phase.PREPARE && kind != Kind.PILLAR && kind != Kind.CLIMB && edgeNear(world, from)) {
+            // working (digging, setting a block, centring) right by a drop that would hurt: crouched, like a player
+            wantBorde = true;
+        }
+        if (r != Result.RUNNING) {
+            wantPuente = false;
+            wantBorde = false;
+        }
+        Postura.agachar(villager, "puente", wantPuente);
+        Postura.agachar(villager, "borde", wantBorde);
+        return r;
+    }
+
+    private Result stepBody(ServerWorld world, VillagerEntityMCA villager, BlockPos goal, boolean dig, boolean build) {
         villager.getBrain().forget(MemoryModuleType.WALK_TARGET);
         BlockPos feet = villager.getBlockPos();
         boolean settled = settled(villager);
@@ -275,9 +326,15 @@ public final class Motor {
         }
         if (feet.equals(goal) && !rising && onCell(world, villager, feet)) {
             // never mid-jump, never from the lip with its centre over the gap it is bridging
-            villager.setSneaking(false);
             endStep();
+            detour = null;
             return Result.ARRIVED;
+        }
+        if (detour != null && !rising) {
+            Result r = followDetour(world, villager, feet, goal);
+            if (r != null) {
+                return r;
+            }
         }
         if (!settled && (from == null || phase == Phase.PREPARE || phase == Phase.CENTER)) {
             // falling or knocked into the air, not one of its own jumps: land first, plan after
@@ -389,6 +446,7 @@ public final class Motor {
         headroom = false;
         wasAirborne = false;
         dropOk = false;
+        bridged = false;
         stand = null;
         int dx = goal.getX() - feet.getX();
         int dy = goal.getY() - feet.getY();
@@ -613,19 +671,32 @@ public final class Motor {
         }
         boolean lavaBelow = world.getFluidState(ground).isIn(FluidTags.LAVA) || Mining.lavaSeen(Retina.memory(villager), ground);
         ItemStack block = build ? Hands.buildingBlock(villager) : ItemStack.EMPTY;
+        boolean overGap = kind == Kind.LEVEL && !stand.equals(from);
+        if (overGap && placeTicks == 0 && !villager.isTouchingWater() && goAround(world, villager, ground)) {
+            // a gap with a short walk round it: walk it, the blocks stay in the bag
+            return Result.RUNNING;
+        }
         if (!block.isEmpty() && world.getBlockState(ground).isReplaceable() && !lavaBelow) {
             doing = kind == Kind.UP ? "pone un escalón" : "haciendo un puente";
+            if (overGap && !villager.isTouchingWater()) {
+                // bridging is done crouched, from the first block: the edge guard holds it on the lip
+                wantPuente = true;
+                if (!villager.isSneaking()) {
+                    standStill(villager);
+                    return Result.RUNNING;
+                }
+            }
             if (Hands.place(world, villager, ground, block)) {
-                villager.setSneaking(false);
                 acted = true;
                 placeTicks = 0;
+                bridged = overGap;
                 return Result.RUNNING;
             }
             if (++placeTicks > PLACE_TICKS) {
                 return blocked(world, villager);
             }
-            if (kind == Kind.LEVEL && !stand.equals(from)) {
-                // the side face is not in sight yet: edge out like a sneaking player, from the block it stands on
+            if (overGap) {
+                // the side face is not in sight yet: back out over the edge like a sneaking player, from the block it stands on
                 edgeToward(villager, from, dir);
                 return Result.RUNNING;
             }
@@ -639,6 +710,7 @@ public final class Motor {
             // a step down with nothing to set a block against: only if the drop is short
         }
         if (lavaBelow || dropDepth(world, ground) > 2 || kind == Kind.UP) {
+            // a drop it could not bridge and would not jump down: never off an edge that hurts
             return blocked(world, villager);
         }
         dropOk = true;
@@ -693,15 +765,24 @@ public final class Motor {
                 return Result.RUNNING;
             }
         }
-        villager.setSneaking(false);
         villager.getNavigation().stop();
         doing = switch (kind) {
             case DOWN -> "bajando por la escalera";
             case UP -> "subiendo";
-            default -> "caminando";
+            default -> bridged ? "haciendo un puente" : "caminando";
         };
+        if (kind == Kind.DOWN || dropOk) {
+            // a step down it planned: crouched for someone else, it lets go of the edge for this one
+            Postura.bajar(villager);
+        }
         // steering also in the air: it never hits anything while off its feet
         Vec3d target = Vec3d.ofBottomCenter(stand);
+        if (bridged && settled && !villager.isTouchingWater()) {
+            // onto the block it just set, still crouched and facing back the way it came, like a player bridging
+            wantPuente = true;
+            backTo(villager, target, dir);
+            return Result.RUNNING;
+        }
         villager.getMoveControl().moveTo(target.x, target.y, target.z, 0.6);
         if (villager.isTouchingWater()) {
             wade(villager, target);
@@ -913,27 +994,61 @@ public final class Motor {
                 && Obras.kind(world, villager, pos) == Obras.Kind.NATURE;
     }
 
-    /** Moves the body toward the edge of the block it stands on and holds it there, the edge guard of sneaking. */
+    /**
+     * Backs the body out to the edge of the block it stands on, facing the way it came, and holds it there: crouched
+     * the edge guard ({@link Postura#edge}) keeps the feet on the block, and this keeps it there even if it is not.
+     */
     private void edgeToward(VillagerEntityMCA villager, BlockPos feet, @Nullable Direction direction) {
         if (direction == null) {
             return;
         }
-        villager.setSneaking(true);
-        villager.getNavigation().stop();
         Vec3d center = Vec3d.ofBottomCenter(feet);
-        Vec3d edge = center.add(Vec3d.of(direction.getVector()).multiply(0.72));
-        villager.getMoveControl().moveTo(edge.x, edge.y, edge.z, 0.2);
-        double along = villager.getPos().subtract(center).dotProduct(Vec3d.of(direction.getVector()));
-        if (along > 0.78) {
+        Vec3d axis = Vec3d.of(direction.getVector());
+        // the centre may go as far out as half its width past the edge: the back of its feet still on the block
+        double limit = 0.5 + villager.getWidth() / 2.0 - 0.02;
+        double along = villager.getPos().subtract(center).dotProduct(axis);
+        Vec3d edge = center.add(axis.multiply(limit));
+        if (villager.isTouchingWater()) {
+            // wading: its legs, against the current
+            villager.getNavigation().stop();
+            villager.getMoveControl().moveTo(edge.x, edge.y, edge.z, 0.2);
+        } else {
+            wantPuente = true;
+            backTo(villager, new Vec3d(edge.x, villager.getY(), edge.z), direction);
+        }
+        if (along > limit) {
             Vec3d v = villager.getVelocity();
-            Vec3d axis = Vec3d.of(direction.getVector());
             double out = v.dotProduct(axis);
             if (out > 0) {
                 villager.setVelocity(v.subtract(axis.multiply(out)));
             }
-            Vec3d back = villager.getPos().subtract(axis.multiply(along - 0.78));
+            Vec3d back = villager.getPos().subtract(axis.multiply(along - limit));
             villager.setPosition(back.x, villager.getY(), back.z);
         }
+    }
+
+    /**
+     * Moves the body toward {@code target} at a sneaking player's pace by its own legs (the velocity, not the mob's
+     * move control, which would turn it round), facing back against {@code going}, as a player bridging walks backwards.
+     */
+    private static void backTo(VillagerEntityMCA villager, Vec3d target, @Nullable Direction going) {
+        standStill(villager);
+        if (going != null) {
+            float yaw = going.getOpposite().asRotation();
+            villager.setYaw(yaw);
+            villager.setBodyYaw(yaw);
+            villager.setHeadYaw(yaw);
+        }
+        double dx = target.x - villager.getX();
+        double dz = target.z - villager.getZ();
+        double d = Math.sqrt(dx * dx + dz * dz);
+        Vec3d v = villager.getVelocity();
+        if (d < 0.02) {
+            villager.setVelocity(0, v.y, 0);
+            return;
+        }
+        double speed = Math.min(Postura.SNEAK_SPEED, d);
+        villager.setVelocity(dx / d * speed, v.y, dz / d * speed);
     }
 
     private void afterBreak(ServerWorld world, VillagerEntityMCA villager, BlockPos cell) {
@@ -1021,6 +1136,125 @@ public final class Motor {
             }
         }
         return Result.BLOCKED;
+    }
+
+    // ------------------------------------------------------------------ gaps: round them or over them
+
+    /**
+     * Before bridging the gap under {@code ground}: a walking way to the goal that is not much longer than the straight
+     * line (at most {@link #DETOUR_RATIO} times it and {@link #MAX_DETOUR} blocks), dry all the way, found by the same
+     * pathfinder its legs use. True when it takes it. Looked for once per gap and goal, from natural ground only: half
+     * way over its own bridge it goes on.
+     */
+    private boolean goAround(ServerWorld world, VillagerEntityMCA villager, BlockPos ground) {
+        if (planGoal == null || from == null || dropDepth(world, ground) < 2 && !Agua.water(world, ground)) {
+            return false; // a one-block dip is stepped in and out of, or bridged on the spot
+        }
+        if (Obras.kind(world, villager, from.down()) == Obras.Kind.OWN) {
+            return false;
+        }
+        long now = world.getTime();
+        if (detourCheckedFor != null && now - detourCheckedAt < DETOUR_RECHECK && detourCheckedFor.isWithinDistance(planGoal, 4.0)) {
+            return false;
+        }
+        detourCheckedFor = planGoal;
+        detourCheckedAt = now;
+        double straight = Math.sqrt(from.getSquaredDistance(planGoal));
+        if (straight < 2.0) {
+            return false;
+        }
+        Path path = villager.getNavigation().findPathTo(planGoal, 0);
+        if (path == null || !path.reachesTarget() || path.getLength() < 2) {
+            return false;
+        }
+        int length = path.getLength();
+        if (length > MAX_DETOUR || length > straight * DETOUR_RATIO) {
+            return false;
+        }
+        for (int i = 0; i < length; i++) {
+            BlockPos node = path.getNodePos(i);
+            if (Agua.water(world, node) || Agua.water(world, node.down()) || Mining.heat(world, node)) {
+                return false; // a way round that swims is no walk
+            }
+        }
+        net.mca.MCA.LOGGER.info("[Tropeles] {} rodea el hueco hacia {}: {} bloques a pie frente a {} en línea recta",
+                villager.getName().getString(), planGoal.toShortString(), length, String.format("%.1f", straight));
+        detour = path;
+        detourGoal = planGoal;
+        detourTicks = 0;
+        endStep();
+        return true;
+    }
+
+    /** One tick along the way round. Null when it is over (walked, or given up) and the steps take over again. */
+    @Nullable
+    private Result followDetour(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, BlockPos goal) {
+        Path path = detour;
+        if (path == null || detourGoal == null || !detourGoal.isWithinDistance(goal, 3.0) || ++detourTicks > path.getLength() * 30 + 100) {
+            detour = null;
+            return null;
+        }
+        while (!path.isFinished()) {
+            BlockPos node = path.getCurrentNodePos();
+            if (feet.getX() == node.getX() && feet.getZ() == node.getZ() && Math.abs(feet.getY() - node.getY()) <= 1 && settled(villager)) {
+                path.next();
+            } else {
+                break;
+            }
+        }
+        if (path.isFinished()) {
+            detour = null;
+            endStep();
+            return null;
+        }
+        BlockPos node = path.getCurrentNodePos();
+        if (node.getY() < feet.getY()) {
+            Postura.bajar(villager);
+        }
+        doing = "rodeando";
+        villager.getNavigation().stop();
+        Vec3d target = Vec3d.ofBottomCenter(node);
+        villager.getMoveControl().moveTo(target.x, target.y, target.z, 0.6);
+        acted = true;
+        return Result.RUNNING;
+    }
+
+    /** Walking it now round a gap instead of over it. */
+    public boolean goingAround() {
+        return detour != null;
+    }
+
+    /** A drop that would hurt right beside {@code feet}: open to step into, nothing to land on for more than {@link #SAFE_DROP} blocks. */
+    public static boolean edgeNear(World world, BlockPos feet) {
+        for (Direction side : Direction.Type.HORIZONTAL) {
+            BlockPos next = feet.offset(side);
+            if (open(world, next) && open(world, next.up()) && hurts(world, next.down())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Walking off into {@code floor} (the cell under where the feet would be) falls far enough to hurt. */
+    public static boolean hurts(World world, BlockPos floor) {
+        BlockPos cursor = floor;
+        for (int depth = 0; depth <= SAFE_DROP; depth++) {
+            if (Mining.standable(world, cursor) || Agua.water(world, cursor) || world.getBlockState(cursor).getBlock() instanceof LadderBlock) {
+                return false;
+            }
+            cursor = cursor.down();
+        }
+        // more than SAFE_DROP blocks of nothing: whatever is under that hurts unless it is water
+        for (int depth = SAFE_DROP + 1; depth < 64; depth++) {
+            if (Agua.water(world, cursor)) {
+                return false;
+            }
+            if (Mining.standable(world, cursor) || !world.getBlockState(cursor).getFluidState().isEmpty()) {
+                return true;
+            }
+            cursor = cursor.down();
+        }
+        return true;
     }
 
     private static int dropDepth(ServerWorld world, BlockPos floor) {

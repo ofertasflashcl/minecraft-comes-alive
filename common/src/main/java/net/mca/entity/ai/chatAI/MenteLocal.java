@@ -7,6 +7,7 @@ import net.mca.entity.ai.MoveState;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
 import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.body.Mining;
+import net.mca.entity.ai.mente.Voluntad;
 import net.mca.entity.ai.sense.Escena;
 import net.mca.entity.ai.sense.Lugar;
 import net.mca.entity.ai.sense.Retina;
@@ -45,6 +46,17 @@ public final class MenteLocal {
             + "diamonds?|iron|gold|coal|copper|emeralds?|quartz|netherite|ancient debris";
 
     /**
+     * Words that stop a connected villager dead: "cuidado", "detente", "quieto", "shh", "espera" (not "espera aquí",
+     * which is waiting, nor "te espera"), "stop", "wait" (not "wait here"), "careful", "watch out", "hold on",
+     * "freeze". Read on the message without punctuation.
+     */
+    private static final String ALERT = "cuidado|ojo con|ojo,? (hay|que)|detente|detenganse|detengase|deten(?= ahi| ya|$)|quieto|quieta|quietos|quietas|"
+            + "shh+|chis|chito|silencio|"
+            + "(?<!te )(?<!me )(?<!lo )(?<!la )(?<!se )(?<!le )(?<!os )(?<!que )(?<!nos )(?<!les )espera(?! (aqui|aca|ahi|alli|alla))|esperen|"
+            + "stop(?! (following|working|mining|chopping|fishing|harvesting|hunting|talking))|wait(?! (here|there|for))|"
+            + "careful|watch out|look out|hold on|hold up|hang on|freeze|halt";
+
+    /**
      * Orders, most specific first: "no me sigas" must win over "sigueme", and "sal de la mina" or "deja de minar
      * y sube" (climb out and go home) over "deja de minar" (stop right where it is).
      */
@@ -56,11 +68,16 @@ public final class MenteLocal {
                     + "(ya )?puedes (subir|salir)( de (la )?mina)?|te espero (arriba|afuera)|"
                     + "come up|come back up|get out of (the )?(mine|hole|cave)|climb (out|up)"),
             order("move-freely", "no me sigas|deja de seguirme|dejame (solo|sola|tranquilo|tranquila)|anda(te)? libre|puedes irte|ya puedes irte|"
-                    + "vete (tranquilo|tranquila)|haz lo tuyo|anda a pasear|stop following|leave me alone|you can go|move freely|go away|do your thing"),
+                    + "vete (tranquilo|tranquila)|haz lo tuyo|haz tus cosas|vuelve a lo tuyo|vuelve a tus cosas|sigue con lo tuyo|anda a lo tuyo|eres libre|"
+                    + "anda a pasear|stop following|leave me alone|you can go|move freely|go away|do your thing|you'?re free|"
+                    + "go back to (your (own )?(thing|stuff|business)|what you were doing)"),
             order("stop-working", "deja de (trabajar|minar|talar|pescar|cosechar|cazar)|para de (trabajar|minar|talar|pescar|cosechar|cazar)|"
-                    + "detente|deten el trabajo|basta de trabajar|ya no (mines|trabajes|tales|peques|caces)|"
+                    + "deten el trabajo|basta de trabajar|ya no (mines|trabajes|tales|peques|caces)|"
                     + "no sigas (minando|trabajando|cavando|picando|talando|pescando|cazando)|"
                     + "stop (working|mining|chopping|fishing|harvesting|hunting)|quit (working|mining)"),
+            // "¡cuidado!", "¡para!", "detente", "watch out": stop dead and ask what is going on (the bare "para" and "alto"
+            // are read apart, with their punctuation: {@link #PARA}, {@link #ALTO})
+            order("alert", ALERT),
             order("remove-armor", "quitate (la |tu )?armadura|sacate (la |tu )?armadura|take off (your |the )?armou?r|remove (your |the )?armou?r"),
             order("wear-armor", "ponte (la |tu )?armadura|equipate|vistete (con )?(la |tu )?armadura|wear (your |the )?armou?r|put on (your |the )?armou?r"),
             order("give-item", "dame|pasame|regalame|entregame|tirame|lanzame|prestame|me das|me pasas|me regalas|me prestas|"
@@ -74,7 +91,7 @@ public final class MenteLocal {
                     + "^((oye|hey|ey|che|hola) )?(ven|vente)( ya| rapido| porfa| por favor)?$|"
                     + "follow me|come with me|come along|come here|tag along|walk with me|accompany me|join me|stick with me|stay (close|with me)|"
                     + "let'?s go together"),
-            order("stay-here", "quedate|esperame (aqui|aca|ahi)|espera (aqui|aca|ahi)|no te muevas|stay here|stay there|wait here|wait for me|don'?t move"),
+            order("stay-here", "quedate|esperame( (aqui|aca|ahi))?|espera (aqui|aca|ahi)|no te muevas|stay here|stay there|wait here|wait for me|don'?t move"),
             // a bare "mina" is the order ("mina hierro"), not the noun ("la mina esta oscura", "sal de la mina")
             order("start-mining", "ve a minar|vete a minar|anda a minar|ponte a minar|ve a la mina|vete a la mina|anda a la mina|baja a la mina|ven a la mina|"
                     + "vamos a (la mina|minar)|a minar|minar|(?<!(la|una|esa|esta|tu|mi|su|de|en|al|del) )mina|excava|"
@@ -89,6 +106,32 @@ public final class MenteLocal {
             order("try-go-home", "ve(te)? a (tu )?casa|anda(te)? a (tu )?casa|vuelve a (tu )?casa|regresa a (tu )?casa|go home|head home"),
             order("open-trade-window", "comerciar|tradear|intercambiar|que vendes|que tienes para vender|quiero comprar|let'?s trade|trade|what do you sell")
     );
+
+    /**
+     * "Para" as the verb (stop!), read with its punctuation: alone, at the end, before a comma or a "!", or with a
+     * word that goes with the order ("para ya", "para ahí", "para po"). Never the preposition: "para que", "para
+     * ti", "para el", "ven para acá", "sube para comer".
+     */
+    private static final Pattern PARA = Pattern.compile("(?<![a-z])(?<!ven )(?<!vente )(?<!anda )(?<!vamos )(?<!voy )(?<!ir )(?<!vengo )(?<!sube )"
+            + "(?<!baja )(?<!mira )(?<!corre )(?<!salta )(?<!camina )(?<!vuelve )(?<!esto )(?<!eso )(?<!es )(?<!era )(?<!sirve )para"
+            + "(?=\\s*$|\\s*[,.!;:?\u00a1\u00bf\u2026]|\\s+(ya|ahi|alli|un poco|un momento|un segundo|un toque|porfa|por favor|po|weon|wn|hombre|loco|altiro|oye|hey|ey)(?![a-z]))");
+
+    /** "¡Alto!", "alto ahí", "oye, alto": the order, not the adjective ("es muy alto", "un árbol alto"). */
+    private static final Pattern ALTO = Pattern.compile("(^|[,.!;:\u00a1\u00bf]\\s*|(?<![a-z])(oye|ey|hey|che|ya|ahora)\\s+)alto"
+            + "(?=\\s*$|\\s*[,.!;:?\u2026]|\\s+(ahi|ya|alli)(?![a-z]))");
+
+    /**
+     * "Tranquilo, sigue", "falsa alarma", "dale", "it's fine": to a villager stopped by an alert, it was nothing and
+     * it carries on ({@link #calma}).
+     */
+    private static final Pattern CALM = Pattern.compile("(?<![a-z])(tranquilo|tranquila|tranqui|sigue|sigamos|continua|continuemos|dale|"
+            + "falsa alarma|no es nada|no era nada|nada|todo bien|esta bien|ok|okay|vale|go on|carry on|keep going|it'?s fine|its fine|"
+            + "it'?s ok|all clear|false alarm|never ?mind|nothing)(?![a-z])");
+
+    /** Whether {@code text} tells a villager on alert that it was nothing. */
+    public static boolean calma(String text) {
+        return CALM.matcher(clean(text)).find();
+    }
 
     /**
      * Asking for its exact position: "dame tus coordenadas", "¿en qué coordenadas estás?", "coords", "your
@@ -210,9 +253,12 @@ public final class MenteLocal {
     private static final Pattern SPANISH = Pattern.compile("\\b(el|la|los|las|que|de|por|favor|hola|tu|tus|me|mi|dame|ven|sigueme|quedate|"
             + "como|donde|tienes|estas|gracias|aqui|aca|busca|mina|tala|pesca|guarda|para|con|una?|y|si|no|vamos|oye|porfa|"
             // the short orders said to a miner carry no other Spanish word: "sube ya", "sal de ahi", "sigue bajando"
-            + "algo|ya|sube|subete|sal|ahi|arriba|abajo|sigue|baja|bajando|casa|comer|comida|hambre|ahora|bien|mas|muy|pero|eso|dime)\\b");
+            + "algo|ya|sube|subete|sal|ahi|arriba|abajo|sigue|baja|bajando|casa|comer|comida|hambre|ahora|bien|mas|muy|pero|eso|dime|"
+            // the short warnings and the "go on" after one
+            + "cuidado|detente|espera|esperame|quieto|quieta|alto|tranquilo|tranquila|dale|nada|silencio|falsa|alarma)\\b");
     private static final Pattern ENGLISH = Pattern.compile("\\b(the|you|your|me|my|please|follow|stay|give|what|where|how|are|is|do|have|"
-            + "hello|hi|thanks|thank|here|go|come|stop|mine|find|get|can|let'?s|i|keep|mining|it|to|of|and|up|out|back|now)\\b");
+            + "hello|hi|thanks|thank|here|go|come|stop|mine|find|get|can|let'?s|i|keep|mining|it|to|of|and|up|out|back|now|"
+            + "careful|wait|watch|hold|freeze|fine|carry|on)\\b");
 
     private MenteLocal() {
     }
@@ -342,8 +388,14 @@ public final class MenteLocal {
         if (SUGGEST_RETURN.matcher(t).find() && (text.contains("?") || text.contains("¿") || !NOT_RETURN.matcher(t).find())) {
             return new Intent("consider-return", "", null, spanish);
         }
+        // the message as written, accents gone but its punctuation kept: "para," is not "para que"
+        String marked = Acciones.normalize(text).trim();
         for (Map.Entry<String, Pattern> entry : ORDERS) {
             Matcher m = entry.getValue().matcher(t);
+            if ("alert".equals(entry.getKey()) && !m.find() && (PARA.matcher(marked).find() || ALTO.matcher(marked).find())) {
+                return new Intent("alert", "", null, spanish);
+            }
+            m.reset();
             if (m.find()) {
                 if (entry.getKey().startsWith("start-") && NEGATED_START.matcher(t).find()) {
                     continue; // "no vayas a la mina" is not an order to go
@@ -459,6 +511,9 @@ public final class MenteLocal {
         if (outcome == null && "eat-break".equals(command)) {
             return es ? "Estoy bien, todavía no tengo hambre." : "I'm fine, I'm not hungry yet.";
         }
+        if (outcome == null && "carry-on".equals(command)) {
+            return es ? "Si no estaba parado por nada." : "I wasn't stopped for anything.";
+        }
         if (outcome == null && !"give-item".equals(command) && !"store-items".equals(command)) {
             return pick(villager, es ? new String[]{"Ya estoy en eso.", "Eso ya lo estoy haciendo."} : new String[]{"Already on it.", "I'm already doing that."});
         }
@@ -469,6 +524,9 @@ public final class MenteLocal {
             case "follow-player" -> pick(villager, es ? new String[]{"¡Vamos! Te sigo.", "Voy contigo, " + name + ".", "Detrás tuyo."}
                     : new String[]{"Let's go! I'm right behind you.", "Coming with you, " + name + "."});
             case "stay-here" -> pick(villager, es ? new String[]{"Me quedo aquí.", "Aquí te espero."} : new String[]{"I'll stay here.", "I'll wait right here."});
+            case "alert" -> Voluntad.pregunta(villager, es);
+            case "carry-on" -> Voluntad.sigoLinea(villager, es);
+            case "free" -> pick(villager, es ? new String[]{"Bueno, vuelvo a lo mío.", "Vale, sigo con mis cosas."} : new String[]{"Alright, back to my own thing.", "Okay, I'll get on with my stuff."});
             case "move-freely" -> pick(villager, es ? new String[]{"Bueno, ando por ahí.", "Vale, me voy a lo mío."} : new String[]{"Alright, I'll wander around.", "Okay, I'll do my own thing."});
             case "stop-working", "stop" -> pick(villager, es ? new String[]{"Listo, dejo lo que estaba haciendo.", "Vale, paro."} : new String[]{"Okay, I'll stop.", "Fine, stopping."});
             case "start-mining" -> {
@@ -523,6 +581,14 @@ public final class MenteLocal {
         Chore job = villager.getVillagerBrain().getCurrentJob();
         MoveState move = villager.getVillagerBrain().getMoveState();
         String what = memory.doing();
+        if (Voluntad.conectado(villager) && Voluntad.of(villager).modo() != Voluntad.Modo.LIBRE) {
+            // following, waiting or stopped by a warning: what its will is set on, in its own words
+            return switch (Voluntad.of(villager).modo()) {
+                case SIGUIENDO -> es ? "Te sigo y te cuido la espalda." : "I'm following you and watching your back.";
+                case ESPERANDO -> es ? "Aquí, esperándote como me pediste." : "Waiting here for you, like you asked.";
+                default -> es ? "Estoy quieto, esperando que me digas qué pasa." : "Standing still, waiting for you to tell me what's going on.";
+            };
+        }
         if (what != null && !what.isBlank() && now - memory.doingTick() < 1200 && job != Chore.NONE) {
             return es ? "Ahora mismo: " + what + "." : "Right now I'm busy: " + what + ".";
         }
@@ -742,8 +808,8 @@ public final class MenteLocal {
     }
 
     private static String help(boolean es) {
-        return es ? "Puedo seguirte, quedarme aquí, ir a minar (dime qué buscar) y subir cuando me llames, talar, pescar, cosechar, cazar, darte cosas o guardarlas en mi cofre, y decirte mis coordenadas exactas."
-                : "I can follow you, stay here, go mining (tell me what to look for) and come up when you call, chop trees, fish, harvest, hunt, hand you things or store them in my chest, and tell you my exact coordinates.";
+        return es ? "Puedo seguirte, quedarme aquí, detenerme si me dices «cuidado», ir a minar (dime qué buscar) y subir cuando me llames, talar, pescar, cosechar, cazar, darte cosas o guardarlas en mi cofre, y decirte mis coordenadas exactas."
+                : "I can follow you, stay here, stop dead when you say \"careful\", go mining (tell me what to look for) and come up when you call, chop trees, fish, harvest, hunt, hand you things or store them in my chest, and tell you my exact coordinates.";
     }
 
     /** The food in its own bag. */

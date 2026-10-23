@@ -17,6 +17,7 @@ import net.mca.entity.ai.body.Mina;
 import net.mca.entity.ai.body.Mining;
 import net.mca.entity.ai.body.Motor;
 import net.mca.entity.ai.body.Progreso;
+import net.mca.entity.ai.mente.Voluntad;
 import net.mca.entity.ai.relationship.AgeState;
 import net.mca.entity.ai.sense.Entorno;
 import net.mca.entity.ai.sense.MapaVisto;
@@ -641,9 +642,17 @@ public class ProspectingTask extends AbstractChoreTask {
         work(world, villager, true);
     }
 
-    /** Body, orders, danger, decisions, then whatever the phase is about. */
+    /**
+     * Its will first ({@link Voluntad}): following someone, stopped by a warning or waiting, the will has the body and
+     * only the body's own needs go on here; in its own life, body, orders, danger, decisions, then whatever the
+     * phase is about. Never in the middle of a jump: the step lands first.
+     */
     private void work(ServerWorld world, VillagerEntityMCA villager, boolean look) {
         long now = world.getTime();
+        if (!motor.midStep(villager) && Voluntad.of(villager).manda(world, villager, this)) {
+            metabolism(world, villager);
+            return;
+        }
         if (look) {
             Retina.look(world, villager);
         }
@@ -698,6 +707,40 @@ public class ProspectingTask extends AbstractChoreTask {
     }
 
     // ------------------------------------------------------------------ what the checks and the chat may ask
+
+    /**
+     * The will takes the body (following, an alert, waiting): the half-made step and the plan are dropped, a hunt is
+     * called off. Everything else (the phase, the ore, the trail, the trip home) stays as it is for later.
+     */
+    public void soltar(ServerWorld world, VillagerEntityMCA villager) {
+        motor.reset(world, villager);
+        plan.clear();
+        villager.getNavigation().stop();
+        if (phase == Phase.FORAGE || phase == Phase.FIGHT) {
+            CombatMind.disengage(villager);
+            prey = null;
+        }
+        MCA.LOGGER.info("[Tropeles] {} deja lo suyo en pausa ({})", name(), debug());
+    }
+
+    /** The will gives the body back: it goes on from where it stands, as if it had just looked up from its work. */
+    public void retomar(ServerWorld world, VillagerEntityMCA villager) {
+        motor.reset(world, villager);
+        plan.clear();
+        resetWatch();
+        decideTicks = 19;
+        MCA.LOGGER.info("[Tropeles] {} vuelve a lo suyo: {}", name(), debug());
+    }
+
+    /** Food points it carries (everyday food only). */
+    public static int comidaEnMochila(VillagerEntityMCA villager) {
+        return foodPoints(villager.getInventory());
+    }
+
+    /** Empty slots left in its bag. */
+    public static int espacioLibre(VillagerEntityMCA villager) {
+        return freeSlots(villager.getInventory());
+    }
 
     /** For the in-game checks: how full its food bar is, and where home is. */
     public void setFood(int points) {

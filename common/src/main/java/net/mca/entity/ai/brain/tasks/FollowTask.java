@@ -56,9 +56,20 @@ public class FollowTask extends MultiTickTask<VillagerEntityMCA> {
 
     @Override
     protected void finishRunning(ServerWorld world, VillagerEntityMCA villager, long time) {
+        release(world, villager);
+    }
+
+    /**
+     * Lets go of the body: the fight, the half-made step, where the ward stood. For a driver of {@link #guard}
+     * that hands the body to another step machine (a connected villager's will going back to its own life).
+     */
+    public void release(ServerWorld world, VillagerEntityMCA villager) {
         CombatMind.disengage(villager);
         motor.reset(world, villager);
         wardFeet = null;
+        stuckTicks = 0;
+        unreachableTicks = 0;
+        warned = false;
     }
 
     @Override
