@@ -58,6 +58,12 @@ public final class Obras {
     private static final int TREE_LIMIT = 256;
     private static final long CACHE_TICKS = 200;
     private static final Map<ServerWorld, Map<Long, Long>> TREE_CACHE = new WeakHashMap<>();
+    /**
+     * Logs that were part of a living tree lately, kept for a day: a trunk being felled keeps being a tree when its
+     * leaves are gone or the logs between it and them were cut (the bottom log a chopper stands on and cuts last).
+     */
+    private static final Map<ServerWorld, Map<Long, Long>> WAS_TREE = new WeakHashMap<>();
+    private static final long WAS_TREE_TICKS = 24000;
 
     private Obras() {
     }
@@ -188,6 +194,17 @@ public final class Obras {
             return false;
         }
         long now = world.getTime();
+        // what is left of a tree being felled: checked before the short cache, which may hold "no leaves here" for the
+        // bottom log since the log over it was cut
+        Map<Long, Long> was = WAS_TREE.computeIfAbsent(world, w -> new HashMap<>());
+        Long wasUntil = was.get(pos.asLong());
+        if (wasUntil != null && wasUntil > now) {
+            TropelesMundo placed = mundo(world);
+            if (placed == null || !placed.isPlayerPlaced(pos) && placed.placedBy(pos) == null) {
+                return true;
+            }
+            was.remove(pos.asLong());
+        }
         Map<Long, Long> cache = TREE_CACHE.computeIfAbsent(world, w -> new HashMap<>());
         Long cached = cache.get(pos.asLong());
         if (cached != null && Math.abs(cached) > now) {
@@ -247,6 +264,14 @@ public final class Obras {
         long until = (now + CACHE_TICKS) * (result ? 1 : -1);
         for (long log : trunk) {
             cache.put(log, until);
+        }
+        if (result) {
+            if (was.size() > 50000) {
+                was.clear();
+            }
+            for (long log : trunk) {
+                was.put(log, now + WAS_TREE_TICKS);
+            }
         }
         return result;
     }
@@ -334,9 +359,18 @@ public final class Obras {
             mundo.placedByPlayer(pos);
         }
         TREE_CACHE.remove(world);
+        Map<Long, Long> was = WAS_TREE.get(world);
+        if (was != null) {
+            was.remove(pos.asLong());
+        }
     }
 
     public static void broken(ServerWorld world, BlockPos pos) {
+        // a log of a tree that is gone: whatever is put there later is judged afresh
+        Map<Long, Long> was = WAS_TREE.get(world);
+        if (was != null) {
+            was.remove(pos.asLong());
+        }
         TropelesMundo mundo = mundo(world);
         if (mundo != null) {
             mundo.removed(pos);

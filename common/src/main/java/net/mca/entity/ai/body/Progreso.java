@@ -141,6 +141,8 @@ public final class Progreso {
         final Set<Long> members = new HashSet<>();
         /** Cells of this tree it cut already: the trunk goes on from them. */
         final Set<Long> cutCells = new HashSet<>();
+        /** Since the last log it cut it looked up the trunk from beside it: no log hidden in the crown is left over it. */
+        boolean lookedUp;
         int ticks;
         int side;
         int leaves;
@@ -196,6 +198,9 @@ public final class Progreso {
     /** Ticks it walks back to its furnace on a path before trying its own steps again. */
     private int motorRest;
     private int packTicks;
+    /** What it was packing up last tick: a new target starts its patience afresh. */
+    @Nullable
+    private BlockPos packTarget;
     private int tableTicks;
     private boolean wantChest;
     private boolean wantKit;
@@ -841,7 +846,21 @@ public final class Progreso {
         boolean footed = Motor.settled(villager);
         // never the log under its own feet: a player steps off the bottom log before cutting it
         boolean under = standsOn(villager, target);
-        if (footed && !under && Retina.visibleFace(world, villager, target, Retina.BLOCK_REACH) != null) {
+        // a 1x1 trunk is cut from right beside it or from on it, never from a few blocks off: from there the logs
+        // hidden in the crown come into view as the ones below them go
+        Vec3d stump = Vec3d.ofBottomCenter(t.base);
+        double dx = villager.getX() - stump.x;
+        double dz = villager.getZ() - stump.z;
+        boolean beside = t.big || dx * dx + dz * dz <= 1.75 * 1.75;
+        if (!t.big && target.equals(t.base) && !t.lookedUp && beside && footed) {
+            // before the last log goes: a look up the trunk, the way a player checks nothing is left up there
+            lookUp(world, villager, t);
+            memory.doing("mira hacia arriba por si queda tronco", now);
+            t.lookedUp = true;
+            t.next = null;
+            return;
+        }
+        if (footed && !under && beside && Retina.visibleFace(world, villager, target, Retina.BLOCK_REACH) != null) {
             Motor.standStill(villager);
             InventoryUtils.holdMain(villager, s -> s.getItem() instanceof AxeItem);
             memory.doing("talando " + world.getBlockState(target).getBlock().getName().getString(), now);
@@ -849,6 +868,7 @@ public final class Progreso {
             if (r == Hands.Breaker.DONE) {
                 t.cut++;
                 t.cutCells.add(target.asLong());
+                t.lookedUp = false;
                 t.next = null;
                 t.walk = 0;
                 t.side = 0;
@@ -933,6 +953,19 @@ public final class Progreso {
         } else if (t.walk % 20 == 1 || villager.getNavigation().isIdle()) {
             villager.getNavigation().startMovingTo(stand.getX() + 0.5, stand.getY(), stand.getZ() + 0.5, 0.65);
         }
+    }
+
+    /** Looks up the trunk from where it stands: every cell over what it cut (and the arms beside it) is peeked at. */
+    private static void lookUp(ServerWorld world, VillagerEntityMCA villager, Tree t) {
+        int top = t.base.getY();
+        for (long cell : t.cutCells) {
+            top = Math.max(top, BlockPos.fromLong(cell).getY());
+        }
+        for (int y = t.base.getY() + 1; y <= top + 3; y++) {
+            BlockPos cell = new BlockPos(t.base.getX(), y, t.base.getZ());
+            Retina.peek(world, villager, cell);
+        }
+        Hands.aim(villager, Vec3d.ofCenter(t.base.up(Math.max(1, top + 1 - t.base.getY()))));
     }
 
     /** Standing on top of {@code block}: its feet are on that block's top face. */
@@ -1491,6 +1524,10 @@ public final class Progreso {
             step = furnace != null && !cooking || ownTable && table != null ? Step.PACK_UP : Step.IDLE;
             return;
         }
+        if (!target.equals(packTarget)) {
+            packTarget = target.toImmutable();
+            packTicks = 0;
+        }
         if (target.equals(furnace)) {
             holdBestPick(villager);
         } else {
@@ -1499,11 +1536,28 @@ public final class Progreso {
         Retina.memory(villager).doing("recogiendo " + world.getBlockState(target).getBlock().getName().getString(), world.getTime());
         int r = breaker.tick(world, villager, target);
         if (r == Hands.Breaker.DONE) {
-            packTicks = 0;
             Hands.collect(world, villager, target, 2.5);
+            if (world.getBlockState(target).isAir()) {
+                return;
+            }
+        }
+        if (++packTicks > 600) {
+            // every tick counts, not only the misses: a table it cannot get at in half a minute is left standing
+            MCA.LOGGER.info("[Tropeles] {} deja {} en {}: no lo alcanza desde {} (lo ve: {}, en el suelo: {}, lo puede romper: {}, último golpe {})",
+                    villager.getName().getString(), world.getBlockState(target).getBlock().getName().getString(), target.toShortString(),
+                    villager.getBlockPos().toShortString(), Retina.visibleFace(world, villager, target, Retina.BLOCK_REACH) != null,
+                    villager.isOnGround(), Obras.mayBreak(world, villager, target), r);
+            breaker.reset(world, villager);
+            packTicks = 0;
+            if (target.equals(furnace) && !cooking) {
+                furnace = null;
+            } else {
+                table = null;
+                ownTable = false;
+            }
         } else if (r == Hands.Breaker.FAILED) {
             // out of reach: a player walks back for a table or a furnace that is still close
-            if (villager.getPos().distanceTo(Vec3d.ofCenter(target)) < 12 && ++packTicks < 300) {
+            if (villager.getPos().distanceTo(Vec3d.ofCenter(target)) < 12) {
                 if ((packTicks % 20) == 1 || villager.getNavigation().isIdle()) {
                     villager.getNavigation().startMovingTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.6);
                 }
