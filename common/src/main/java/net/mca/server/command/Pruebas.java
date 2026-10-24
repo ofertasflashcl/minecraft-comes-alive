@@ -2131,7 +2131,19 @@ public final class Pruebas {
                 // cut) is the chest's, the bag's and what it made from it with its own hands (a furnace, stone tools)
                 int made = stoneMade(miner) + 8 * furnacesIn(world, boxA, boxB) - 3;
                 int inChest = in.getOrDefault("minecraft:cobblestone", 0);
-                int total = inChest + cobble + made;
+                // and what it set down as blocks (pillars, floors, plugs) or let fall
+                int placed = 0;
+                for (BlockPos q : BlockPos.iterate(boxA, boxB)) {
+                    if (world.getBlockState(q).isOf(Blocks.COBBLESTONE)) {
+                        placed++;
+                    }
+                }
+                int dropped = 0;
+                for (var e : world.getEntitiesByClass(net.minecraft.entity.ItemEntity.class, new net.minecraft.util.math.Box(boxA).union(new net.minecraft.util.math.Box(boxB)).expand(2),
+                        e -> e.getStack().isOf(Items.COBBLESTONE))) {
+                    dropped += e.getStack().getCount();
+                }
+                int total = inChest + cobble + made + placed + dropped;
                 allJunk &= inChest >= 100 && total >= 192 && total <= 193;
                 boolean kept = cobble == 32 && bag.count(Items.RAW_GOLD) == gold && bag.count(Items.STONE_PICKAXE) + (miner.getMainHandStack().isOf(Items.STONE_PICKAXE) ? 1 : 0) >= 1
                         && in.getOrDefault("minecraft:raw_gold", 0) == 0;
@@ -2139,7 +2151,7 @@ public final class Pruebas {
                         && !net.mca.entity.ai.mente.Recuerdos.of(world, miner).sitios().containsValue(pos);
                 boolean passed = allJunk && kept && unowned;
                 check(name, passed, "dejó la basura en un cofre en " + pos.toShortString() + " en " + ticks + " ticks: " + in + "; se quedó con "
-                        + cobble + " de piedra (gastó " + made + " en lo que fabricó; cuenta " + total + "/192-193) y su oro (" + bag.count(Items.RAW_GOLD) + "/" + gold + "); cofre sin dueño ni nombre: " + unowned + "; " + state());
+                        + cobble + " de piedra (gastó " + made + " en lo que fabricó, puso " + placed + " como bloques, en el suelo " + dropped + "; cuenta " + total + "/192-193) y su oro (" + bag.count(Items.RAW_GOLD) + "/" + gold + "); cofre sin dueño ni nombre: " + unowned + "; " + state());
                 return passed;
             }
             return null;

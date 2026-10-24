@@ -2058,6 +2058,10 @@ public final class Progreso {
                 ownTable = false;
             }
             step = furnace != null && !cooking || ownTable && table != null ? Step.PACK_UP : Step.IDLE;
+            if (step == Step.IDLE) {
+                // the gear is made and its things are back in the bag: the caller's work (mining) comes next
+                Retina.memory(villager).doing("tiene lo que necesitaba: vuelve a lo suyo", world.getTime());
+            }
             return;
         }
         if (!target.equals(packTarget)) {
