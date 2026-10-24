@@ -7,10 +7,12 @@ import net.mca.entity.ai.MoveState;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
 import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.body.Mining;
+import net.mca.entity.ai.mente.Recuerdos;
 import net.mca.entity.ai.mente.Voluntad;
 import net.mca.entity.ai.sense.Escena;
 import net.mca.entity.ai.sense.Lugar;
 import net.mca.entity.ai.sense.Retina;
+import net.mca.entity.ai.sense.Tacto;
 import net.mca.entity.ai.sense.VisualMemory;
 import net.minecraft.entity.SpawnGroup;
 import net.minecraft.inventory.SimpleInventory;
@@ -188,6 +190,23 @@ public final class MenteLocal {
 
     private static final List<Map.Entry<String, Pattern>> QUESTIONS = List.of(
             order("bye", "adios|chao|chau|nos vemos|hasta luego|hasta pronto|hasta manana|bye|goodbye|good bye|see you|see ya"),
+            // what it remembers ({@link Recuerdos}): before "¿dónde hay cofres?" and "¿qué haces?"
+            order("told", "que te (dije|pedi|conte|mande|ordene)|(recuerdas|te acuerdas( de)?) (lo )?que te (dije|pedi)|"
+                    + "what did i (say|tell you|ask( you)?)|do you remember what i (said|told you|asked)"),
+            order("climbed", "por donde (subiste|saliste|bajaste|viniste|entraste|llegaste|pasaste)|como (subiste|saliste|llegaste)|"
+                    + "por que camino (subiste|saliste|bajaste|viniste)|how did you (get|come|climb) (up|out|here)|which way did you (come|go|climb)|"
+                    + "the way you came"),
+            order("place:cofre", "donde (esta|estan|tienes|dejaste|pusiste|queda|guardaste) (tu|tus|el|los|mi) (cofre|cofres|baul|cosas)|"
+                    + "donde guardas (tus cosas|todo)|where('s| is| are) your (chest|chests|stuff)|where did you (put|leave) your (chest|stuff)"),
+            order("place:casa", "donde (esta|queda|es) tu casa|donde vives|donde duermes|where('s| is) your (home|house|bed)|where do you live"),
+            order("place:mina", "donde (esta|queda) tu mina|donde (estas minando|minas|cavas)|donde esta la mina|where('s| is) (your|the) mine|"
+                    + "where (are you|do you) (mine|mining|dig|digging)"),
+            order("overhead", "que (tienes|hay) (sobre|encima de|arriba de) (ti|tu cabeza|tuyo)|que hay (encima|arriba)( de ti)?|"
+                    + "hay algo (sobre|encima de) (ti|tu cabeza)|tienes (algo|un techo|techo) (encima|sobre (ti|la cabeza))|que bloques? (tienes|hay) (encima|arriba|sobre ti)|"
+                    + "what('s| is) (above|over) (you|your head)|anything (above|over) (you|your head)|what blocks? (are )?(above|over) you"),
+            order("did", "que (hiciste|has hecho|estuviste haciendo|hacias|has estado haciendo)|que te paso|"
+                    + "(recuerdas|te acuerdas)( de)? (algo|lo que hiciste|que hiciste)|"
+                    + "what (did you do|have you (done|been doing)|were you doing|happened)|do you remember"),
             order("hungry", "tienes hambre|tienes comida|te queda comida|has comido|are you hungry|do you have (any )?food|have you eaten"),
             order("found", "(encontraste|has encontrado|hallaste|conseguiste) (algo|algun|minerales|diamantes|hierro)|que (encontraste|has encontrado|conseguiste)|"
                     + "found anything|what did you find|did you find"),
@@ -469,8 +488,15 @@ public final class MenteLocal {
         if (q.startsWith("see:")) {
             return seeKind(villager, q.substring(4), es);
         }
+        if (q.startsWith("place:")) {
+            return placeOf(villager, q.substring(6), es);
+        }
         return switch (q) {
             case "doing" -> doing(villager, es);
+            case "did" -> did(villager, es);
+            case "overhead" -> overhead(villager, es);
+            case "climbed" -> climbed(villager, es);
+            case "told" -> told(villager, player, es);
             case "bag" -> bag(villager, es);
             case "health" -> health(villager, player, es);
             case "where" -> where(villager, es);
@@ -610,6 +636,136 @@ public final class MenteLocal {
             return es ? "Aquí, esperando." : "Just waiting here.";
         }
         return es ? "Nada en especial, dando unas vueltas." : "Nothing much, just wandering around.";
+    }
+
+    // ------------------------------------------------------------------ what it remembers
+
+    /** "¿Qué hiciste?": the last few things that happened to it, from its diary ({@link Recuerdos}). */
+    private static String did(VillagerEntityMCA villager, boolean es) {
+        Recuerdos r = Recuerdos.of(villager);
+        List<Recuerdos.Hecho> last = r == null ? List.of() : r.hechos("viaje|cofre|hallazgo|pelea|oficio|camino|plan|atasco", 4);
+        if (last.isEmpty()) {
+            return (es ? "No me ha pasado nada que valga la pena contar. " : "Nothing worth telling has happened to me. ") + doing(villager, es);
+        }
+        long now = villager.getWorld().getTime();
+        List<String> parts = new ArrayList<>();
+        for (Recuerdos.Hecho h : last) {
+            parts.add(Recuerdos.hace(now, h.t(), es) + " " + lower(h.texto()));
+        }
+        return (es ? "Lo último: " : "Lately (in my words): ") + String.join("; ", parts) + ".";
+    }
+
+    /** "¿Por dónde subiste?": the way it last came up or went down, as it remembers it. */
+    private static String climbed(VillagerEntityMCA villager, boolean es) {
+        Recuerdos r = Recuerdos.of(villager);
+        if (r == null) {
+            return es ? "No me acuerdo." : "I don't remember.";
+        }
+        long now = villager.getWorld().getTime();
+        List<Recuerdos.Hecho> ways = r.hechos("camino", 1);
+        List<Recuerdos.Hecho> out = r.hechos("viaje", 3);
+        StringBuilder s = new StringBuilder();
+        if (!ways.isEmpty()) {
+            Recuerdos.Hecho h = ways.get(0);
+            s.append(es ? "Me acuerdo bien: " : "I remember: ").append(Recuerdos.hace(now, h.t(), es)).append(" ").append(lower(h.texto())).append(".");
+        }
+        for (int i = out.size() - 1; i >= 0; i--) {
+            Recuerdos.Hecho h = out.get(i);
+            if (h.texto().startsWith("salí")) {
+                s.append(s.length() == 0 ? "" : " ").append(es ? "" : "And ").append(Recuerdos.hace(now, h.t(), es)).append(" ").append(lower(h.texto())).append(".");
+                break;
+            }
+        }
+        BlockPos door = r.sitio("mina");
+        if (door != null) {
+            s.append(es ? " La boca de mi mina está en " : " The mouth of my mine is at ").append(door.getX()).append(" ").append(door.getY()).append(" ")
+                    .append(door.getZ()).append(".");
+        }
+        if (s.length() == 0) {
+            return es ? "Todavía no he subido ni bajado por ningún lado que recuerde." : "I haven't climbed in or out anywhere I remember yet.";
+        }
+        if (r.size() > 0) {
+            s.append(es ? " Recuerdo " + r.size() + " sitios por donde caminé, así que sé volver por ahí." : " I remember " + r.size() + " spots I walked on, so I know my way back.");
+        }
+        return s.toString().trim();
+    }
+
+    /** "¿Qué te dije?": what this player said to it lately, as it remembers. */
+    private static String told(VillagerEntityMCA villager, ServerPlayerEntity player, boolean es) {
+        Recuerdos r = Recuerdos.of(villager);
+        String who = player.getName().getString();
+        List<String> said = new ArrayList<>();
+        if (r != null) {
+            long now = villager.getWorld().getTime();
+            for (Recuerdos.Hecho h : r.hechos("charla", 40)) {
+                String prefix = who + " me dijo «";
+                if (h.texto().startsWith(prefix)) {
+                    int end = h.texto().indexOf("»", prefix.length());
+                    said.add(Recuerdos.hace(now, h.t(), es) + ": «" + h.texto().substring(prefix.length(), end < 0 ? h.texto().length() : end) + "»");
+                }
+            }
+        }
+        if (said.isEmpty()) {
+            return es ? "No me acuerdo de que me hayas dicho nada antes." : "I don't remember you telling me anything before.";
+        }
+        List<String> last = said.subList(Math.max(0, said.size() - 3), said.size());
+        return (es ? "Me dijiste " : "You told me ") + String.join("; ", last) + ".";
+    }
+
+    /** "¿Dónde está tu cofre / tu casa / tu mina?": the place it remembers by that name, with its exact coordinates. */
+    private static String placeOf(VillagerEntityMCA villager, String what, boolean es) {
+        Recuerdos r = Recuerdos.of(villager);
+        BlockPos pos = null;
+        if (r != null) {
+            pos = r.sitio(what);
+            if (pos == null && what.equals("casa")) {
+                pos = r.sitio("campamento");
+            }
+            if (pos == null && what.equals("mina")) {
+                pos = r.sitio("frente de trabajo");
+            }
+        }
+        if (pos == null && what.equals("casa")) {
+            var home = villager.getResidency().getHome();
+            if (home.isPresent() && home.get().getDimension() == villager.getWorld().getRegistryKey()) {
+                pos = home.get().getPos();
+            }
+        }
+        String[] name = switch (what) {
+            case "cofre" -> new String[]{"Mi cofre", "My chest"};
+            case "casa" -> new String[]{"Mi casa", "My home"};
+            default -> new String[]{"Mi mina", "My mine"};
+        };
+        if (pos == null) {
+            return es ? "Todavía no tengo " + (what.equals("cofre") ? "cofre" : what.equals("casa") ? "casa" : "mina") + " que recuerde."
+                    : "I don't have a " + (what.equals("cofre") ? "chest" : what.equals("casa") ? "home" : "mine") + " that I remember yet.";
+        }
+        int d = (int) Math.round(Math.sqrt(villager.getBlockPos().getSquaredDistance(pos)));
+        String at = pos.getX() + " " + pos.getY() + " " + pos.getZ();
+        String extra = "";
+        if (what.equals("mina") && r != null && r.sitio("frente de trabajo") != null && !r.sitio("frente de trabajo").equals(pos)) {
+            BlockPos face = r.sitio("frente de trabajo");
+            extra = es ? "; estaba picando en " + face.getX() + " " + face.getY() + " " + face.getZ() : "; I was digging at " + face.getX() + " " + face.getY() + " " + face.getZ();
+        }
+        return es ? name[0] + " está en " + at + ", a unos " + d + " bloques de aquí" + extra + "."
+                : name[1] + " is at " + at + ", about " + d + " blocks from here" + extra + ".";
+    }
+
+    /** "¿Qué tienes encima?": what its body feels over its head and around it ({@link Tacto}). */
+    private static String overhead(VillagerEntityMCA villager, boolean es) {
+        try {
+            String felt = Tacto.describeOverhead(villager, es);
+            if (!felt.isBlank()) {
+                return felt;
+            }
+        } catch (RuntimeException e) {
+            // said plainly below
+        }
+        return es ? "No sé bien, no alcanzo a sentirlo." : "I can't really tell.";
+    }
+
+    private static String lower(String text) {
+        return text.isEmpty() ? text : Character.toLowerCase(text.charAt(0)) + text.substring(1);
     }
 
     private static String bag(VillagerEntityMCA villager, boolean es) {

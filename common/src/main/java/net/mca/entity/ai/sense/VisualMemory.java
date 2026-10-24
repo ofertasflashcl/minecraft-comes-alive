@@ -21,7 +21,8 @@ import java.util.Map;
 import java.util.function.Predicate;
 
 /**
- * Everything one villager's eyes have recorded. Nothing gets in here except through {@link Retina}:
+ * Everything one villager's eyes have recorded. Nothing gets in here except through {@link Retina} (and the near
+ * pass of its {@link Pantalla}, which casts the retina's own rays and records them the same way):
  * a block is known only once a ray has hit its real shape, and an entity only once a ray reached it.
  * A cell that a ray later crosses as empty is corrected, so a mined or changed block is forgotten
  * the moment the villager looks at the hole.
@@ -68,6 +69,8 @@ public final class VisualMemory {
     Lugar place;
     long depthTick = Long.MIN_VALUE;
     int depth;
+    long shelterTick = Long.MIN_VALUE;
+    boolean shelter;
 
     public static final class SeenBlock {
         public final BlockPos pos;

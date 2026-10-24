@@ -63,16 +63,34 @@ import java.util.function.Predicate;
  * trees. Out on the land with no tree in sight it explores like a player ({@link Explorar}). A tree is felled whole, one
  * trunk at a time, the way a player does it: standing beside the trunk it keeps the bottom log and cuts the logs above
  * it as high as it reaches from the ground, then hops onto that bottom log (a natural step) to reach the higher ones,
- * sets a block under its feet only when even that does not reach (and takes it back), and cuts the bottom log last,
- * from beside it, never from on top of it. Then it gathers every log that fell before going anywhere else. A thick
- * 2x2 trunk is felled the older way, from the bottom up, standing in the cut trunk.
+ * and for a tall trunk (a spruce of thirty logs) pillars up the cut column on blocks under its own feet (dirt or cobble
+ * from the bag; with none, planks sawn from a log it cut, or a clod of earth dug nearby), cutting each log as it comes
+ * in reach and the leaves in the way, looks up once more from the top, comes down breaking its own blocks back into
+ * the bag, and cuts the bottom log last, from beside it, never from on top of it. Then it gathers every log that fell
+ * before going anywhere else. A thick 2x2 trunk waits while a plain one is known, and is felled the older way, from the
+ * bottom up standing in the cut trunk, on its own blocks for the top.
+ * <p>
+ * It never stands at a tree doing nothing: ten seconds without anything changing (feet, bag, trunk, its own blocks,
+ * the cracks in what it hits) and it changes approach, and after a few of those it leaves the rest of that tree, says
+ * why in the log, and goes on to the next.
  */
 public final class Progreso {
     private static final int CRAFT_TICKS = 12;
     private static final int LOGS_TO_START = 5;
     private static final int WOOD_SEARCH = 48;
-    /** A tree it can no longer get anywhere with after this long is left as it is. */
-    private static final int TREE_TICKS = 3000;
+    /** A tree it can no longer get anywhere with after this long is left as it is (a 30-log spruce by hand fits in it). */
+    private static final int TREE_TICKS = 7200;
+    /**
+     * Ticks a felling step may go on with nothing changing (the feet, the bag, the trunk, its own blocks, the cracks
+     * in what it hits) before it changes approach: ten seconds, a player would have tried something else by then.
+     */
+    private static final int STILL_TICKS = 200;
+    /** Changes of approach on one tree before the rest of it is left standing and it goes on to the next one. */
+    private static final int MAX_FAILS = 4;
+    /** Blocks it may stand on under itself to reach the top of a trunk: past the tallest spruce a world grows. */
+    private static final int MAX_PILLAR = 32;
+    /** Leaves it may clear off one tree, to get at the trunk and to have room over its head. */
+    private static final int MAX_LEAVES = 64;
     /** How far from the stump it looks for the logs that fell and the logs of the same trunk. */
     private static final int TREE_REACH = 6;
     /** How far a branch of the same tree reaches out from the trunk (an acacia's crooked arms). */
@@ -163,6 +181,21 @@ public final class Progreso {
         BlockPos rising;
         /** No log of this trunk left that it knows of: gather what fell and come down. */
         boolean felled;
+        /** From the top of its own blocks it looked up the trunk once more since the last cut, before coming down. */
+        boolean lookedFromTop;
+        /** Leaves around the trunk and over its head the watchdog asked it to clear, still to go. */
+        int cutLeaves;
+        /** The watchdog sent it up onto the bottom log even for the lower logs. */
+        boolean forceUp;
+        /** The watchdog: what last changed, how long nothing has, and how many approaches it already changed. */
+        long sig = Long.MIN_VALUE;
+        float lastProgress;
+        int still;
+        int fails;
+        /** Jumps up its own blocks the motor gave up on. */
+        int pillarFails;
+        /** Tries at taking its top block back that failed. */
+        int takeFails;
 
         Tree(BlockPos base, boolean big) {
             this.base = base;
@@ -756,7 +789,20 @@ public final class Progreso {
         exploreTicks = 0;
         explorar.reset();
         BlockPos base = stump(world, log);
-        tree = new Tree(base, thick(world, base));
+        boolean big = thick(world, base);
+        if (big) {
+            // a thick 2x2 trunk is slow and high work: a plain one it knows of comes first
+            BlockPos other = nearestLog(world, villager, memory, now, base);
+            BlockPos otherBase = other == null ? null : stump(world, other);
+            if (otherBase != null && !thick(world, otherBase)) {
+                MCA.LOGGER.info("[Tropeles] {} deja el tronco grueso de {} para después: tala antes el de {}", villager.getName().getString(),
+                        base.toShortString(), otherBase.toShortString());
+                log = other;
+                base = otherBase;
+                big = false;
+            }
+        }
+        tree = new Tree(base, big);
         tree.members.add(log.asLong());
         MCA.LOGGER.info("[Tropeles] {} va a talar el árbol de {}{}", villager.getName().getString(), base.toShortString(), tree.big ? " (tronco grueso)" : "");
         fell(world, villager, memory, now);
@@ -800,9 +846,15 @@ public final class Progreso {
             return false;
         }
         BlockPos feet = villager.getBlockPos();
+        // never standing there doing nothing: ten seconds without anything changing and it tries another way
+        watchdog(world, villager, t, now);
         if (motor.midStep(villager)) {
             // up a block of its own in the trunk, or onto the bottom log: the jump finishes before anything else
-            motor.step(world, villager, t.rising != null ? t.rising.up() : motorGoal != null ? motorGoal : feet, false, true);
+            if (t.rising != null) {
+                motor.pillarStep(world, villager, t.rising.up());
+            } else {
+                motor.step(world, villager, motorGoal != null ? motorGoal : feet, false, true);
+            }
             return true;
         }
         if (t.rising != null) {
@@ -819,7 +871,7 @@ public final class Progreso {
             return true;
         }
         if (++t.ticks > TREE_TICKS) {
-            t.felled = true;
+            leaveTree(world, villager, t, now, "lleva demasiado rato con este árbol");
         }
         if (!t.felled) {
             if (t.next == null || --t.nextAt <= 0 || !world.getBlockState(t.next).isIn(BlockTags.LOGS)) {
@@ -832,6 +884,14 @@ public final class Progreso {
                 return true;
             }
             if (!t.big && t.next.equals(t.base) && !t.pillar.isEmpty()) {
+                if (!t.lookedFromTop && Motor.settled(villager)) {
+                    // up there before coming down: one more look up the trunk, a log hidden in the crown shows now
+                    lookUp(world, villager, memory, now, t);
+                    memory.doing("mira hacia arriba desde lo alto de sus bloques", now);
+                    t.lookedFromTop = true;
+                    t.next = null;
+                    return true;
+                }
                 // only the bottom log is left: first its own blocks back, then down beside the stump to cut it
                 takeBack(world, villager, memory, now, t);
                 return true;
@@ -880,16 +940,39 @@ public final class Progreso {
             if (r == Hands.Breaker.DONE) {
                 t.cut++;
                 t.cutCells.add(target.asLong());
+                t.fails = 0; // getting somewhere again: the watchdog's count starts over
                 t.lookedUp = false;
+                t.lookedFromTop = false;
+                t.pillarFails = 0;
                 t.next = null;
                 t.walk = 0;
                 t.side = 0;
                 // look into the gap it opened: the next log of the trunk shows there
                 Retina.peek(world, villager, target);
+                if (!t.big && !t.pillar.isEmpty()) {
+                    // up on its own blocks: and on up the trunk, the crown hides the rest of it from below
+                    lookUp(world, villager, memory, now, t);
+                }
                 dropTicks = 8;
             } else if (r == Hands.Breaker.FAILED) {
                 t.side++;
             }
+            return;
+        }
+        if (footed && t.cutLeaves > 0) {
+            // the watchdog's way: the leaves round the trunk and over its head go, then it tries again
+            BlockPos leaf = t.leaves < MAX_LEAVES ? leafNear(world, villager, t, feet) : null;
+            if (leaf != null) {
+                if (cutLeaf(world, villager, memory, now, t, leaf)) {
+                    t.cutLeaves--;
+                }
+                return;
+            }
+            t.cutLeaves = 0;
+        }
+        if (footed && onPillar(t, feet)) {
+            // up on its own blocks: it never walks off them, it goes higher, comes down one, or clears the leaves
+            fromPillar(world, villager, memory, now, t, target, feet);
             return;
         }
         BlockPos stand = standFor(world, villager, t, target, feet);
@@ -897,16 +980,8 @@ public final class Progreso {
         // the leaves are cut only where they stand between it and the log from where it should be: from the bottom
         // log it reaches up past them
         BlockPos leaf = footed && !under && (t.big || there || stand == null) ? leafInTheWay(world, villager, target) : null;
-        if (leaf != null && t.leaves < 24) {
-            Motor.standStill(villager);
-            memory.doing("quitando hojas para llegar al tronco", now);
-            int r = breaker.tick(world, villager, leaf);
-            if (r == Hands.Breaker.DONE) {
-                t.leaves++;
-                Retina.peek(world, villager, leaf);
-            } else if (r == Hands.Breaker.FAILED) {
-                t.side++;
-            }
+        if (leaf != null && t.leaves < MAX_LEAVES) {
+            cutLeaf(world, villager, memory, now, t, leaf);
             return;
         }
         if (stand == null || t.side > 8) {
@@ -914,7 +989,7 @@ public final class Progreso {
             t.next = null;
             t.side = 0;
             if (++t.stuck > 3) {
-                t.felled = true;
+                leaveTree(world, villager, t, now, "no encuentra desde dónde cortar el tronco");
             }
             return;
         }
@@ -924,23 +999,7 @@ public final class Progreso {
             boolean tooHigh = t.big ? target.getY() - feet.getY() >= 5 : target.getY() - villager.getEyeY() > Retina.BLOCK_REACH - 0.3;
             if (inColumn && tooHigh) {
                 // out of reach even from the bottom log: a block under its feet, like a player, never a log
-                if (Hands.buildingBlock(villager).isEmpty() || t.pillar.size() >= 8) {
-                    ignored.put(target.asLong(), now + 2400);
-                    t.next = null;
-                    t.felled = true;
-                    return;
-                }
-                memory.doing("pone un bloque bajo los pies para alcanzar el tronco", now);
-                t.rising = feet.toImmutable();
-                motorGoal = feet.up();
-                Motor.Result r = motor.step(world, villager, feet.up(), false, true);
-                if (r == Motor.Result.BLOCKED) {
-                    t.rising = null;
-                    motor.reset(world, villager);
-                    ignored.put(target.asLong(), now + 2400);
-                    t.next = null;
-                    t.felled = true;
-                }
+                pillarUp(world, villager, memory, now, t, feet);
                 return;
             }
             // standing there and still blind to it: go round
@@ -956,6 +1015,12 @@ public final class Progreso {
             return;
         }
         if (feet.isWithinDistance(stand, 2.5)) {
+            // a hop up needs the room over its head: leaves hanging there go first
+            BlockPos over = footed && stand.getY() > feet.getY() && t.leaves < MAX_LEAVES ? leafOver(world, villager, feet) : null;
+            if (over != null) {
+                cutLeaf(world, villager, memory, now, t, over);
+                return;
+            }
             villager.getNavigation().stop();
             motorGoal = stand;
             if (motor.step(world, villager, stand, false, true) == Motor.Result.BLOCKED) {
@@ -965,6 +1030,318 @@ public final class Progreso {
         } else if (t.walk % 20 == 1 || villager.getNavigation().isIdle()) {
             villager.getNavigation().startMovingTo(stand.getX() + 0.5, stand.getY(), stand.getZ() + 0.5, 0.65);
         }
+    }
+
+    /** One tick of clearing a leaf block off the way to the trunk. True when it is gone. */
+    private boolean cutLeaf(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, Tree t, BlockPos leaf) {
+        Motor.standStill(villager);
+        memory.doing("quitando hojas para llegar al tronco", now);
+        int r = breaker.tick(world, villager, leaf);
+        if (r == Hands.Breaker.DONE) {
+            t.leaves++;
+            Retina.peek(world, villager, leaf);
+            return true;
+        }
+        if (r == Hands.Breaker.FAILED) {
+            t.side++;
+        }
+        return false;
+    }
+
+    /** Standing on its own blocks in the trunk's column (over the first of them). */
+    private static boolean onPillar(Tree t, BlockPos feet) {
+        if (t.pillar.isEmpty()) {
+            return false;
+        }
+        BlockPos low = t.pillar.get(0);
+        return feet.getX() == low.getX() && feet.getZ() == low.getZ() && feet.getY() > low.getY();
+    }
+
+    /**
+     * Up on its own blocks with {@code target} out of its hand's way: one more block under its feet when the log is
+     * higher than it reaches, one of its blocks back (one level down) when the log is below its feet, else the leaves
+     * between it and the log. It never walks off the top.
+     */
+    private void fromPillar(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, Tree t, BlockPos target, BlockPos feet) {
+        Motor.standStill(villager);
+        BlockPos head = feet.up(2);
+        if (!head.equals(target) && world.getBlockState(head).isIn(BlockTags.LOGS)) {
+            // a log of the trunk right over its head that it had not seen in the crown: that one first
+            t.members.add(head.asLong());
+            t.next = head.toImmutable();
+            t.nextAt = 20;
+            return;
+        }
+        if (target.getY() - villager.getEyeY() > Retina.BLOCK_REACH - 0.3) {
+            pillarUp(world, villager, memory, now, t, feet);
+            return;
+        }
+        if (target.getY() < feet.getY()) {
+            // lower than its feet and out of sight from up here: one of its own blocks back, and it looks again
+            memory.doing("baja un bloque de su pilar para alcanzar el tronco", now);
+            t.why = "baja un bloque para alcanzar " + target.toShortString();
+            takeBack(world, villager, memory, now, t);
+            return;
+        }
+        BlockPos leaf = t.leaves < MAX_LEAVES ? leafInTheWay(world, villager, target) : null;
+        if (leaf != null) {
+            cutLeaf(world, villager, memory, now, t, leaf);
+            return;
+        }
+        if (++t.side > 8) {
+            // it cannot get at that one from here: the rest of the trunk first, that one later
+            ignored.put(target.asLong(), now + 1200);
+            t.next = null;
+            t.side = 0;
+        }
+    }
+
+    /**
+     * One more block under its own feet in the trunk's column, the way a player pillars up beside a tall spruce: the
+     * room over its head cleared of leaves first, a block from the bag (or planks sawn from a log it cut, or a clod of
+     * earth dug nearby), then the jump. It leaves the rest of the tree when it cannot go higher.
+     */
+    private void pillarUp(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, Tree t, BlockPos feet) {
+        if (t.pillar.size() >= MAX_PILLAR) {
+            leaveTree(world, villager, t, now, "el tronco sigue más alto de lo que puede subir");
+            return;
+        }
+        BlockPos head = feet.up(2);
+        if (!Mining.passable(world, head)) {
+            BlockState over = world.getBlockState(head);
+            if (over.isIn(BlockTags.LOGS)) {
+                t.members.add(head.asLong());
+                t.next = head.toImmutable();
+                t.nextAt = 20;
+                return;
+            }
+            if (over.isIn(BlockTags.LEAVES) && Obras.natural(over) && t.leaves < MAX_LEAVES) {
+                cutLeaf(world, villager, memory, now, t, head);
+                return;
+            }
+            leaveTree(world, villager, t, now, "no hay sitio sobre su cabeza para subir (" + over.getBlock().getName().getString() + ")");
+            return;
+        }
+        if (!blockToStandOn(world, villager, memory, now, t, feet)) {
+            return;
+        }
+        memory.doing("pone un bloque bajo los pies para alcanzar el tronco", now);
+        t.why = "sube por sus bloques (" + t.pillar.size() + ")";
+        t.rising = feet.toImmutable();
+        motorGoal = feet.up();
+        Motor.Result r = motor.pillarStep(world, villager, feet.up());
+        if (r == Motor.Result.BLOCKED) {
+            t.rising = null;
+            motor.reset(world, villager);
+            if (++t.pillarFails > 2) {
+                leaveTree(world, villager, t, now, "no consigue subir sobre sus bloques");
+            }
+        }
+    }
+
+    /**
+     * A building block in the bag to stand on. None: it saws a log it cut into four planks (two by two in its hands, no
+     * table), and with no log either it digs a clod of earth nearby. True when there is one now.
+     */
+    private boolean blockToStandOn(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, Tree t, BlockPos feet) {
+        if (!Hands.buildingBlock(villager).isEmpty()) {
+            return true;
+        }
+        SimpleInventory inv = villager.getInventory();
+        int slot = Hands.findSlot(inv, Mat.LOG.match);
+        if (slot >= 0) {
+            Item planks = planksFor(inv.getStack(slot).getItem());
+            inv.getStack(slot).decrement(1);
+            give(villager, new ItemStack(planks, 4));
+            villager.swingHand(Hand.MAIN_HAND);
+            memory.doing("hace tablas con un tronco para subirse en ellas", now);
+            MCA.LOGGER.info("[Tropeles] {} no lleva bloques: hace tablas con un tronco para subir por el árbol de {}", villager.getName().getString(), t.base.toShortString());
+            return !Hands.buildingBlock(villager).isEmpty();
+        }
+        BlockPos dirt = Motor.settled(villager) ? dirtNear(world, villager, t, feet, now) : null;
+        if (dirt == null) {
+            leaveTree(world, villager, t, now, "no tiene bloques para subir y no hay tierra a mano");
+            return false;
+        }
+        Motor.standStill(villager);
+        memory.doing("cava un bloque de tierra para subirse en él", now);
+        int r = breaker.tick(world, villager, dirt);
+        if (r == Hands.Breaker.DONE) {
+            Hands.collect(world, villager, dirt, 2.0);
+        } else if (r == Hands.Breaker.FAILED) {
+            ignored.put(dirt.asLong(), now + 1200);
+        }
+        return false;
+    }
+
+    /** Natural earth in reach and in sight, open on top, never under its own feet nor under the trunk or right by it. */
+    @Nullable
+    private BlockPos dirtNear(ServerWorld world, VillagerEntityMCA villager, Tree t, BlockPos feet, long now) {
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+        Vec3d eye = villager.getEyePos();
+        for (BlockPos cell : BlockPos.iterate(feet.add(-3, -2, -3), feet.add(3, 0, 3))) {
+            if (cell.equals(feet.down()) || Math.abs(cell.getX() - t.base.getX()) <= 1 && Math.abs(cell.getZ() - t.base.getZ()) <= 1) {
+                continue;
+            }
+            BlockState state = world.getBlockState(cell);
+            if (!(state.isOf(Blocks.GRASS_BLOCK) || state.isOf(Blocks.DIRT) || state.isOf(Blocks.COARSE_DIRT) || state.isOf(Blocks.PODZOL)
+                    || state.isOf(Blocks.ROOTED_DIRT) || state.isOf(Blocks.MYCELIUM))) {
+                continue;
+            }
+            double distance = eye.squaredDistanceTo(Vec3d.ofCenter(cell));
+            if (distance >= bestDistance || ignored.getOrDefault(cell.asLong(), 0L) > now || !Mining.passable(world, cell.up())
+                    || Obras.kind(world, villager, cell) != Obras.Kind.NATURE || Retina.visibleFace(world, villager, cell, Retina.BLOCK_REACH) == null) {
+                continue;
+            }
+            best = cell.toImmutable();
+            bestDistance = distance;
+        }
+        return best;
+    }
+
+    /** Natural leaves round the trunk's column and round its own head, in reach and in sight, the nearest first. */
+    @Nullable
+    private static BlockPos leafNear(ServerWorld world, VillagerEntityMCA villager, Tree t, BlockPos feet) {
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+        Vec3d eye = villager.getEyePos();
+        for (BlockPos cell : BlockPos.iterate(feet.add(-2, 0, -2), feet.add(2, 3, 2))) {
+            boolean byTrunk = Math.abs(cell.getX() - t.base.getX()) <= 1 && Math.abs(cell.getZ() - t.base.getZ()) <= 1;
+            boolean byHead = Math.abs(cell.getX() - feet.getX()) <= 1 && Math.abs(cell.getZ() - feet.getZ()) <= 1;
+            if (!byTrunk && !byHead) {
+                continue;
+            }
+            BlockState state = world.getBlockState(cell);
+            double distance = eye.squaredDistanceTo(Vec3d.ofCenter(cell));
+            if (!state.isIn(BlockTags.LEAVES) || !Obras.natural(state) || distance >= bestDistance
+                    || Retina.visibleFace(world, villager, cell, Retina.BLOCK_REACH) == null) {
+                continue;
+            }
+            best = cell.toImmutable();
+            bestDistance = distance;
+        }
+        return best;
+    }
+
+    /** Natural leaves right over its head (two blocks over its feet), in sight: what stops a hop or a jump up. */
+    @Nullable
+    private static BlockPos leafOver(ServerWorld world, VillagerEntityMCA villager, BlockPos feet) {
+        BlockPos head = feet.up(2);
+        BlockState state = world.getBlockState(head);
+        if (!state.isIn(BlockTags.LEAVES) || !Obras.natural(state) || Retina.visibleFace(world, villager, head, Retina.BLOCK_REACH) == null) {
+            return null;
+        }
+        return head.toImmutable();
+    }
+
+    /**
+     * Every felling step is watched: the feet, the bag, the trunk, its own blocks and the cracks in what it hits. Ten
+     * seconds with none of them changing and it changes approach: the other side of the trunk and the leaves cut, then
+     * up onto the stump and its own blocks, then that log left for later; after {@value #MAX_FAILS} it leaves the
+     * rest of the tree, says why in the log, and goes on to the next one.
+     */
+    private void watchdog(ServerWorld world, VillagerEntityMCA villager, Tree t, long now) {
+        long sig = villager.getBlockPos().asLong();
+        sig = sig * 31 + t.cutCells.size();
+        sig = sig * 31 + t.leaves;
+        sig = sig * 31 + t.pillar.size();
+        sig = sig * 31 + bagCount(villager);
+        float progress = breaker.target() == null ? 0.0F : breaker.progress();
+        boolean changed = sig != t.sig || progress > t.lastProgress + 1.0E-4F;
+        t.sig = sig;
+        t.lastProgress = progress;
+        if (changed) {
+            t.still = 0;
+            return;
+        }
+        if (++t.still < STILL_TICKS) {
+            return;
+        }
+        t.still = 0;
+        t.fails++;
+        String doing = Retina.memory(villager).doing();
+        String at = t.felled ? "recogiendo" : t.next == null ? "sin tronco elegido" : "con el tronco de " + t.next.toShortString();
+        breaker.reset(world, villager);
+        motor.reset(world, villager);
+        villager.getNavigation().stop();
+        t.rising = null;
+        if (t.felled) {
+            if (!t.pillar.isEmpty()) {
+                BlockPos left = t.pillar.remove(t.pillar.size() - 1);
+                MCA.LOGGER.info("[Tropeles] {} lleva 10 s sin poder recoger su bloque de {} ({}): lo deja", villager.getName().getString(), left.toShortString(), doing);
+            } else {
+                MCA.LOGGER.info("[Tropeles] {} lleva 10 s sin poder juntar la leña del árbol de {} ({}): sigue", villager.getName().getString(), t.base.toShortString(), doing);
+                t.sweep = Integer.MAX_VALUE / 2;
+            }
+            return;
+        }
+        if (t.fails >= MAX_FAILS) {
+            leaveTree(world, villager, t, now, "lleva " + t.fails + " intentos sin avanzar, " + at + " (" + doing + ")");
+            return;
+        }
+        String change;
+        if (t.fails == 1) {
+            t.side++;
+            t.walk = 0;
+            t.cutLeaves = 8;
+            change = "prueba por otro lado del tronco y quita las hojas";
+        } else if (t.fails == 2) {
+            t.side++;
+            t.walk = 0;
+            t.forceUp = true;
+            t.cutLeaves = 8;
+            change = "se sube al tocón y pone bloques bajo los pies";
+        } else {
+            if (t.next != null && !t.next.equals(t.base)) {
+                ignored.put(t.next.asLong(), now + 1200);
+            }
+            t.side += 2;
+            t.walk = 0;
+            change = "deja ese tronco para después";
+        }
+        t.next = null;
+        MCA.LOGGER.info("[Tropeles] {} lleva 10 s sin avanzar en el árbol de {}, {} ({}): {}", villager.getName().getString(), t.base.toShortString(), at, doing, change);
+    }
+
+    /** Leaves the rest of this tree standing (logged with why) and lets the next tree come: no log of it is chosen for a while. */
+    private void leaveTree(ServerWorld world, VillagerEntityMCA villager, Tree t, long now, String why) {
+        if (t.felled) {
+            return;
+        }
+        int left = 0;
+        for (long packed : t.members) {
+            if (world.getBlockState(BlockPos.fromLong(packed)).isIn(BlockTags.LOGS)) {
+                ignored.put(packed, now + 6000);
+                left++;
+            }
+        }
+        // the logs of its column it saw and had not counted as its own yet
+        for (VisualMemory.SeenBlock seen : Retina.memory(villager).blocks(s -> s.state.isIn(BlockTags.LOGS))) {
+            BlockPos pos = seen.pos;
+            if (Math.abs(pos.getX() - t.base.getX()) <= 1 && Math.abs(pos.getZ() - t.base.getZ()) <= 1 && pos.getY() >= t.base.getY()
+                    && pos.getY() <= t.base.getY() + MAX_PILLAR + 8) {
+                ignored.put(pos.asLong(), now + 6000);
+            }
+        }
+        t.felled = true;
+        t.why = why;
+        t.next = null;
+        t.rising = null;
+        breaker.reset(world, villager);
+        Retina.memory(villager).doing("deja ese árbol: " + why, now);
+        MCA.LOGGER.info("[Tropeles] {} deja el resto del árbol de {} ({} troncos sin cortar): {}; baja, junta lo que cayó y sigue con el siguiente",
+                villager.getName().getString(), t.base.toShortString(), left, why);
+    }
+
+    /** Everything in its bag, counted: a log picked up or a block set down shows as a change. */
+    private static int bagCount(VillagerEntityMCA villager) {
+        SimpleInventory inv = villager.getInventory();
+        int n = 0;
+        for (int i = 0; i < inv.size(); i++) {
+            n += inv.getStack(i).getCount();
+        }
+        return n + villager.getMainHandStack().getCount();
     }
 
     /** Looks up the trunk from where it stands: every cell over what it cut (and the arms beside it) is peeked at. */
@@ -1079,8 +1456,14 @@ public final class Progreso {
             return false;
         }
         BlockPos top = t.pillar.get(t.pillar.size() - 1);
-        if (!world.getBlockState(top).isReplaceable() && Obras.kind(world, villager, top) == Obras.Kind.OWN
-                && Motor.settled(villager) && Retina.visibleFace(world, villager, top, Retina.BLOCK_REACH) != null) {
+        if (world.getBlockState(top).isReplaceable() || Obras.kind(world, villager, top) != Obras.Kind.OWN) {
+            t.pillar.remove(t.pillar.size() - 1); // gone already, or not its own any more
+            return true;
+        }
+        if (!Motor.settled(villager)) {
+            return true; // dropping onto the next one: it lands before it swings again
+        }
+        if (Retina.visibleFace(world, villager, top, Retina.BLOCK_REACH) != null) {
             // its own block comes back into the bag; standing on it, it just drops one block
             Motor.standStill(villager);
             holdBestPick(villager);
@@ -1088,13 +1471,17 @@ public final class Progreso {
             int r = breaker.tick(world, villager, top);
             if (r == Hands.Breaker.DONE) {
                 t.pillar.remove(t.pillar.size() - 1);
+                t.takeFails = 0;
                 dropTicks = 6;
-            } else if (r == Hands.Breaker.FAILED) {
-                t.pillar.clear();
+            } else if (r == Hands.Breaker.FAILED && ++t.takeFails > 3) {
+                t.pillar.remove(t.pillar.size() - 1);
+                t.takeFails = 0;
+                MCA.LOGGER.info("[Tropeles] {} no consigue romper su bloque de {}: lo deja", villager.getName().getString(), top.toShortString());
             }
             return true;
         }
-        t.pillar.remove(t.pillar.size() - 1); // gone already, or out of reach: left where it is
+        t.pillar.remove(t.pillar.size() - 1); // out of reach: left where it is
+        MCA.LOGGER.info("[Tropeles] {} no alcanza a recoger su bloque de {}: lo deja", villager.getName().getString(), top.toShortString());
         return true;
     }
 
@@ -1264,7 +1651,7 @@ public final class Progreso {
             if (inColumn && feet.getY() < log.getY() && fits(world, feet)) {
                 return feet;
             }
-            if (log.getY() > t.base.getY() + GROUND_LOGS) {
+            if (log.getY() > t.base.getY() + GROUND_LOGS || t.forceUp) {
                 // up onto the bottom log it kept; a trunk whose foot someone else cut: in the stump cell under it
                 BlockPos onLog = bottomLog ? t.base.up() : t.base;
                 if (fits(world, onLog)) {
@@ -1308,11 +1695,20 @@ public final class Progreso {
 
     @Nullable
     private BlockPos nearestLog(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now) {
+        return nearestLog(world, villager, memory, now, null);
+    }
+
+    /** The nearest log of a tree it saw, none of {@code avoid}'s (a thick trunk it would rather leave for later). */
+    @Nullable
+    private BlockPos nearestLog(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, @Nullable BlockPos avoid) {
         BlockPos feet = villager.getBlockPos();
         BlockPos best = null;
         double bestScore = Double.MAX_VALUE;
         for (VisualMemory.SeenBlock seen : memory.blocks(s -> s.state.isIn(BlockTags.LOGS))) {
             if (ignored.getOrDefault(seen.pos.asLong(), 0L) > now || !world.getBlockState(seen.pos).isIn(BlockTags.LOGS)) {
+                continue;
+            }
+            if (avoid != null && Math.abs(seen.pos.getX() - avoid.getX()) <= BRANCH_REACH + 1 && Math.abs(seen.pos.getZ() - avoid.getZ()) <= BRANCH_REACH + 1) {
                 continue;
             }
             double distance = Math.sqrt(seen.pos.getSquaredDistance(feet));

@@ -444,6 +444,9 @@ public class OpenAIChatAI implements ChatAIStrategy {
             }
             MCA.LOGGER.info("[Tropeles] {} entendió la orden '{}' ({}): {}", villagerName, intent.command(), intent.argument(),
                     refused ? "se niega" : outcome == null ? "ya lo estaba haciendo" : outcome);
+            net.mca.entity.ai.mente.Recuerdos.anotar(villager, "orden", playerName + " me pidió «" + intent.command()
+                    + (intent.argument().isEmpty() ? "" : " " + intent.argument()) + "»: " + (refused ? "me negué"
+                    : outcome == null ? "ya lo estaba haciendo" : outcome), villager.getBlockPos());
         }
 
         // its own answer, ready now: said when no model answers in time

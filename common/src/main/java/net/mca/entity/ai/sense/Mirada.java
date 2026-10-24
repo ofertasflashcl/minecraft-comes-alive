@@ -8,15 +8,16 @@ import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 
 /**
- * Looking around like a player turning the camera: a sweep of the whole horizon in steps, a glance down at the
- * ground and up at the sky, holding each heading long enough for the whole frame to be scanned. One per villager
- * task; the caller stops walking while it sweeps if it wants a steady look.
+ * Looking around like a player turning the camera: one turn of the whole horizon in a few steps, holding each
+ * heading long enough for the whole frame to be scanned. One per villager task; the caller stops walking while it
+ * sweeps if it wants a steady look.
  * <p>
- * A sweep is {@value #HEADINGS} headings {@value #STEP} degrees apart starting where the head points, at each one a
- * look a little up ({@value #HIGH} degrees of pitch, Minecraft's sign: negative is up) and one a little down
- * ({@value #LOW}), then one look up at the sky
- * ({@value #UP}) and one down at the feet ({@value #DOWN}). Each stop is held {@value #HOLD} ticks with one
- * {@link Retina#look} per tick, so the interlaced bands make one whole frame per stop: 18 stops, 54 ticks.
+ * The view is wide (70 degrees high, about 102 across), so a player looks all round in four turns of the head:
+ * a sweep is {@value #SWEEP_HEADINGS} headings {@value #SWEEP_STEP} degrees apart starting where the head points, each
+ * at a level look a little up ({@value #AROUND_PITCH} degrees of pitch, Minecraft's sign: negative is up: the frame
+ * reaches the ground three steps off and the crowns of the trees). Each stop is held {@value #HOLD} ticks with one
+ * {@link Retina#look} per tick, so the interlaced bands make three whole frames per stop: 4 stops, 36 ticks, where
+ * it used to take 18 stops and spin the head round twice.
  */
 public final class Mirada {
     public static final int HEADINGS = 8;
@@ -25,13 +26,16 @@ public final class Mirada {
     public static final float LOW = 5.0F;
     public static final float UP = -60.0F;
     public static final float DOWN = 45.0F;
-    public static final int HOLD = Retina.BANDS;
+    /** Headings of a sweep: four turns of the head see all round. */
+    public static final int SWEEP_HEADINGS = 4;
+    public static final float SWEEP_STEP = 360.0F / SWEEP_HEADINGS;
+    public static final int HOLD = Retina.BANDS * 3;
     /** The whole-at-once look around is not repeated sooner than this (ticks): it is the costly one. */
     public static final int AROUND_COOLDOWN = 20;
     /** The one pitch of each heading in {@link #lookAround}: a little up, the frame reaches the ground two steps off. */
     public static final float AROUND_PITCH = -5.0F;
 
-    private static final int STOPS = HEADINGS * 2 + 2;
+    private static final int STOPS = SWEEP_HEADINGS;
 
     private int stop = -1;
     private int held;
@@ -105,20 +109,11 @@ public final class Mirada {
     }
 
     private static float yaw(float start, int stop) {
-        if (stop >= HEADINGS * 2) {
-            return MathHelper.wrapDegrees(start + (HEADINGS - 1) * STEP);
-        }
-        return MathHelper.wrapDegrees(start + (stop / 2) * STEP);
+        return MathHelper.wrapDegrees(start + stop * SWEEP_STEP);
     }
 
     private static float pitch(int stop) {
-        if (stop == HEADINGS * 2) {
-            return UP;
-        }
-        if (stop == HEADINGS * 2 + 1) {
-            return DOWN;
-        }
-        return (stop & 1) == 0 ? HIGH : LOW;
+        return AROUND_PITCH;
     }
 
     private static void set(LivingEntity viewer, float yaw, float pitch) {

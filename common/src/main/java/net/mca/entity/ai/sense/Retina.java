@@ -239,6 +239,15 @@ public final class Retina {
             boolean dark = !perceives(light, bodyDistance, night) && !body.isGlowing() && !body.isOnFire();
             return new Pixel(null, null, null, eye.add(dir.multiply(bodyDistance)), bodyDistance, light, dark, sight.water(), dark ? null : body);
         }
+        return blockPixel(world, memory, sight, range, night, tick);
+    }
+
+    /**
+     * The pixel of one exact ray that touched no body, recorded the way every frame of the eye records it: a lit
+     * surface goes into memory and the map, a dark one only marks the map when the sun does not reach it. Shared
+     * with {@link Pantalla}, so both views remember the same things the same way.
+     */
+    static Pixel blockPixel(World world, VisualMemory memory, Sight sight, double range, boolean night, long tick) {
         BlockHitResult hit = sight.hit();
         if (hit == null) {
             return new Pixel(null, null, null, null, range, 15, false, sight.water(), null);
@@ -371,7 +380,7 @@ public final class Retina {
         return state.getCollisionShape(world, pos).isEmpty();
     }
 
-    private static int lightAt(World world, BlockPos pos, Direction face, BlockState state) {
+    static int lightAt(World world, BlockPos pos, Direction face, BlockState state) {
         if (state.getLuminance() > 0) {
             return state.getLuminance();
         }

@@ -71,6 +71,14 @@ public final class Mina {
         return door && size >= 2;
     }
 
+    /**
+     * Still a way it can walk: its work face and its door (when it knows one) have room for the body. A trail like that
+     * is never thrown away; only one that is shut, or that it went too far from, is.
+     */
+    public boolean usable(World world) {
+        return size >= 2 && open(world, size - 1) && (!door || open(world, 0));
+    }
+
     public void clear() {
         size = 0;
         index.clear();

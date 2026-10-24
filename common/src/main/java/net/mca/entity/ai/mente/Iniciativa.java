@@ -52,6 +52,8 @@ final class Iniciativa {
     private long lastLava = Long.MIN_VALUE / 2;
     private long lastCave = Long.MIN_VALUE / 2;
     private float playerHealth = -1;
+    private long lastPlan = Long.MIN_VALUE / 2;
+    private String lastPlanLine = "";
 
     /** One look at whether there is something worth saying (every second). */
     void tick(ServerWorld world, VillagerEntityMCA villager, Voluntad will, @Nullable ProspectingTask task) {
@@ -99,10 +101,36 @@ final class Iniciativa {
         }
     }
 
+    /**
+     * A change of plans said out loud ({@link Voluntad#contar}): to its listener, at most once every
+     * {@value #PLAN_COOLDOWN} ticks and never the same line twice in a row within a minute. False when it kept quiet.
+     */
+    boolean contar(ServerWorld world, VillagerEntityMCA villager, Voluntad will, String line, long now) {
+        if (now - lastPlan < PLAN_COOLDOWN || line.equals(lastPlanLine) && now - lastPlan < 1200) {
+            MCA.LOGGER.info("[Tropeles] {} piensa (sin decirlo): «{}»", villager.getName().getString(), line);
+            return false;
+        }
+        PlayerEntity to = listener(world, villager, will);
+        lastPlan = now;
+        lastPlanLine = line;
+        if (to == null) {
+            MCA.LOGGER.info("[Tropeles] {} piensa en voz alta: «{}»", villager.getName().getString(), line);
+            return false;
+        }
+        MCA.LOGGER.info("[Tropeles] {} le cuenta a {} lo que hace: «{}»", villager.getName().getString(), to.getName().getString(), line);
+        if (to instanceof ServerPlayerEntity player && player.networkHandler != null) {
+            ChatAI.deliver(player, villager, line);
+        }
+        return true;
+    }
+
+    static final int PLAN_COOLDOWN = 160;
+
     /** Says {@code line} in chat as "<Name> line" to {@code to} and those around (server thread). */
     void decir(VillagerEntityMCA villager, PlayerEntity to, String line, long now) {
         lastSaid = now;
         MCA.LOGGER.info("[Tropeles] {} le dice por su cuenta a {}: «{}»", villager.getName().getString(), to.getName().getString(), line);
+        Recuerdos.anotar(villager, "dijo", "le dije a " + to.getName().getString() + " por mi cuenta: «" + line + "»", villager.getBlockPos());
         if (to instanceof ServerPlayerEntity player && player.networkHandler != null) {
             ChatAI.deliver(player, villager, line);
         }

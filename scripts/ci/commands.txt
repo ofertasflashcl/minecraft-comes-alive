@@ -23,9 +23,13 @@ mca-prueba explorar
 mca-prueba pelea-muro
 mca-prueba tala
 mca-prueba puente
+mca-prueba escalera
+mca-prueba techo
+mca-prueba arbol-alto
+mca-prueba vista-lejos
 mca-prueba conectar
 mca-prueba ia-local
 mca-prueba ia-red
-sleep 230
+sleep 290
 mca-prueba resumen
 sleep 2

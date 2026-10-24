@@ -21,7 +21,10 @@ import java.util.Map;
 
 /**
  * Exploring the way a player does it in a new world, from nothing but what its own eyes saw ({@link MapaVisto}).
- * First it stands still and looks all around ({@link Mirada}); then it picks the way it knows least about, out of
+ * Looking for wood, a tree it already saw anywhere within {@value #FAR_TREES} blocks (the map its eyes fill as far as a
+ * player's twelve chunks reach) comes first: it walks straight to the nearest one its legs can get to, with no look
+ * round on the way, and only when it knows of none does it stop to look. A look round is four turns of the head
+ * ({@link Mirada}), the view is wide. Then it picks the way it knows least about, out of
  * sixteen headings, leaning toward open land (and toward trees when it wants wood) and away from water, lava,
  * buildings and ground it already walked, and it keeps going the way it was going rather than turning back and
  * forth. It walks to a point 24 to 40 blocks out on land its eye saw (or just that way when it saw none), with its
@@ -67,6 +70,14 @@ public final class Explorar {
     /** A pause in the calls longer than this means a new search from where it stands. */
     private static final long PAUSE = 400;
     private static final float SPEED = 0.65F;
+    /** How far away a tree it saw may be and still be walked to: a player's twelve chunks of view. */
+    public static final int FAR_TREES = 192;
+    /** A tree seen this far above or below its feet is on other land (down off a cliff, up a mountain). */
+    private static final int TREE_RISE = 16;
+    /** Trees whose way it checks with its legs' path finder each time it chooses one. */
+    private static final int TREE_TRIES = 4;
+    /** Walking to a tree, a nearer one that shows up on the way is taken when it is this much nearer. */
+    private static final int NEARER = 8;
 
     private final Mirada mirada = new Mirada();
     /** Cells (by {@link MapaVisto#CELL} columns) of waypoints and cues that led nowhere, until when. */
@@ -160,7 +171,10 @@ public final class Explorar {
             return !exhausted;
         }
         if (waypoint == null) {
-            sweep(villager);
+            // a tree it already saw comes before looking round: no turning the head for what it knows is there
+            if (!goToKnownTree(world, villager, mapa, feet, now, "recuerda")) {
+                sweep(villager);
+            }
             return true;
         }
         legTicks++;
@@ -178,21 +192,31 @@ public final class Explorar {
             sweep(villager);
             return true;
         }
-        if (!cue && busca == Busca.ARBOLES && legTicks % 40 == 0) {
-            // a canopy that came into view on the way: that is where the wood is, the leg can wait
-            BlockPos seen = treeCue(villager, mapa, feet, now);
-            if (seen != null) {
+        if (busca == Busca.ARBOLES && legTicks % 40 == 0) {
+            // a canopy that came into view on the way: that is where the wood is, the leg can wait (walking to a tree
+            // already, only one a good deal nearer)
+            BlockPos seen = treeCue(world, villager, mapa, feet, now, false);
+            if (seen != null && (!cue || seen.getSquaredDistance(feet) < sq(Math.sqrt(waypoint.getSquaredDistance(feet)) - NEARER))) {
                 MCA.LOGGER.info("[Tropeles] {} ve copas de árboles hacia {} mientras camina: va hacia ellas", name(villager), seen.toShortString());
                 go(seen, true, feet);
                 return true;
             }
         }
         if (legTicks >= LEG_TICKS) {
-            if (legFrom.isWithinDistance(feet, 4)) {
+            boolean got = !legFrom.isWithinDistance(feet, 4);
+            if (cue && got) {
+                // on its way to a tree it saw and getting closer: no stopping to look round, it walks on
+                legTicks = 0;
+                legFrom = feet;
+                return true;
+            }
+            if (!got) {
                 fail(waypoint, now); // ten seconds and it got nowhere that way
             }
             waypoint = null;
-            sweep(villager);
+            if (!goToKnownTree(world, villager, mapa, feet, now, "sigue hacia")) {
+                sweep(villager);
+            }
             return true;
         }
         if (legTicks == 1 || villager.getNavigation().isIdle() && legTicks % 10 == 0) {
@@ -205,7 +229,9 @@ public final class Explorar {
                 MCA.LOGGER.info("[Tropeles] {} no encuentra camino hacia {}: mira otra vez", name(villager), waypoint.toShortString());
                 fail(waypoint, now);
                 waypoint = null;
-                sweep(villager);
+                if (!goToKnownTree(world, villager, mapa, feet, now, "prueba con")) {
+                    sweep(villager);
+                }
                 return true;
             }
         }
@@ -240,7 +266,7 @@ public final class Explorar {
     private void plan(ServerWorld world, VillagerEntityMCA villager, MapaVisto mapa, BlockPos feet, long now) {
         failed.values().removeIf(until -> until < now);
         if (busca == Busca.ARBOLES) {
-            BlockPos seen = treeCue(villager, mapa, feet, now);
+            BlockPos seen = treeCue(world, villager, mapa, feet, now, true);
             if (seen != null) {
                 MCA.LOGGER.info("[Tropeles] {} ve copas de árboles hacia {} (a {} bloques): va a verlas de cerca", name(villager),
                         seen.toShortString(), (int) Math.sqrt(seen.getSquaredDistance(feet)));
@@ -411,11 +437,22 @@ public final class Explorar {
      * first. The canopy is what shows from far away; the trunk comes into view on the way.
      */
     @Nullable
-    private BlockPos treeCue(VillagerEntityMCA villager, MapaVisto mapa, BlockPos feet, long now) {
-        for (BlockPos tree : mapa.trees(feet, radius)) {
-            if (!failedAt(tree, now) && inRing(tree.getX(), tree.getZ()) && Math.abs(tree.getY() - feet.getY()) <= 16
-                    && !tree.isWithinDistance(feet, 3)) {
+    private BlockPos treeCue(ServerWorld world, VillagerEntityMCA villager, MapaVisto mapa, BlockPos feet, long now, boolean checkWay) {
+        int tries = 0;
+        for (BlockPos tree : mapa.trees(feet, FAR_TREES)) {
+            if (failedAt(tree, now) || Math.abs(tree.getY() - feet.getY()) > TREE_RISE || tree.isWithinDistance(feet, 3)
+                    || !world.isChunkLoaded(tree.getX() >> 4, tree.getZ() >> 4)) {
+                continue;
+            }
+            if (!checkWay) {
                 return tree;
+            }
+            if (reachable(villager, feet, tree)) {
+                return tree;
+            }
+            fail(tree, now); // its legs find no way there: not that one for a while
+            if (++tries >= TREE_TRIES) {
+                break;
             }
         }
         VisualMemory memory = Retina.memory(villager);
@@ -438,6 +475,51 @@ public final class Explorar {
         // under the leaves, at its own level: the path finder takes it as close as the ground goes
         BlockPos ground = mapa.land(best.getX(), best.getZ());
         return ground != null && ground.getY() < best.getY() ? ground : new BlockPos(best.getX(), feet.getY(), best.getZ());
+    }
+
+    /**
+     * Its legs can get to {@code tree}, or a good deal closer to it: the path finder its navigation walks by, from
+     * where it stands, over loaded land (a far tree's path ends short of it, and gets on from there).
+     */
+    private static boolean reachable(VillagerEntityMCA villager, BlockPos feet, BlockPos tree) {
+        if (!villager.isOnGround()) {
+            return true; // mid-jump or swimming the path finder cannot judge: its legs will tell on the way
+        }
+        net.minecraft.entity.ai.pathing.Path path = villager.getNavigation().findPathTo(tree, 2);
+        if (path == null || path.getLength() == 0) {
+            return false;
+        }
+        if (path.reachesTarget()) {
+            return true;
+        }
+        BlockPos end = path.getNodePos(path.getLength() - 1);
+        double before = Math.sqrt(feet.getSquaredDistance(tree));
+        double after = Math.sqrt(end.getSquaredDistance(tree));
+        return after <= 6 || after < before - 12;
+    }
+
+    /**
+     * Walks to the nearest tree it saw that its legs can get to, if any. True when it is on its way. The log says
+     * which and how far, and {@code verb} what led to it.
+     */
+    private boolean goToKnownTree(ServerWorld world, VillagerEntityMCA villager, MapaVisto mapa, BlockPos feet, long now, String verb) {
+        if (busca != Busca.ARBOLES) {
+            return false;
+        }
+        BlockPos tree = treeCue(world, villager, mapa, feet, now, true);
+        if (tree == null) {
+            return false;
+        }
+        MCA.LOGGER.info("[Tropeles] {} {} un árbol que vio en {} (a {} bloques): va directo, sin mirar alrededor", name(villager), verb,
+                tree.toShortString(), (int) Math.sqrt(tree.getSquaredDistance(feet)));
+        sweeping = false;
+        mirada.stop();
+        go(tree, true, feet);
+        return true;
+    }
+
+    private static double sq(double v) {
+        return v <= 0 ? 0 : v * v;
     }
 
     /** How much of the ring around where the search began it has seen, 0 to 1. */

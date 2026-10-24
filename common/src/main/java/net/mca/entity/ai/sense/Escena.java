@@ -45,6 +45,10 @@ import java.util.Set;
  * clustered by nearness; beings of one kind are counted together, people are named one by one. A {@link Cosa}'s
  * {@code nombre} is the Spanish noun without article ("roble", "bosque", "agua", "vaca", "mineral de hierro"), or
  * the person's name; {@code donde} is the nearest part of it and {@code distancia} the distance to that part.
+ * <p>
+ * Past {@link #MAP_RADIUS}, out to {@link #FAR_RADIUS}, the far land its {@link Pantalla} drew onto the map is named
+ * too: woods and single trees, water and lakes, buildings and villages, mountains ({@link #MONTANA}), each group once,
+ * by its nearest cell.
  */
 public final class Escena {
     /** One named thing in view or seen lately. */
@@ -63,11 +67,20 @@ public final class Escena {
     public static final String PERSONA = "persona";
     public static final String MINERAL = "mineral";
     public static final String COFRE = "cofre";
+    /** High land far off: a mountain or a hill, seen by the {@link Pantalla}. */
+    public static final String MONTANA = "montana";
 
     /** Trees from this many on are a forest. */
     public static final int FOREST = 6;
     /** How far the map's cells count (blocks). */
     public static final int MAP_RADIUS = 48;
+    /**
+     * Past {@link #MAP_RADIUS} and out to here (a player's 12 chunks), the far land the {@link Pantalla} drew onto the
+     * map: woods, single trees, water, villages and high land, each group with its direction and distance.
+     */
+    public static final int FAR_RADIUS = Pantalla.FAR;
+    /** Land this much higher than the feet, far off, is a mountain. */
+    public static final int MOUNTAIN = 16;
     /** A building is at least this many made blocks seen together. */
     public static final int BUILDING = 10;
     /** At most this many things in {@link #describe(boolean)}. */
@@ -281,6 +294,7 @@ public final class Escena {
         }
 
         beings(world, b, memory, viewer, now, maxAge);
+        far(b, mapa, feet, now, maxAge);
 
         // the ground under its feet and the lie of the land, felt and seen
         BlockState under = world.getBlockState(feet.down());
@@ -493,6 +507,134 @@ public final class Escena {
             case "azalea", "flowering_azalea" -> new String[]{"un árbol de azalea", "árboles de azalea", "an azalea tree", "azalea trees", "azalea"};
             default -> new String[]{"un árbol", "árboles", "a tree", "trees", "árbol"};
         };
+    }
+
+    // ---------------------------------------------------------------- far off
+
+    /**
+     * What the far view put on the map between {@link #MAP_RADIUS} and {@link #FAR_RADIUS}: cells that showed trees,
+     * water, made blocks or high land, joined into groups of touching cells (two cells apart at most), each named
+     * once by its nearest cell.
+     */
+    private static void far(Builder b, MapaVisto mapa, BlockPos feet, long now, int maxAge) {
+        List<MapaVisto.Celda> trees = new ArrayList<>();
+        List<MapaVisto.Celda> water = new ArrayList<>();
+        List<MapaVisto.Celda> built = new ArrayList<>();
+        List<MapaVisto.Celda> high = new ArrayList<>();
+        long inner = (long) MAP_RADIUS * MAP_RADIUS;
+        for (MapaVisto.Celda c : mapa.cells(feet, FAR_RADIUS)) {
+            long dx = c.x() - feet.getX();
+            long dz = c.z() - feet.getZ();
+            if (dx * dx + dz * dz <= inner || now - c.lastSeen() > maxAge) {
+                continue;
+            }
+            int f = c.flags();
+            if ((f & MapaVisto.TREE) != 0) {
+                trees.add(c);
+            }
+            if ((f & MapaVisto.WATER) != 0) {
+                water.add(c);
+            }
+            if ((f & MapaVisto.BUILT) != 0) {
+                built.add(c);
+            }
+            int top = c.surface() != Integer.MIN_VALUE ? c.surface() : c.land() != null ? c.land().getY() : Integer.MIN_VALUE;
+            if (top != Integer.MIN_VALUE && top - feet.getY() >= MOUNTAIN) {
+                high.add(c);
+            }
+        }
+        for (List<MapaVisto.Celda> wood : groups(trees)) {
+            MapaVisto.Celda near = nearestCell(b, wood, feet);
+            int n = Math.max(1, (wood.size() + 2) / 3);
+            BlockPos at = near.center(feet.getY());
+            if (wood.size() >= 10) {
+                b.add(ARBOL, "bosque", Math.max(FOREST, n), at, lastSeen(wood), Words.of("un bosque", "bosques", "a forest", "forests"));
+            } else {
+                b.add(ARBOL, "árbol", n, at, lastSeen(wood), Words.of("un árbol", "árboles", "a tree", "trees"));
+            }
+        }
+        for (List<MapaVisto.Celda> pool : groups(water)) {
+            MapaVisto.Celda near = nearestCell(b, pool, feet);
+            boolean lake = pool.size() >= 12;
+            b.add(AGUA, lake ? "lago" : "agua", 1, near.center(feet.getY()), lastSeen(pool),
+                    lake ? Words.of("un lago", "lagos", "a lake", "lakes") : Words.mass("agua", "water"));
+        }
+        for (List<MapaVisto.Celda> place : groups(built)) {
+            if (place.size() < 2) {
+                continue; // one made block far off is not much of a building
+            }
+            MapaVisto.Celda near = nearestCell(b, place, feet);
+            boolean village = place.size() >= 8;
+            b.add(CONSTRUCCION, village ? "aldea" : "construcción", 1, near.center(feet.getY()), lastSeen(place),
+                    village ? Words.of("una aldea", "aldeas", "a village", "villages") : Words.of("una construcción", "construcciones", "a building", "buildings"));
+        }
+        for (List<MapaVisto.Celda> hill : groups(high)) {
+            if (hill.size() < 4) {
+                continue;
+            }
+            MapaVisto.Celda peak = hill.get(0);
+            for (MapaVisto.Celda c : hill) {
+                if (c.surface() > peak.surface()) {
+                    peak = c;
+                }
+            }
+            BlockPos at = peak.surface() != Integer.MIN_VALUE ? new BlockPos(peak.x(), peak.surface(), peak.z()) : peak.center(feet.getY());
+            b.add(MONTANA, "montaña", 1, at, lastSeen(hill), Words.of("una montaña", "montañas", "a mountain", "mountains"));
+        }
+    }
+
+    private static MapaVisto.Celda nearestCell(Builder b, List<MapaVisto.Celda> cells, BlockPos feet) {
+        MapaVisto.Celda best = cells.get(0);
+        double bd = Double.MAX_VALUE;
+        for (MapaVisto.Celda c : cells) {
+            double d = b.distance(c.center(feet.getY()));
+            if (d < bd) {
+                bd = d;
+                best = c;
+            }
+        }
+        return best;
+    }
+
+    private static long lastSeen(List<MapaVisto.Celda> cells) {
+        long last = Long.MIN_VALUE;
+        for (MapaVisto.Celda c : cells) {
+            last = Math.max(last, c.lastSeen());
+        }
+        return last;
+    }
+
+    /** Cells joined into groups when they lie within two cells of each other. */
+    private static List<List<MapaVisto.Celda>> groups(List<MapaVisto.Celda> cells) {
+        Map<Long, MapaVisto.Celda> left = new HashMap<>();
+        for (MapaVisto.Celda c : cells) {
+            left.put(BlockPos.asLong(Math.floorDiv(c.x(), MapaVisto.CELL), 0, Math.floorDiv(c.z(), MapaVisto.CELL)), c);
+        }
+        List<List<MapaVisto.Celda>> out = new ArrayList<>();
+        while (!left.isEmpty()) {
+            Long start = left.keySet().iterator().next();
+            List<MapaVisto.Celda> group = new ArrayList<>();
+            List<Long> open = new ArrayList<>();
+            open.add(start);
+            group.add(left.remove(start));
+            while (!open.isEmpty()) {
+                long key = open.remove(open.size() - 1);
+                int x = BlockPos.unpackLongX(key);
+                int z = BlockPos.unpackLongZ(key);
+                for (int dx = -2; dx <= 2; dx++) {
+                    for (int dz = -2; dz <= 2; dz++) {
+                        long next = BlockPos.asLong(x + dx, 0, z + dz);
+                        MapaVisto.Celda c = left.remove(next);
+                        if (c != null) {
+                            group.add(c);
+                            open.add(next);
+                        }
+                    }
+                }
+            }
+            out.add(group);
+        }
+        return out;
     }
 
     // ---------------------------------------------------------------- beings
@@ -1003,6 +1145,7 @@ public final class Escena {
             case PERSONA -> es ? "No veo a nadie por aquí." : "I don't see anyone around here.";
             case MINERAL -> es ? "No veo minerales por aquí." : "I don't see any ores around here.";
             case COFRE -> es ? "No veo cofres por aquí." : "I don't see any chests around here.";
+            case MONTANA -> es ? "No veo montañas desde aquí." : "I don't see any mountains from here.";
             default -> es ? "No veo nada de eso." : "I don't see anything like that.";
         };
     }

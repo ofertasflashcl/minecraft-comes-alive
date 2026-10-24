@@ -92,6 +92,10 @@ public final class Pruebas {
                 case "conectar" -> start(new Conectar(world));
                 case "tala" -> start(new Tala(world));
                 case "puente" -> start(new Puente(world));
+                case "vista-lejos" -> start(new VistaLejos(world));
+                case "arbol-alto" -> start(new ArbolAlto(world));
+                case "escalera" -> start(new Escalera(world));
+                case "techo" -> start(new Techo(world));
                 case "resumen" -> resumen();
                 default -> {
                     ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | progreso | nombre | obras | robo | regalo | arco-cerca | horno | hogar | cultivos | agua-tunel | agua-pozo | explorar | ia-local | ia-red | resumen"));
@@ -913,6 +917,637 @@ public final class Pruebas {
         @Override
         void cleanup() {
             v.discard();
+        }
+    }
+
+    /**
+     * The screen sees as far as a player with 12 chunks: a villager on an open platform, one oak 110 blocks to the
+     * west on its own island, nothing in between. Its {@link net.mca.entity.ai.sense.Pantalla} frames must put a tree
+     * on its map within 6 blocks of the oak and its scene must name a tree about 110 blocks off. A second villager in
+     * a closed, 1-wide stone tunnel must see no farther than 48. A third under a planks roof with the open sky two
+     * steps to the side must feel the planks over its head and never think itself under the ground.
+     */
+    private static final class VistaLejos extends Scenario {
+        private final VillagerEntityMCA v;
+        private final VillagerEntityMCA miner;
+        private final VillagerEntityMCA sheltered;
+        private final BlockPos o;
+        private final BlockPos tree;
+        private final BlockPos tunnel;
+        private final BlockPos porch;
+        private final List<BlockPos> built = new ArrayList<>();
+
+        VistaLejos(ServerWorld world) {
+            super("vista-lejos", world, 1800);
+            o = new BlockPos(5310, 100, 0);
+            tree = new BlockPos(5200, 100, 0);
+            tunnel = new BlockPos(5350, 100, 40);
+            porch = new BlockPos(5330, 100, -24);
+            // the whole line of sight loaded, and nothing else in the way
+            for (int x = tree.getX() - 16; x <= o.getX() + 16; x += 16) {
+                load(world, new BlockPos(x, 100, 0), 4);
+            }
+            load(world, tunnel.east(8), 16);
+            load(world, porch, 8);
+            fill(world, tree.add(-8, -1, -8), o.add(8, 12, 8), Blocks.AIR.getDefaultState());
+            // the platform it stands on, and the oak's island
+            fill(world, o.add(-4, -2, -4), o.add(4, -2, 4), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-4, -1, -4), o.add(4, -1, 4), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, tree.add(-3, -2, -3), tree.add(3, -2, 3), Blocks.STONE.getDefaultState());
+            fill(world, tree.add(-3, -1, -3), tree.add(3, -1, 3), Blocks.GRASS_BLOCK.getDefaultState());
+            Pruebas.tree(world, tree, 5);
+            // a closed stone tunnel, one wide, two high, sixteen long
+            fill(world, tunnel.add(-2, -2, -2), tunnel.add(18, 3, 2), Blocks.STONE.getDefaultState());
+            fill(world, tunnel, tunnel.add(15, 1, 0), Blocks.AIR.getDefaultState());
+            // a planks porch roof over the head, open on every side
+            fill(world, porch.add(-3, -2, -3), porch.add(3, -2, 3), Blocks.STONE.getDefaultState());
+            fill(world, porch.add(-3, -1, -3), porch.add(3, -1, 3), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, porch.add(-3, 0, -3), porch.add(3, 4, 3), Blocks.AIR.getDefaultState());
+            for (BlockPos pos : BlockPos.iterate(porch.add(-1, 3, -1), porch.add(1, 3, 1))) {
+                world.setBlockState(pos, Blocks.OAK_PLANKS.getDefaultState(), 2);
+                Obras.placedByPlayer(world, pos);
+                built.add(pos.toImmutable());
+            }
+            v = villager(world, o, Direction.WEST, "Vista Lejos");
+            v.setAiDisabled(true);
+            face(v, 90.0F, 0.0F);
+            miner = villager(world, tunnel, Direction.EAST, "Vista Tunel");
+            miner.setAiDisabled(true);
+            face(miner, -90.0F, 0.0F);
+            sheltered = villager(world, porch, Direction.NORTH, "Vista Alero");
+            sheltered.setAiDisabled(true);
+        }
+
+        @Override
+        Boolean step() {
+            net.mca.entity.ai.sense.Pantalla far = net.mca.entity.ai.sense.Pantalla.of(v);
+            net.mca.entity.ai.sense.Pantalla near = net.mca.entity.ai.sense.Pantalla.of(miner);
+            far.step(world, v);
+            near.step(world, miner);
+            if (ticks % 100 == 0) {
+                MCA.LOGGER.info("PRUEBA vista-lejos t=" + ticks + ": " + state());
+            }
+            if (far.frames() < 3 || near.frames() < 3) {
+                return null;
+            }
+            List<BlockPos> seen = Retina.memory(v).mapa().trees(tree, 6);
+            net.mca.entity.ai.sense.Escena.Cosa named = null;
+            for (net.mca.entity.ai.sense.Escena.Cosa c : net.mca.entity.ai.sense.Escena.of(world, v, 1200).cosas()) {
+                if (net.mca.entity.ai.sense.Escena.ARBOL.equals(c.tipo()) && (named == null || Math.abs(c.distancia() - 110) < Math.abs(named.distancia() - 110))) {
+                    named = c;
+                }
+            }
+            boolean onMap = !seen.isEmpty();
+            boolean inScene = named != null && Math.abs(named.distancia() - 110) <= 12;
+            boolean wide = far.lastRange() > 48;
+            boolean narrow = near.lastRange() <= 48 && near.range() <= 48;
+            net.mca.entity.ai.sense.Tacto.Toque roof = net.mca.entity.ai.sense.Tacto.techo(world, sheltered);
+            boolean felt = roof != null && roof.state().isOf(Blocks.OAK_PLANKS);
+            boolean house = Entorno.lugar(world, sheltered) != net.mca.entity.ai.sense.Lugar.BAJO_TIERRA && !Entorno.bajoTierra(world, sheltered)
+                    && Entorno.refugio(world, sheltered);
+            boolean passed = onMap && inScene && wide && narrow && felt && house;
+            if (!passed && far.frames() < 8) {
+                return null; // a few more frames: a thin trunk far off can take some to be caught
+            }
+            far.save(world, v);
+            check(name, passed, "árbol en el mapa: " + (onMap ? seen.get(0).toShortString() : "no") + ", en la escena: "
+                    + (named == null ? "no" : named.nombre() + " a " + fmt(named.distancia()) + " " + named.direccion())
+                    + ", alcance afuera " + fmt(far.lastRange()) + ", alcance en el túnel " + fmt(near.lastRange()) + " (lo más lejano " + fmt(near.lastFarthest()) + ")"
+                    + ", techo: " + (roof == null ? "nada" : roof.state().getBlock().getName().getString() + " a " + roof.distancia())
+                    + ", bajo el alero: " + Entorno.lugar(world, sheltered).palabra() + (house ? "" : " (¡se cree bajo tierra!)")
+                    + "; coste afuera: " + far.costLine() + "; coste en el túnel: " + near.costLine()
+                    + "; ve: " + far.resumen(world, true) + "; toca: " + net.mca.entity.ai.sense.Tacto.describeOverhead(sheltered, true)
+                    + "; imagen " + net.mca.entity.ai.sense.Pantalla.path(world, v));
+            return passed;
+        }
+
+        @Override
+        String state() {
+            net.mca.entity.ai.sense.Pantalla far = net.mca.entity.ai.sense.Pantalla.get(v);
+            net.mca.entity.ai.sense.Pantalla near = net.mca.entity.ai.sense.Pantalla.get(miner);
+            return "afuera " + (far == null ? "sin pantalla" : far.frames() + " cuadros, alcance " + fmt(far.range()) + ", " + far.costLine())
+                    + "; túnel " + (near == null ? "sin pantalla" : near.frames() + " cuadros, alcance " + fmt(near.range()))
+                    + "; celdas en el mapa " + Retina.memory(v).mapa().size();
+        }
+
+        @Override
+        void cleanup() {
+            v.discard();
+            miner.discard();
+            sheltered.discard();
+            fill(world, tree.add(-3, -1, -3), tree.add(3, 6, 3), Blocks.AIR.getDefaultState());
+            for (BlockPos pos : built) {
+                Obras.broken(world, pos);
+            }
+        }
+    }
+
+    /**
+     * A tall spruce the way a world grows them: a 1x1 trunk sixteen logs high inside a spruce's crown, on open grass, and
+     * a villager with nothing but sixteen dirt. It must fell all of it like a player: the bottom log kept and cut last,
+     * up onto it and up blocks of its own for the top, every one of those blocks taken back, every log in its bag, and
+     * never standing there doing nothing (feet, bag and trunk all still) for more than fifteen seconds.
+     */
+    private static final class ArbolAlto extends Scenario {
+        private static final int HEIGHT = 16;
+        private static final int MAX_IDLE = 300;
+        private final net.mca.entity.ai.body.Progreso progreso = new net.mca.entity.ai.body.Progreso();
+        private final VillagerEntityMCA v;
+        private final BlockPos o;
+        private final BlockPos base;
+        private final List<BlockPos> trunk = new ArrayList<>();
+        private final java.util.Set<BlockPos> treeCells = new java.util.HashSet<>();
+        private final Map<BlockPos, BlockState> before = new LinkedHashMap<>();
+        /** Cells that held, at some tick, a block that was neither there before nor of the tree. */
+        private final java.util.Set<BlockPos> foreign = new java.util.HashSet<>();
+        private final java.util.Set<BlockPos> cut = new java.util.HashSet<>();
+        private final List<String> order = new ArrayList<>();
+        private int lastLogAt = -1;
+        private int highest;
+        private Vec3d lastPos;
+        private int lastBag = -1;
+        private long lastColumn;
+        private int idle;
+        private int maxIdle;
+        private int maxIdleAt;
+        private String maxIdleState = "";
+
+        ArbolAlto(ServerWorld world) {
+            super("arbol-alto", world, 4000);
+            o = new BlockPos(6000, 100, 0);
+            load(world, o, 16);
+            BlockPos low = o.add(-8, -1, -8);
+            BlockPos high = o.add(8, HEIGHT + 4, 8);
+            fill(world, o.add(-8, -4, -8), o.add(8, -2, 8), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-8, -1, -8), o.add(8, -1, 8), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-8, 0, -8), high, Blocks.AIR.getDefaultState());
+            base = o.add(3, 0, 0);
+            world.setBlockState(base.down(), Blocks.DIRT.getDefaultState(), 2);
+            BlockState leaves = Blocks.SPRUCE_LEAVES.getDefaultState().with(net.minecraft.block.LeavesBlock.DISTANCE, 1);
+            // a spruce's crown: from the fifth log up, wide and narrow rings by turns, narrowing to the top, a cap over it
+            for (int dy = 4; dy <= HEIGHT + 1; dy++) {
+                int r = dy >= HEIGHT ? 0 : dy >= HEIGHT - 4 ? 1 : (dy % 2 == 0 ? 2 : 1);
+                for (int dx = -r; dx <= r; dx++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        if (r == 2 && Math.abs(dx) == 2 && Math.abs(dz) == 2) {
+                            continue;
+                        }
+                        if (dx == 0 && dz == 0 && dy < HEIGHT) {
+                            continue; // the trunk
+                        }
+                        BlockPos leaf = base.add(dx, dy, dz);
+                        world.setBlockState(leaf, leaves, 2);
+                        treeCells.add(leaf);
+                    }
+                }
+            }
+            for (int dy = 0; dy < HEIGHT; dy++) {
+                BlockPos log = base.up(dy);
+                world.setBlockState(log, Blocks.SPRUCE_LOG.getDefaultState(), 2);
+                trunk.add(log);
+                treeCells.add(log);
+            }
+            for (BlockPos pos : BlockPos.iterate(low, high)) {
+                before.put(pos.toImmutable(), world.getBlockState(pos));
+            }
+            v = villager(world, o, Direction.EAST);
+            // free to walk to the tree
+            v.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            v.getInventory().addStack(new ItemStack(Items.DIRT, 16));
+            face(v, -90.0F, 0.0F);
+            Retina.lookAll(world, v);
+            lastPos = v.getPos();
+            highest = v.getBlockY();
+        }
+
+        private static boolean ground(BlockState state) {
+            return state.isOf(Blocks.GRASS_BLOCK) || state.isOf(Blocks.DIRT);
+        }
+
+        private int bag() {
+            var inv = v.getInventory();
+            int n = 0;
+            for (int i = 0; i < inv.size(); i++) {
+                n += inv.getStack(i).getCount();
+            }
+            return n + v.getMainHandStack().getCount();
+        }
+
+        /** The trunk's column as it is now (logs, its blocks, air): a cut or a block set or taken back changes it. */
+        private long column() {
+            long h = 17;
+            for (int dy = -1; dy <= HEIGHT + 1; dy++) {
+                h = h * 31 + net.minecraft.block.Block.getRawIdFromState(world.getBlockState(base.up(dy)));
+            }
+            return h;
+        }
+
+        private void watch() {
+            for (Map.Entry<BlockPos, BlockState> e : before.entrySet()) {
+                BlockPos pos = e.getKey();
+                BlockState now = world.getBlockState(pos);
+                BlockState was = e.getValue();
+                if (now == was || ground(now) && ground(was)) {
+                    continue;
+                }
+                if (treeCells.contains(pos) && (now.isAir() || now.isIn(net.minecraft.registry.tag.BlockTags.LEAVES) || now.isOf(Blocks.SPRUCE_LOG))) {
+                    continue;
+                }
+                foreign.add(pos);
+            }
+            for (BlockPos log : trunk) {
+                if (!cut.contains(log) && !world.getBlockState(log).isOf(Blocks.SPRUCE_LOG)) {
+                    cut.add(log);
+                    order.add((log.getY() - base.getY() + 1) + "@" + ticks);
+                    lastLogAt = log.getY() - base.getY();
+                }
+            }
+            highest = Math.max(highest, v.getBlockY());
+            // standing there doing nothing: the feet, the bag and the trunk all as they were
+            Vec3d pos = v.getPos();
+            int bag = bag();
+            long column = column();
+            if (pos.squaredDistanceTo(lastPos) > 0.0025 || bag != lastBag || column != lastColumn) {
+                lastPos = pos;
+                lastBag = bag;
+                lastColumn = column;
+                idle = 0;
+            } else if (++idle > maxIdle) {
+                maxIdle = idle;
+                maxIdleAt = ticks;
+                if (idle == MAX_IDLE + 1) {
+                    maxIdleState = state();
+                    MCA.LOGGER.info("PRUEBA arbol-alto: lleva " + idle + " ticks quieto a los " + ticks + "; " + maxIdleState);
+                }
+            }
+        }
+
+        @Override
+        Boolean step() {
+            if (!v.isAlive()) {
+                fail(name, "el aldeano murió; " + state());
+                return Boolean.FALSE;
+            }
+            progreso.tick(world, v, (key, args) -> {
+            });
+            watch();
+            if (ticks % 200 == 0) {
+                MCA.LOGGER.info("PRUEBA arbol-alto t=" + ticks + ": " + state());
+            }
+            if (maxIdle > MAX_IDLE * 3) {
+                fail(name, "se quedó parado " + maxIdle + " ticks sin hacer nada; " + state());
+                return Boolean.FALSE;
+            }
+            if (cut.size() < trunk.size()) {
+                return null;
+            }
+            boolean logsLeft = !world.getEntitiesByClass(net.minecraft.entity.ItemEntity.class, new net.minecraft.util.math.Box(base).expand(10, HEIGHT + 4, 10),
+                    e -> e.isAlive() && e.getStack().isIn(net.minecraft.registry.tag.ItemTags.LOGS)).isEmpty();
+            if (logsLeft) {
+                return null; // what fell is picked up before it goes anywhere
+            }
+            boolean bottomLast = lastLogAt == 0;
+            boolean restored = true;
+            List<BlockPos> left = new ArrayList<>();
+            for (BlockPos pos : foreign) {
+                BlockState now = world.getBlockState(pos);
+                BlockState was = before.get(pos);
+                boolean back = now == was || ground(now) && ground(was) || treeCells.contains(pos) && now.isAir();
+                if (!back) {
+                    left.add(pos);
+                }
+                restored &= back;
+            }
+            int logs = v.getInventory().count(Items.SPRUCE_LOG);
+            int dirt = v.getInventory().count(Items.DIRT);
+            boolean passed = bottomLast && restored && logs >= trunk.size() && maxIdle <= MAX_IDLE;
+            check(name, passed, "pino de " + HEIGHT + " troncos talado en " + ticks + " ticks, orden (tronco@tick) " + order + ", el de abajo el último: " + bottomLast
+                    + ", subió hasta " + (highest - base.getY()) + " sobre el tocón, bloques suyos puestos " + foreign.size() + " y dejados " + left
+                    + ", tierra en la mochila " + dirt + "/16, troncos en la mochila " + logs + "/" + trunk.size()
+                    + ", máximo quieto " + maxIdle + " ticks (a los " + maxIdleAt + ")" + (maxIdleState.isEmpty() ? "" : " " + maxIdleState) + "; " + state());
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "en " + v.getBlockPos().toShortString() + ", haciendo: " + Retina.memory(v).doing() + ", cortados " + order
+                    + ", troncos " + v.getInventory().count(Items.SPRUCE_LOG) + ", tierra " + v.getInventory().count(Items.DIRT) + ", " + progreso.debugTree();
+        }
+
+        @Override
+        void cleanup() {
+            v.discard();
+        }
+    }
+
+    // ------------------------------------------------------------------ memory: the way it came, and the roof of a hut
+
+    /**
+     * The walk a miner took earlier, laid into its memories ({@link net.mca.entity.ai.mente.Recuerdos}) one cell a
+     * tick the way its feet would: teleported to the cell, its sense of place judged there the next tick.
+     */
+    private static final class Paseo {
+        private final List<BlockPos> cells;
+        private int at;
+
+        Paseo(List<BlockPos> cells) {
+            this.cells = cells;
+        }
+
+        /** One tick of the walk; true once every cell is remembered. */
+        boolean tick(ServerWorld world, VillagerEntityMCA v, int ticks) {
+            if (at >= cells.size()) {
+                return true;
+            }
+            BlockPos cell = cells.get(at);
+            if ((ticks & 1) == 0) {
+                v.refreshPositionAndAngles(cell.getX() + 0.5, cell.getY(), cell.getZ() + 0.5, v.getYaw(), 0);
+                v.setVelocity(Vec3d.ZERO);
+                return false;
+            }
+            net.mca.entity.ai.mente.Recuerdos.of(world, v).pisado(world, v, cell);
+            at++;
+            return at >= cells.size();
+        }
+    }
+
+    /** Which cells of a box are air: a snapshot to count what was broken or placed since. */
+    private static boolean[] airIn(ServerWorld world, BlockPos a, BlockPos b) {
+        List<Boolean> list = new ArrayList<>();
+        for (BlockPos pos : BlockPos.iterate(a, b)) {
+            list.add(world.getBlockState(pos).isAir());
+        }
+        boolean[] air = new boolean[list.size()];
+        for (int i = 0; i < air.length; i++) {
+            air[i] = list.get(i);
+        }
+        return air;
+    }
+
+    /** {broken, placed} in the box since {@code before}. */
+    private static int[] changedIn(ServerWorld world, BlockPos a, BlockPos b, boolean[] before) {
+        int broken = 0;
+        int placed = 0;
+        int i = 0;
+        for (BlockPos pos : BlockPos.iterate(a, b)) {
+            boolean air = world.getBlockState(pos).isAir();
+            if (air && !before[i]) {
+                broken++;
+            } else if (!air && before[i]) {
+                placed++;
+            }
+            i++;
+        }
+        return new int[]{broken, placed};
+    }
+
+    /**
+     * "Aunque tenga la escalera al lado prefiere minar y hacer otra": a miner deep in a mine, at the foot of the
+     * staircase it walked down a moment ago (its memories hold every step), is called home. It must walk up that
+     * staircase, breaking nothing, not cut another one.
+     */
+    private static final class Escalera extends Scenario {
+        private final ProspectingTask task = new ProspectingTask();
+        private final VillagerEntityMCA miner;
+        private final BlockPos o;
+        private final Paseo paseo;
+        private final BlockPos boxA;
+        private final BlockPos boxB;
+        @Nullable
+        private boolean[] before;
+        private boolean called;
+        private boolean memoryUsed;
+        private int climbStart;
+
+        Escalera(ServerWorld world) {
+            super("escalera", world, 1800);
+            o = new BlockPos(5450, 100, 0);
+            load(world, o, 32);
+            fill(world, o.add(-16, -16, -8), o.add(18, -2, 8), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-16, -1, -8), o.add(18, -1, 8), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-16, 0, -8), o.add(18, 8, 8), Blocks.AIR.getDefaultState());
+            // a one-wide staircase down to the east, three blocks of headroom on every step, then a short tunnel
+            List<BlockPos> walk = new ArrayList<>();
+            for (int x = -4; x <= 0; x++) {
+                walk.add(o.add(x, 0, 0));
+            }
+            for (int k = 1; k <= 11; k++) {
+                fill(world, o.add(k, -k, 0), o.add(k, -k + 2, 0), Blocks.AIR.getDefaultState());
+                walk.add(o.add(k, -k, 0));
+            }
+            fill(world, o.add(12, -11, 0), o.add(14, -10, 0), Blocks.AIR.getDefaultState());
+            walk.add(o.add(12, -11, 0));
+            walk.add(o.add(13, -11, 0));
+            // light down there, so its eyes work as they would by its torches
+            world.setBlockState(o.add(14, -9, 0), Blocks.GLOWSTONE.getDefaultState(), 2);
+            paseo = new Paseo(walk);
+            boxA = o.add(-16, -16, -8);
+            boxB = o.add(18, 8, 8);
+            miner = villager(world, o.add(-4, 0, 0), Direction.EAST, "Teo Escalera");
+            miner.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            miner.setAiDisabled(true);
+            miner.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+            miner.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 32));
+            miner.getInventory().addStack(new ItemStack(Items.BREAD, 6));
+            miner.getInventory().addStack(new ItemStack(Items.RAW_IRON, 5));
+            task.setHome(o.add(-10, 0, 0));
+            task.setFood(20);
+        }
+
+        @Override
+        Boolean step() {
+            if (!miner.isAlive()) {
+                fail(name, "el minero murió; " + state());
+                return Boolean.FALSE;
+            }
+            if (!called) {
+                if (!paseo.tick(world, miner, ticks)) {
+                    return null;
+                }
+                // it walked down earlier: now it stands deep in its mine and is called home
+                miner.setAiDisabled(false);
+                face(miner, -90.0F, 0.0F);
+                before = airIn(world, boxA, boxB);
+                ProspectingTask.callHome(miner, false);
+                called = true;
+                climbStart = ticks;
+                MCA.LOGGER.info("PRUEBA escalera: recuerda " + net.mca.entity.ai.mente.Recuerdos.of(world, miner).size()
+                        + " pasos, lo llaman a casa desde " + miner.getBlockPos().toShortString());
+                return null;
+            }
+            task.practice(world, miner);
+            memoryUsed |= task.porMemoria();
+            if ((ticks - climbStart) % 100 == 0) {
+                MCA.LOGGER.info("PRUEBA escalera t=" + (ticks - climbStart) + ": " + task.debug() + ", " + state());
+            }
+            int[] changed = changedIn(world, boxA, boxB, before);
+            if (changed[0] > 0) {
+                fail(name, "rompió " + changed[0] + " bloques en vez de subir por la escalera que recordaba; " + state());
+                return Boolean.FALSE;
+            }
+            boolean up = miner.getBlockY() >= o.getY() && world.isSkyVisible(miner.getBlockPos().up());
+            String phase = task.fase();
+            if (!up || phase.equals("HOME_UP")) {
+                return null;
+            }
+            boolean passed = memoryUsed && changed[0] == 0;
+            check(name, passed, "subió por la escalera que recordaba en " + (ticks - climbStart) + " ticks, por su memoria: " + memoryUsed
+                    + ", bloques rotos " + changed[0] + ", puestos " + changed[1] + "; " + state());
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "en " + miner.getBlockPos().toShortString() + ", fase " + task.fase() + ", haciendo: " + Retina.memory(miner).doing()
+                    + ", tarea " + task.debug();
+        }
+
+        @Override
+        void cleanup() {
+            net.mca.entity.ai.mente.Recuerdos.olvidar(world, miner);
+            miner.discard();
+        }
+    }
+
+    /**
+     * "Cree que sigue en la mina cuando está debajo de un techo que sobresale de alguna casa": a miner with a full bag
+     * comes up its own staircase, whose top opens under the wide plank roof of a hut with open sides (three blocks
+     * over the ground). It must know it is out within a few seconds, walk to its chest ten blocks away and store its
+     * haul, never digging or pillaring under the roof.
+     */
+    private static final class Techo extends Scenario {
+        private final ProspectingTask task = new ProspectingTask();
+        private final VillagerEntityMCA miner;
+        private final BlockPos o;
+        private final BlockPos chest;
+        private final Paseo paseo;
+        private final BlockPos boxA;
+        private final BlockPos boxB;
+        private final BlockPos hutA;
+        private final BlockPos hutB;
+        @Nullable
+        private boolean[] before;
+        @Nullable
+        private boolean[] hutBefore;
+        private boolean started;
+        private int startTick;
+        private int topAt = -1;
+        private int outAt = -1;
+
+        Techo(ServerWorld world) {
+            super("techo", world, 2400);
+            o = new BlockPos(5650, 100, 0);
+            load(world, o, 32);
+            fill(world, o.add(-16, -14, -9), o.add(16, -2, 9), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-16, -1, -9), o.add(16, -1, 9), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-16, 0, -9), o.add(16, 8, 9), Blocks.AIR.getDefaultState());
+            // the hut: a wide plank roof on four posts, three blocks over the ground, open on every side
+            fill(world, o.add(-5, 3, -5), o.add(5, 3, 5), Blocks.OAK_PLANKS.getDefaultState());
+            for (int[] c : new int[][]{{-5, -5}, {-5, 5}, {5, -5}, {5, 5}}) {
+                fill(world, o.add(c[0], 0, c[1]), o.add(c[0], 2, c[1]), Blocks.OAK_LOG.getDefaultState());
+            }
+            // its own staircase, down to the east from the middle of the hut, and the tunnel at its foot
+            List<BlockPos> walk = new ArrayList<>();
+            for (int x = -9; x <= 0; x++) {
+                walk.add(o.add(x, 0, 0));
+            }
+            for (int k = 1; k <= 10; k++) {
+                fill(world, o.add(k, -k, 0), o.add(k, -k + 2, 0), Blocks.AIR.getDefaultState());
+                walk.add(o.add(k, -k, 0));
+            }
+            fill(world, o.add(11, -10, 0), o.add(13, -9, 0), Blocks.AIR.getDefaultState());
+            walk.add(o.add(11, -10, 0));
+            walk.add(o.add(12, -10, 0));
+            world.setBlockState(o.add(13, -8, 0), Blocks.GLOWSTONE.getDefaultState(), 2);
+            paseo = new Paseo(walk);
+            // home: its chest ten blocks from the top of the staircase, out in the open
+            chest = o.add(-10, 0, 1);
+            world.setBlockState(chest, Blocks.CHEST.getDefaultState(), 3);
+            boxA = o.add(-16, -14, -9);
+            boxB = o.add(16, 8, 9);
+            hutA = o.add(-6, 0, -6);
+            hutB = o.add(6, 4, 6);
+            miner = villager(world, o.add(-9, 0, 0), Direction.EAST, "Ana Techo");
+            miner.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            miner.setAiDisabled(true);
+            Cofres.claim(world, miner, chest);
+            miner.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+            while (miner.getInventory().addStack(new ItemStack(Items.RAW_GOLD, 64)).isEmpty()) {
+                // a bag full to the last slot
+            }
+            task.setHome(o.add(-10, 0, 0));
+            task.setFood(20);
+        }
+
+        @Override
+        Boolean step() {
+            if (!miner.isAlive()) {
+                fail(name, "el minero murió; " + state());
+                return Boolean.FALSE;
+            }
+            if (!started) {
+                if (!paseo.tick(world, miner, ticks)) {
+                    return null;
+                }
+                miner.setAiDisabled(false);
+                face(miner, -90.0F, 0.0F);
+                before = airIn(world, boxA, boxB);
+                hutBefore = airIn(world, hutA, hutB);
+                started = true;
+                startTick = ticks;
+                MCA.LOGGER.info("PRUEBA techo: recuerda " + net.mca.entity.ai.mente.Recuerdos.of(world, miner).size() + " pasos, mochila llena, en "
+                        + miner.getBlockPos().toShortString());
+                return null;
+            }
+            task.practice(world, miner);
+            int t = ticks - startTick;
+            if (t % 100 == 0) {
+                MCA.LOGGER.info("PRUEBA techo t=" + t + ": " + task.debug() + ", " + state());
+            }
+            if (topAt < 0 && miner.getBlockY() >= o.getY() - 1 && miner.getBlockX() <= o.getX() + 1) {
+                topAt = t;
+            }
+            if (outAt < 0 && topAt >= 0 && !task.fase().equals("HOME_UP")) {
+                outAt = t;
+                MCA.LOGGER.info("PRUEBA techo: se dio cuenta de que estaba afuera " + (outAt - topAt) + " ticks después de llegar arriba, en "
+                        + miner.getBlockPos().toShortString() + " (" + Entorno.lugar(world, miner).palabra() + ")");
+            }
+            int[] hut = changedIn(world, hutA, hutB, hutBefore);
+            int[] all = changedIn(world, boxA, boxB, before);
+            if (hut[0] + hut[1] > 0 || all[0] > 0) {
+                fail(name, "bajo el techo rompió " + hut[0] + " y puso " + hut[1] + " bloques, en total rompió " + all[0] + "; " + state());
+                return Boolean.FALSE;
+            }
+            int gold = 0;
+            var inv = Cofres.inventory(world, chest);
+            if (inv != null) {
+                gold = Cofres.contents(inv).getOrDefault("minecraft:raw_gold", 0);
+            }
+            if (gold == 0) {
+                if (topAt >= 0 && outAt < 0 && t - topAt > 400) {
+                    fail(name, "llegó arriba bajo el techo y en " + (t - topAt) + " ticks no se dio cuenta de que estaba afuera; " + state());
+                    return Boolean.FALSE;
+                }
+                return null;
+            }
+            boolean quick = outAt >= 0 && outAt - topAt <= 100;
+            check(name, quick, "subió bajo el alero, supo que estaba afuera en " + (outAt - topAt) + " ticks, caminó a su cofre y guardó "
+                    + gold + " de oro crudo en " + t + " ticks, sin romper ni poner nada bajo el techo; " + state());
+            return quick;
+        }
+
+        @Override
+        String state() {
+            return "en " + miner.getBlockPos().toShortString() + ", fase " + task.fase() + ", haciendo: " + Retina.memory(miner).doing()
+                    + ", oro en la mochila " + miner.getInventory().count(Items.RAW_GOLD) + ", tarea " + task.debug();
+        }
+
+        @Override
+        void cleanup() {
+            net.mca.entity.ai.mente.Recuerdos.olvidar(world, miner);
+            miner.discard();
+            world.setBlockState(chest, Blocks.AIR.getDefaultState(), 3);
+            net.mca.server.world.data.TropelesMundo.get(world).removed(chest);
         }
     }
 

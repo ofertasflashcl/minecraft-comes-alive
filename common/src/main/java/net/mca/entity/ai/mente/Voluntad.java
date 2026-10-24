@@ -123,6 +123,7 @@ public final class Voluntad {
     private final FollowTask follow = new FollowTask();
     private final Mirada mirada = new Mirada();
     final Iniciativa iniciativa = new Iniciativa();
+    private final Atasco atasco = new Atasco();
 
     private Voluntad() {
     }
@@ -175,6 +176,30 @@ public final class Voluntad {
 
     public boolean agachado() {
         return agachado;
+    }
+
+    /** Its sense of getting nowhere ({@link Atasco}): the task asks it every tick of its own life. */
+    public Atasco atasco() {
+        return atasco;
+    }
+
+    /**
+     * It tells the player it is with (or the one who connected it) what it is doing and why, when it changes its plans
+     * for a reason: "No me acuerdo de otra salida, cavo una escalera nueva." At most one such line every few seconds;
+     * every one is also a memory ({@link Recuerdos}). Server thread; never throws.
+     */
+    public static void contar(VillagerEntityMCA villager, String es, String en) {
+        try {
+            if (!(villager.getWorld() instanceof ServerWorld world)) {
+                return;
+            }
+            Voluntad w = of(villager);
+            String line = w.spanish() ? es : en;
+            Recuerdos.anotar(villager, "plan", es, villager.getBlockPos());
+            w.iniciativa.contar(world, villager, w, line, world.getTime());
+        } catch (RuntimeException e) {
+            MCA.LOGGER.warn("[Tropeles] {} no pudo contar lo que hace: {}", villager.getName().getString(), e.toString());
+        }
     }
 
     /** Its current mode, goal and why, in a short line in Spanish. */
@@ -331,7 +356,10 @@ public final class Voluntad {
         }
         try {
             switch (modo) {
-                case SIGUIENDO -> followTick(world, villager);
+                case SIGUIENDO -> {
+                    followTick(world, villager);
+                    followStuck(world, villager);
+                }
                 case ALERTA -> alertTick(world, villager);
                 case ESPERANDO -> waitTick(world, villager);
                 default -> {
@@ -359,6 +387,30 @@ public final class Voluntad {
         }
         sinJugador = -1;
         follow.guard(world, villager, player);
+    }
+
+    /**
+     * Following and getting nowhere ({@link Atasco}): beside the player, or with the player gone, it is where it should
+     * be; otherwise the companion's steps start over, and in the end it tells the player where it is stuck.
+     */
+    private void followStuck(ServerWorld world, VillagerEntityMCA villager) {
+        PlayerEntity player = player(world);
+        boolean near = player == null || villager.squaredDistanceTo(player) < 5.0 * 5.0 || villager.isSleeping() || CombatMind.busy(villager);
+        Atasco.Remedio r = atasco.tick(world, villager, near, pensando);
+        switch (r) {
+            case NINGUNO -> {
+            }
+            case AYUDA -> {
+                BlockPos at = villager.getBlockPos();
+                contar(villager, "No puedo llegar hasta ti, estoy atascado en " + at.getX() + " " + at.getY() + " " + at.getZ() + ". ¿Me ayudas?",
+                        "I can't get to you, I'm stuck at " + at.getX() + " " + at.getY() + " " + at.getZ() + ". Can you help me?");
+            }
+            default -> {
+                // the companion's half-made step and its idea of where the player stood go: it plans its way to them again
+                follow.release(world, villager);
+                villager.getNavigation().stop();
+            }
+        }
     }
 
     private void alertTick(ServerWorld world, VillagerEntityMCA villager) {

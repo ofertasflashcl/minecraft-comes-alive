@@ -24,7 +24,8 @@ import java.util.Map;
 
 /**
  * The land as far as one villager's eyes have seen it: a coarse map of {@value #CELL}x{@value #CELL} columns, filled
- * only by what rays actually hit ({@link Retina}) and by where its own feet walked. Each cell keeps when it was last
+ * only by what rays actually hit ({@link Retina}, and the far pass of its {@link Pantalla} out to a player's 12 chunks of
+ * render distance, which is how a tree 100 blocks off gets onto it) and by where its own feet walked. Each cell keeps when it was last
  * seen, the highest standable top seen in it and what showed there (trees, water, lava, open land, rock, buildings,
  * a dark opening). Exploration reads it to go where it has not looked yet; nothing in here comes from the world
  * directly.

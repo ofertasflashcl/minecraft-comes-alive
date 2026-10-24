@@ -1,6 +1,7 @@
 package net.mca.server.command;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.body.Mining;
@@ -9,16 +10,24 @@ import net.mca.entity.ai.sense.Escena;
 import net.mca.entity.ai.sense.Lugar;
 import net.mca.entity.ai.sense.Mirada;
 import net.mca.entity.ai.sense.Obras;
+import net.mca.entity.ai.sense.Pantalla;
+import net.mca.entity.ai.sense.Tacto;
 import net.mca.entity.ai.sense.Retina;
 import net.mca.entity.ai.sense.VisualMemory;
 import net.minecraft.block.BlockState;
+import net.minecraft.entity.Entity;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.text.ClickEvent;
+import net.minecraft.text.HoverEvent;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
+import org.jetbrains.annotations.Nullable;
+
+import java.nio.file.Path;
 
 import java.util.Comparator;
 import java.util.List;
@@ -28,7 +37,8 @@ import java.util.Locale;
  * {@code /mca-ojo}: what the nearest villager is seeing right now. The block under its crosshair with the
  * exact state, face and distance (like Jade), the ore it remembers, the bodies in view, what it says it is
  * doing, where it thinks it is and what it would say it sees, with {@code vista} its whole retina drawn in
- * characters, and with {@code mirar} after a whole look around first.
+ * characters, with {@code mirar} after a whole look around first, and with {@code pantalla [nombre]} the
+ * {@link Pantalla} of a connected villager: its PNG on disk and what is on it.
  */
 public final class OjoCommand {
     private OjoCommand() {
@@ -38,7 +48,66 @@ public final class OjoCommand {
         dispatcher.register(CommandManager.literal("mca-ojo")
                 .executes(ctx -> show(ctx, false, false))
                 .then(CommandManager.literal("vista").executes(ctx -> show(ctx, true, false)))
-                .then(CommandManager.literal("mirar").executes(ctx -> show(ctx, false, true))));
+                .then(CommandManager.literal("mirar").executes(ctx -> show(ctx, false, true)))
+                .then(CommandManager.literal("pantalla")
+                        .executes(ctx -> pantalla(ctx, null))
+                        .then(CommandManager.argument("nombre", StringArgumentType.greedyString())
+                                .executes(ctx -> pantalla(ctx, StringArgumentType.getString(ctx, "nombre"))))));
+    }
+
+    /**
+     * {@code /mca-ojo pantalla [nombre]}: the screen of a villager (by name anywhere in this world, or the nearest
+     * connected one, or the nearest one): where its PNG is (a click opens it in singleplayer), what is on it, how far
+     * it reaches and what it costs.
+     */
+    private static int pantalla(CommandContext<ServerCommandSource> ctx, @Nullable String name) {
+        ServerCommandSource source = ctx.getSource();
+        ServerWorld world = source.getWorld();
+        Vec3d from = source.getPosition();
+        VillagerEntityMCA villager = null;
+        if (name != null) {
+            String wanted = name.trim().toLowerCase(Locale.ROOT);
+            double best = Double.MAX_VALUE;
+            for (Entity e : world.iterateEntities()) {
+                if (e instanceof VillagerEntityMCA v && v.isAlive()) {
+                    String own = v.getName().getString().toLowerCase(Locale.ROOT);
+                    if ((own.equals(wanted) || own.startsWith(wanted)) && v.squaredDistanceTo(from) < best) {
+                        best = v.squaredDistanceTo(from);
+                        villager = v;
+                    }
+                }
+            }
+        } else {
+            List<VillagerEntityMCA> near = world.getEntitiesByClass(VillagerEntityMCA.class, new Box(from, from).expand(64), VillagerEntityMCA::isAlive);
+            villager = near.stream().filter(Pantalla::on).min(Comparator.comparingDouble(v -> v.squaredDistanceTo(from)))
+                    .orElse(near.stream().filter(v -> v.squaredDistanceTo(from) < 16 * 16).min(Comparator.comparingDouble(v -> v.squaredDistanceTo(from))).orElse(null));
+        }
+        if (villager == null) {
+            source.sendError(Text.literal(name == null ? "No hay aldeanos conectados a menos de 64 bloques (ni otro a menos de 16)." : "No encuentro a ningún aldeano llamado " + name + "."));
+            return 0;
+        }
+        Pantalla screen = Pantalla.get(villager);
+        boolean live = screen != null && Pantalla.on(villager);
+        if (screen == null || screen.frames() == 0) {
+            // not connected: one whole frame now, so there is something to show
+            screen = Pantalla.of(villager);
+            screen.drawAll(world, villager);
+        }
+        screen.save(world, villager);
+        Path file = Pantalla.path(world, villager);
+        say(source, Text.literal("Pantalla de " + villager.getName().getString() + (live ? " (conectado)" : " (no conectado: un cuadro ahora)")).formatted(Formatting.GOLD));
+        Text link = Text.literal(file.toString()).formatted(Formatting.AQUA, Formatting.UNDERLINE)
+                .styled(style -> style.withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_FILE, file.toString()))
+                        .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, Text.literal("Abrir la imagen"))));
+        Text copy = Text.literal(" [copiar]").formatted(Formatting.GRAY)
+                .styled(style -> style.withClickEvent(new ClickEvent(ClickEvent.Action.COPY_TO_CLIPBOARD, file.toString())));
+        say(source, Text.literal("Imagen: ").append(link).append(copy));
+        say(source, Text.literal("Ve: " + screen.resumen(world, true)).formatted(Formatting.WHITE));
+        say(source, Text.literal(String.format(Locale.ROOT, "Alcance %.0f bloques (último cuadro %.0f, lo más lejano %.0f), cielo %.0f%%",
+                screen.range(), screen.lastRange(), screen.lastFarthest(), screen.lastSkyShare() * 100.0)).formatted(Formatting.GRAY));
+        say(source, Text.literal("Coste: " + screen.costLine()).formatted(Formatting.GRAY));
+        say(source, Text.literal("Tacto: " + Tacto.describeOverhead(villager, true)).formatted(Formatting.GRAY));
+        return 1;
     }
 
     private static int show(CommandContext<ServerCommandSource> ctx, boolean view, boolean around) {

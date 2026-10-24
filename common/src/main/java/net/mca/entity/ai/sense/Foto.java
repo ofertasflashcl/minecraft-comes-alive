@@ -43,8 +43,8 @@ import java.util.zip.Deflater;
 public final class Foto {
     /** Larger pictures are refused. */
     public static final int MAX_PIXELS = 640 * 360;
-    private static final int WATER = 0x2F5FD0;
-    private static final int LAVA = 0xE0601A;
+    static final int WATER = 0x2F5FD0;
+    static final int LAVA = 0xE0601A;
 
     private Foto() {
     }
@@ -242,7 +242,7 @@ public final class Foto {
         };
     }
 
-    private static double lightShade(int light, double distance, boolean night) {
+    static double lightShade(int light, double distance, boolean night) {
         if (night) {
             return 1.0;
         }
@@ -350,7 +350,7 @@ public final class Foto {
     }
 
     /** Players blue, villagers brown, monsters green (the rotting kind) or red, animals pink or white, things yellow. */
-    private static int bodyColor(Entity body) {
+    static int bodyColor(Entity body) {
         if (body instanceof PlayerEntity) {
             return 0x3B5BDB;
         }
@@ -373,7 +373,7 @@ public final class Foto {
     }
 
     /** The sky by the hour: blue by day, deep blue by night, warm at dawn and dusk, grey under rain. */
-    private static int skyColor(ServerWorld world) {
+    static int skyColor(ServerWorld world) {
         long t = world.getTimeOfDay() % 24000L;
         double day;
         if (t < 12000) {
@@ -397,7 +397,7 @@ public final class Foto {
         return color;
     }
 
-    private static int mix(int a, int b, double f) {
+    static int mix(int a, int b, double f) {
         f = Math.max(0.0, Math.min(1.0, f));
         int r = (int) Math.round(((a >> 16) & 255) * (1 - f) + ((b >> 16) & 255) * f);
         int g = (int) Math.round(((a >> 8) & 255) * (1 - f) + ((b >> 8) & 255) * f);
@@ -405,7 +405,7 @@ public final class Foto {
         return (r << 16) | (g << 8) | bl;
     }
 
-    private static int scale(int c, double f) {
+    static int scale(int c, double f) {
         int r = (int) Math.min(255, Math.round(((c >> 16) & 255) * f));
         int g = (int) Math.min(255, Math.round(((c >> 8) & 255) * f));
         int b = (int) Math.min(255, Math.round((c & 255) * f));

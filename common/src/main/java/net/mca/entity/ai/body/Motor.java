@@ -81,6 +81,20 @@ public final class Motor {
     private static final double PLACE_HEIGHT = 1.001;
     /** Ticks without a call to {@link #step} after which a step is planned afresh: the caller did something else meanwhile. */
     private static final int STALE_TICKS = 5;
+    /**
+     * Other ways tried toward the same goal after a step toward it failed, before BLOCKED is reported: a hop onto what
+     * stops it, then a step round it to either side.
+     */
+    private static final int ALTERNATIVES = 3;
+    /**
+     * Failures toward the same goal (within {@link #SAME_GOAL} blocks of it) less than this many ticks apart count as the
+     * same failing step: longer than a step may take ({@link #HARD_TIMEOUT}).
+     */
+    private static final int REPEAT_WINDOW = 2400;
+    private static final double SAME_GOAL = 3.0;
+    /** After this many failures toward the same goal it does not try again for {@link #REFUSE_TICKS}: BLOCKED at once. */
+    private static final int MAX_REPEATS = 8;
+    private static final int REFUSE_TICKS = 100;
 
     // what a way up costs, to choose between stairs and a pillar like a player would
     private static final int COST_DIG = 2;
@@ -156,6 +170,15 @@ public final class Motor {
     /** The crouch this tick asks for: over a gap it is bridging, at the edge of a drop it is working by. */
     private boolean wantPuente;
     private boolean wantBorde;
+    /** The goal steps toward it kept failing for, from about where, how often, and when last. */
+    @Nullable
+    private BlockPos failGoal;
+    private int failCount;
+    private long failAt = Long.MIN_VALUE / 2;
+    /** The other way the next plan tries: 0 the usual one, 1 a hop onto what is in the way, 2 and 3 a step round it. */
+    private int alt;
+    /** This call is a pillar step straight up ({@link #pillarStep}): never a stair sideways, never another way. */
+    private boolean straightUp;
 
     public String doing() {
         return doing;
@@ -168,6 +191,7 @@ public final class Motor {
     public void reset(ServerWorld world, VillagerEntityMCA villager) {
         breaker.reset(world, villager);
         endStep();
+        alt = 0;
         lastFeet = null;
         settleTicks = 0;
         airTicks = 0;
@@ -298,7 +322,7 @@ public final class Motor {
             }
             if (from != null && Agua.overwhelmed(villager, world.getTime()) && route().stream().anyMatch(cell -> Agua.water(world, cell))) {
                 // more water than blocks to stop it: this way is drowned, take another
-                return blocked(world, villager);
+                return blockedHard(world, villager);
             }
         }
         if (villager.isSubmergedInWater()) {
@@ -316,7 +340,7 @@ public final class Motor {
                 doing = "cavando para respirar";
                 int r = breaker.tick(world, villager, head, true);
                 if (r == Hands.Breaker.FAILED) {
-                    return blocked(world, villager);
+                    return blockedHard(world, villager);
                 }
                 if (r == Hands.Breaker.DONE) {
                     afterBreak(world, villager, head);
@@ -338,12 +362,16 @@ public final class Motor {
         }
         if (!settled && (from == null || phase == Phase.PREPARE || phase == Phase.CENTER)) {
             // falling or knocked into the air, not one of its own jumps: land first, plan after
-            return ++airTicks > AIR_TIMEOUT ? blocked(world, villager) : Result.RUNNING;
+            return ++airTicks > AIR_TIMEOUT ? blockedHard(world, villager) : Result.RUNNING;
         }
         if (settled) {
             airTicks = 0;
         }
         if (needsPlan(world, villager, feet, goal)) {
+            if (from == null && refused(goal, now)) {
+                // the same step failed over and over just now: the caller has to choose something else
+                return Result.BLOCKED;
+            }
             plan(world, villager, feet, goal, dig, build);
             if (stand == null) {
                 return blocked(world, villager);
@@ -383,9 +411,50 @@ public final class Motor {
         afterBreak(world, villager, cell);
     }
 
+    /**
+     * The step failed. The first few times toward the same goal another way is tried (a hop onto what is in the way,
+     * a step round it to one side, then the other) before BLOCKED is reported; a step that keeps failing toward the
+     * same goal is not tried over and over: BLOCKED at once for a moment.
+     */
     private Result blocked(ServerWorld world, VillagerEntityMCA villager) {
+        BlockPos goal = planGoal;
+        long now = world.getTime();
+        boolean again = goal != null && failGoal != null && goal.isWithinDistance(failGoal, SAME_GOAL) && now - failAt < REPEAT_WINDOW;
+        failCount = again ? failCount + 1 : 1;
+        failGoal = goal;
+        failAt = now;
+        boolean sideways = goal != null && from != null && (goal.getX() != from.getX() || goal.getZ() != from.getZ());
+        reset(world, villager);
+        if (goal != null && sideways && !straightUp && failCount <= ALTERNATIVES) {
+            alt = failCount;
+            doing = alt == 1 ? "prueba a saltar lo que le corta el paso" : "prueba a rodear lo que le corta el paso";
+            return Result.RUNNING;
+        }
+        return Result.BLOCKED;
+    }
+
+    /** Water it cannot hold off, buried, held in the air, lava: no other way is tried from here, BLOCKED now. */
+    private Result blockedHard(ServerWorld world, VillagerEntityMCA villager) {
         reset(world, villager);
         return Result.BLOCKED;
+    }
+
+    /** Toward this goal its steps kept failing just now: it does not try the same thing yet again. */
+    private boolean refused(BlockPos goal, long now) {
+        return failCount > MAX_REPEATS && failGoal != null && goal.isWithinDistance(failGoal, SAME_GOAL) && now - failAt < REFUSE_TICKS;
+    }
+
+    /**
+     * One tick of going straight up one block on a block of its own under its feet (a pillar), as at a tall trunk:
+     * never a stair to the side, never another way round. BLOCKED when it cannot.
+     */
+    public Result pillarStep(ServerWorld world, VillagerEntityMCA villager, BlockPos goal) {
+        straightUp = true;
+        try {
+            return step(world, villager, goal, false, true);
+        } finally {
+            straightUp = false;
+        }
     }
 
     private boolean needsPlan(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, BlockPos goal) {
@@ -467,6 +536,20 @@ public final class Motor {
             return;
         }
         int horizontal = Math.abs(dx) + Math.abs(dz);
+        int other = alt;
+        alt = 0;
+        if (other > 0 && toward != null && alternative(world, villager, feet, goal, toward, other)) {
+            return;
+        }
+        if (straightUp) {
+            // a pillar or nothing: a stair would take it off the column it is climbing
+            if (horizontal == 0 && dy > 0 && build && !Hands.buildingBlock(villager).isEmpty()
+                    && pillarSafe(world, villager, feet, dig, Retina.memory(villager))) {
+                kind = Kind.PILLAR;
+                stand = feet.up();
+            }
+            return;
+        }
         if (toward != null && horizontal > Math.abs(dy) && walkable(world, feet.offset(toward))) {
             // more ahead than up or down, and the way ahead is open: walk it first, climb or go down nearer the goal
             kind = Kind.LEVEL;
@@ -524,6 +607,41 @@ public final class Motor {
             }
         }
         // boxed in with no way up: stand stays null, so BLOCKED
+    }
+
+    /**
+     * Another way than the usual one after a step failed: 1 hops onto the block in the way when there is room over it
+     * (falling back to the side steps), 2 and 3 step round it, to the side nearer the goal first. False when there is
+     * no such way from here (the usual plan is made then).
+     */
+    private boolean alternative(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, BlockPos goal, Direction toward, int which) {
+        BlockPos ahead = feet.offset(toward);
+        if (which == 1 && Mining.standable(world, ahead) && walkable(world, ahead.up()) && open(world, feet.up(2))
+                && !Mining.lavaSeen(Retina.memory(villager), ahead.up())) {
+            kind = Kind.UP;
+            dir = toward;
+            stand = ahead.up();
+            doing = "salta sobre lo que le corta el paso";
+            return true;
+        }
+        Direction left = toward.rotateYCounterclockwise();
+        Direction right = toward.rotateYClockwise();
+        // the side the goal lies to first
+        int lean = (goal.getX() - feet.getX()) * left.getOffsetX() + (goal.getZ() - feet.getZ()) * left.getOffsetZ();
+        Direction first = lean >= 0 ? left : right;
+        Direction second = first == left ? right : left;
+        Direction[] order = which == 3 ? new Direction[]{second, first} : new Direction[]{first, second};
+        for (Direction side : order) {
+            BlockPos cell = feet.offset(side);
+            if (walkable(world, cell) && !Mining.lavaSeen(Retina.memory(villager), cell) && !Mining.heat(world, cell) && !hurts(world, cell.down())) {
+                kind = Kind.LEVEL;
+                dir = side;
+                stand = cell;
+                doing = "rodea lo que le corta el paso";
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Open to walk into on its own feet, with a floor. */
@@ -641,7 +759,7 @@ public final class Motor {
             }
             BlockState state = world.getBlockState(cell);
             if (!Mining.mayDig(world, cell, state) || Mining.lavaSeen(Retina.memory(villager), cell)) {
-                return blocked(world, villager);
+                return blockedHard(world, villager);
             }
             // still first: legs off, then the pick
             standStill(villager);

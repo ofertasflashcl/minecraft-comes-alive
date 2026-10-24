@@ -7,11 +7,13 @@ import net.mca.entity.ai.body.Mining;
 import net.mca.entity.ai.body.Progreso;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
 import net.mca.entity.ai.chatAI.Vistazo;
+import net.mca.entity.ai.mente.Recuerdos;
 import net.mca.entity.ai.mente.Voluntad;
 import net.mca.entity.ai.sense.Escena;
 import net.mca.entity.ai.sense.Lugar;
 import net.mca.entity.ai.sense.Obras;
 import net.mca.entity.ai.sense.Retina;
+import net.mca.entity.ai.sense.Tacto;
 import net.mca.entity.ai.sense.VisualMemory;
 import net.minecraft.entity.SpawnGroup;
 import net.minecraft.inventory.SimpleInventory;
@@ -97,6 +99,28 @@ public class PerceptionModule {
             input.add("$villager is under water. ");
         } else if (villager.isTouchingWater()) {
             input.add("$villager is standing in water. ");
+        }
+
+        // what its body touches: the ceiling over its head and how high, the walls at its head, the floor ({@link Tacto})
+        try {
+            String felt = Tacto.describeOverhead(villager, true);
+            if (!felt.isBlank()) {
+                input.add("What $villager feels right around its body, over its head and at its sides (in Spanish): " + felt + " ");
+            }
+        } catch (RuntimeException e) {
+            net.mca.MCA.LOGGER.warn("[Tropeles] {} no pudo sentir lo que tiene encima: {}", villager.getName().getString(), e.toString());
+        }
+
+        // what it remembers: the last things that happened to it, the places it knows ({@link Recuerdos})
+        try {
+            Recuerdos recuerdos = Recuerdos.of(villager);
+            String remembered = recuerdos == null ? "" : recuerdos.forModel(now, 8);
+            if (!remembered.isBlank()) {
+                input.add(shorten(remembered) + "When asked what you did, which way you came up, what $player told you or where your "
+                        + "chest, home or mine is, answer from these memories and their exact numbers; never invent others. ");
+            }
+        } catch (RuntimeException e) {
+            net.mca.MCA.LOGGER.warn("[Tropeles] los recuerdos de {} no se pudieron contar: {}", villager.getName().getString(), e.toString());
         }
 
         // hands and bag

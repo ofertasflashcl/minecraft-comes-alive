@@ -322,6 +322,9 @@ public class ChatAI {
             return;
         }
         OpenAIChatAI.remember(turn.villagerId, turn.speakerId, turn.msg, line);
+        // what was said and what it answered is a memory of its own too ({@link net.mca.entity.ai.mente.Recuerdos})
+        net.mca.entity.ai.mente.Recuerdos.anotar(turn.villager, "charla", turn.speaker.getName().getString() + " me dijo «" + turn.msg
+                + "»; le contesté «" + line + "»", turn.villager.getBlockPos());
         deliver(turn.server, turn.speakerId, turn.speaker, turn.villagerId, turn.villager, line, turn.shown);
     }
 

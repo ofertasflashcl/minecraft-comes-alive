@@ -30,7 +30,10 @@ import org.jetbrains.annotations.Nullable;
  * the rock, a cave), or a made roof deep under the land in the dark (an old mineshaft).</li>
  * </ul>
  * The roof is the first solid block in the column over the head, the glance up a person gives, read like a
- * touch: it is a handful of block look-ups, done at most once a tick per villager.
+ * touch: it is a handful of block look-ups, done at most once a tick per villager. A made roof with the open sky a
+ * few steps to the side at the height of the head ({@link Tacto#cieloAlLado}) is always the shelter of a building
+ * ({@link #refugio}): {@link Lugar#BAJO_TECHO} or {@link Lugar#AFUERA}, and never {@link #bajoTierra}, however
+ * deep the land it remembers says it is.
  */
 public final class Entorno {
     public static final int OPEN_SKY = 14;
@@ -83,6 +86,10 @@ public final class Entorno {
         }
         if (Obras.made(roof) || roof.isIn(BlockTags.LOGS)) {
             if (sky >= HOUSE_SKY || profundidad(world, viewer) <= HOUSE_DEPTH) {
+                return Lugar.BAJO_TECHO;
+            }
+            // a made roof with the open sky a few steps to the side at this same level: an eave, a porch, a house
+            if (Tacto.cieloAlLado(world, viewer, Tacto.SIDE_SKY) >= 0) {
                 return Lugar.BAJO_TECHO;
             }
             return Lugar.BAJO_TIERRA;
@@ -155,7 +162,34 @@ public final class Entorno {
      * own staircase.
      */
     public static boolean bajoTierra(ServerWorld world, LivingEntity viewer) {
-        return lugar(world, viewer) == Lugar.BAJO_TIERRA || profundidad(world, viewer) > DEEP;
+        if (lugar(world, viewer) == Lugar.BAJO_TIERRA) {
+            return true;
+        }
+        if (profundidad(world, viewer) <= DEEP) {
+            return false;
+        }
+        // deep below the land it remembers, yet under a made roof with the open sky right beside it at its own level:
+        // it is under the eave of a house, not down a mine; the remembered land level is what is wrong
+        return !refugio(world, viewer);
+    }
+
+    /**
+     * Under a made roof (a house, an eave, a porch, a bridge, a trunk) with the open sky a few steps to the side at
+     * the height of its head ({@link Tacto#cieloAlLado}): the shelter of a building at the level of the land, never
+     * a mine. Cheap: once a tick.
+     */
+    public static boolean refugio(ServerWorld world, LivingEntity viewer) {
+        VisualMemory memory = Retina.memory(viewer);
+        long tick = world.getTime();
+        if (memory.shelterTick == tick) {
+            return memory.shelter;
+        }
+        BlockState roof = roof(world, BlockPos.ofFloored(viewer.getEyePos()));
+        boolean shelter = roof != null && (Obras.made(roof) || roof.isIn(BlockTags.LOGS))
+                && Tacto.cieloAlLado(world, viewer, Tacto.SIDE_SKY) >= 0;
+        memory.shelter = shelter;
+        memory.shelterTick = tick;
+        return shelter;
     }
 
     /** The open sky is a few steps away: outside, or under a roof at the level of the land. */
