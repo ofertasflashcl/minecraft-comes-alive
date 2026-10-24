@@ -550,7 +550,7 @@ public final class Motor {
             }
             return;
         }
-        if (toward != null && horizontal > Math.abs(dy) && walkable(world, feet.offset(toward))) {
+        if (toward != null && horizontal > Math.abs(dy) && (walkable(world, feet.offset(toward)) || throughLeaves(world, villager, feet.offset(toward)))) {
             // more ahead than up or down, and the way ahead is open: walk it first, climb or go down nearer the goal
             kind = Kind.LEVEL;
             stand = feet.offset(toward);
@@ -649,6 +649,19 @@ public final class Motor {
         return open(world, cell) && open(world, cell.up()) && Mining.standable(world, cell.down());
     }
 
+    /** Walkable once the natural leaves in it (at the feet, the head or both) are clicked away. */
+    private static boolean throughLeaves(ServerWorld world, VillagerEntityMCA villager, BlockPos cell) {
+        boolean leafy = false;
+        for (BlockPos c : new BlockPos[]{cell, cell.up()}) {
+            if (Hands.naturalLeaf(world, villager, c)) {
+                leafy = true;
+            } else if (!open(world, c)) {
+                return false;
+            }
+        }
+        return leafy && Mining.standable(world, cell.down()) && !Mining.lavaSeen(Retina.memory(villager), cell);
+    }
+
     /**
      * What a step up toward {@code d} costs: the cells to dig and the block to set as the step, or -1 when it
      * cannot be done (a build in the way, lava seen there, nothing to stand on and nothing to set a block on).
@@ -659,6 +672,10 @@ public final class Motor {
         int cost = 0;
         for (BlockPos cell : new BlockPos[]{feet.up(2), stair.up(), stair}) {
             if (open(world, cell)) {
+                continue;
+            }
+            if (Hands.naturalLeaf(world, villager, cell) && !Mining.lavaSeen(memory, cell)) {
+                cost += COST_DIG; // leaves over the step: by hand, pick or no pick
                 continue;
             }
             if (!dig || !Mining.mayDig(world, cell, world.getBlockState(cell)) || Mining.lavaSeen(memory, cell) || !Obras.mayBreak(world, villager, cell)) {
@@ -695,7 +712,8 @@ public final class Motor {
             return false; // a stream down the shaft and few blocks to wall it off: better sideways
         }
         BlockPos head = feet.up(2);
-        if (!open(world, head) && !(dig && Mining.mayDig(world, head, world.getBlockState(head)) && Obras.mayBreak(world, villager, head))) {
+        if (!open(world, head) && !Hands.naturalLeaf(world, villager, head)
+                && !(dig && Mining.mayDig(world, head, world.getBlockState(head)) && Obras.mayBreak(world, villager, head))) {
             return false;
         }
         BlockState at = world.getBlockState(feet);
@@ -754,16 +772,19 @@ public final class Motor {
             if (open(world, cell)) {
                 continue;
             }
-            if (!dig) {
+            // natural leaves across the way, over its head on a pillar or a climb: clicked away by hand like a player,
+            // also on a step that may not dig (a persistent leaf, a player's, is a build like any other)
+            boolean leaf = Hands.naturalLeaf(world, villager, cell);
+            if (!dig && !leaf) {
                 return blocked(world, villager);
             }
             BlockState state = world.getBlockState(cell);
-            if (!Mining.mayDig(world, cell, state) || Mining.lavaSeen(Retina.memory(villager), cell)) {
+            if (!leaf && !Mining.mayDig(world, cell, state) || Mining.lavaSeen(Retina.memory(villager), cell)) {
                 return blockedHard(world, villager);
             }
             // still first: legs off, then the pick
             standStill(villager);
-            doing = "cavando";
+            doing = leaf ? "quita las hojas del paso" : "cavando";
             int r = breaker.tick(world, villager, cell);
             if (r == Hands.Breaker.FAILED) {
                 // not in reach or not visible from here, or not its to break: another way
@@ -1104,7 +1125,13 @@ public final class Motor {
 
     /** Natural rock worth one more dig for room: never its own or Agua's seal, never next to water or lava it saw. */
     private static boolean worthDigging(ServerWorld world, VillagerEntityMCA villager, BlockPos pos, boolean dig) {
-        if (!dig || open(world, pos)) {
+        if (open(world, pos)) {
+            return false;
+        }
+        if (Hands.naturalLeaf(world, villager, pos)) {
+            return true; // leaves its head hit on the jump: by hand, dig or no dig
+        }
+        if (!dig) {
             return false;
         }
         VisualMemory memory = Retina.memory(villager);

@@ -80,6 +80,11 @@ public final class Explorar {
     private static final int NEARER = 8;
 
     private final Mirada mirada = new Mirada();
+    /** Its hands, for the natural leaves that close the way it walks (a hedge, a low crown): its legs' path finder takes them for a wall. */
+    private final Hands.Breaker hands = new Hands.Breaker();
+    /** The leaf block across the way it is clicking away, the leg waiting on it. */
+    @Nullable
+    private BlockPos hedge;
     /** Cells (by {@link MapaVisto#CELL} columns) of waypoints and cues that led nowhere, until when. */
     private final Map<Long, Long> failed = new HashMap<>();
     @Nullable
@@ -115,6 +120,7 @@ public final class Explorar {
         radius = START_RADIUS;
         ticks = 0;
         legs = 0;
+        hedge = null;
         mirada.stop();
     }
 
@@ -180,6 +186,22 @@ public final class Explorar {
         legTicks++;
         // its own legs, not the brain's errands: no other walk target pulls it away mid-leg
         villager.getBrain().forget(MemoryModuleType.WALK_TARGET);
+        if (hedge != null) {
+            // leaves across the way: standing still, by hand, the leg's clock waiting
+            legTicks--;
+            Motor.standStill(villager);
+            int r = hands.tick(world, villager, hedge);
+            if (r != Hands.Breaker.RUNNING) {
+                if (r == Hands.Breaker.DONE) {
+                    Hands.collect(world, villager, hedge, 1.5);
+                    navFails = 0;
+                    navFrom = feet;
+                    villager.getNavigation().startMovingTo(waypoint.getX() + 0.5, waypoint.getY(), waypoint.getZ() + 0.5, SPEED);
+                }
+                hedge = null;
+            }
+            return true;
+        }
         double dx = waypoint.getX() + 0.5 - villager.getX();
         double dz = waypoint.getZ() + 0.5 - villager.getZ();
         double reach = cue ? 4.0 : 3.0;
@@ -224,6 +246,14 @@ public final class Explorar {
             boolean stuck = legTicks > 1 && navFrom.isWithinDistance(feet, 1.5);
             navFrom = feet;
             boolean started = villager.getNavigation().startMovingTo(waypoint.getX() + 0.5, waypoint.getY(), waypoint.getZ() + 0.5, SPEED);
+            BlockPos leaf = !started || stuck ? Hands.leafAhead(world, villager, Vec3d.ofBottomCenter(waypoint)) : null;
+            if (leaf != null) {
+                // what stops it is leaves (never a player's, never a village's): clicked away, and on it walks
+                hedge = leaf;
+                villager.getNavigation().stop();
+                Retina.memory(villager).doing("quita las hojas que le cierran el paso", now);
+                return true;
+            }
             if ((!started || stuck) && ++navFails >= 2) {
                 // its legs find no way there: remember that, look around and choose again
                 MCA.LOGGER.info("[Tropeles] {} no encuentra camino hacia {}: mira otra vez", name(villager), waypoint.toShortString());

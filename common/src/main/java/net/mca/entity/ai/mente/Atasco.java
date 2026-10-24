@@ -11,7 +11,8 @@ import net.minecraft.util.math.Direction;
 import org.jetbrains.annotations.Nullable;
 
 /**
- * Never stuck anywhere: the feeling a player gets after a quarter of a minute of pressing on and getting nowhere.
+ * Never stuck anywhere: the feeling a player gets after a few seconds of pressing on and getting nowhere (seven,
+ * not a quarter of a minute: a player does not wait that long to try something else).
  * Once a second it looks at three things: where its feet are (more than a block from where they were counts), what
  * is in its bag, and the blocks around it (one broken or placed counts). When none of them changed for
  * {@value #TICKS} ticks, and it was not standing still by choice (waiting, on alert, resting at home, hiding, its
@@ -30,7 +31,7 @@ import org.jetbrains.annotations.Nullable;
  * stuck, ends the episode. Every remedy is logged as {@code [Tropeles] <name> atascado ...: <what it tries>}.
  */
 public final class Atasco {
-    public static final int TICKS = 300;
+    public static final int TICKS = 140;
     /** Ticks a step aside or a dig-out may take before it counts as failed. */
     public static final int MOVE_TICKS = 200;
     public static final int DIG_TICKS = 600;

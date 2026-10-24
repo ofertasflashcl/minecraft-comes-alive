@@ -147,6 +147,42 @@ public final class Cofres {
         return moved;
     }
 
+    /**
+     * Puts {@code amounts[i]} items of bag slot {@code i} into the chest (part of a stack too: what it keeps of it stays
+     * in the bag). For a chest it leaves behind: nothing is remembered of it. Returns how many items moved.
+     */
+    public static int dump(ServerWorld world, VillagerEntityMCA villager, BlockPos pos, int[] amounts) {
+        Inventory inv = inventory(world, pos);
+        if (inv == null) {
+            return 0;
+        }
+        SimpleInventory bag = villager.getInventory();
+        int moved = 0;
+        for (int i = 0; i < bag.size() && i < amounts.length; i++) {
+            ItemStack stack = bag.getStack(i);
+            if (amounts[i] <= 0 || stack.isEmpty()) {
+                continue;
+            }
+            ItemStack part = stack.split(Math.min(amounts[i], stack.getCount()));
+            int count = part.getCount();
+            insert(inv, part);
+            moved += count - part.getCount();
+            if (!part.isEmpty()) {
+                // no room for all of it: the rest goes back where it was
+                if (stack.isEmpty()) {
+                    bag.setStack(i, part);
+                } else {
+                    stack.increment(part.getCount());
+                }
+            }
+        }
+        bag.markDirty();
+        Hands.aim(villager, net.minecraft.util.math.Vec3d.ofCenter(pos));
+        villager.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+        world.playSound(null, pos, net.minecraft.sound.SoundEvents.BLOCK_CHEST_CLOSE, net.minecraft.sound.SoundCategory.BLOCKS, 0.5F, 1.0F);
+        return moved;
+    }
+
     /** Takes up to {@code max} items matching {@code want} from the chest into its bag. */
     public static int take(ServerWorld world, VillagerEntityMCA villager, BlockPos pos, Predicate<ItemStack> want, int max) {
         Inventory inv = inventory(world, pos);

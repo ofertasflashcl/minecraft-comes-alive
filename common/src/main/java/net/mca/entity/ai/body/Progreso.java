@@ -90,7 +90,7 @@ public final class Progreso {
     /** Blocks it may stand on under itself to reach the top of a trunk: past the tallest spruce a world grows. */
     private static final int MAX_PILLAR = 32;
     /** Leaves it may clear off one tree, to get at the trunk and to have room over its head. */
-    private static final int MAX_LEAVES = 64;
+    private static final int MAX_LEAVES = 96;
     /** How far from the stump it looks for the logs that fell and the logs of the same trunk. */
     private static final int TREE_REACH = 6;
     /** How far a branch of the same tree reaches out from the trunk (an acacia's crooked arms). */
@@ -1027,8 +1027,21 @@ public final class Progreso {
                 motor.reset(world, villager);
                 t.side++;
             }
-        } else if (t.walk % 20 == 1 || villager.getNavigation().isIdle()) {
-            villager.getNavigation().startMovingTo(stand.getX() + 0.5, stand.getY(), stand.getZ() + 0.5, 0.65);
+        } else {
+            // its legs' path finder takes leaves for a wall: where the walk stops at a hedge or a low crown on the way,
+            // the leaves right ahead are clicked away and it walks on
+            BlockPos hedge = footed && t.walk > 20 && t.leaves < MAX_LEAVES && villager.getNavigation().isIdle()
+                    ? Hands.leafAhead(world, villager, Vec3d.ofBottomCenter(stand)) : null;
+            if (hedge != null) {
+                if (cutLeaf(world, villager, memory, now, t, hedge)) {
+                    t.walk = 1; // getting on: the walk to the trunk starts over from here
+                }
+                memory.doing("quita las hojas que le cierran el paso", now);
+                return;
+            }
+            if (t.walk % 20 == 1 || villager.getNavigation().isIdle()) {
+                villager.getNavigation().startMovingTo(stand.getX() + 0.5, stand.getY(), stand.getZ() + 0.5, 0.65);
+            }
         }
     }
 
@@ -1668,7 +1681,39 @@ public final class Progreso {
                 }
             }
         }
-        return null;
+        // a trunk wrapped in its leaves down to the ground: the place beside it once the leaves there are clicked away,
+        // the side it comes from first (the fewest leaves on the nearest side)
+        BlockPos best = null;
+        double bestCost = Double.MAX_VALUE;
+        for (int k = 0; k < 4; k++) {
+            BlockPos side = t.base.offset(sides[(t.side + k) & 3]);
+            for (BlockPos cell : new BlockPos[]{side, side.down()}) {
+                if (!fitsThroughLeaves(world, villager, cell)) {
+                    continue;
+                }
+                int leaves = (Hands.naturalLeaf(world, villager, cell) ? 1 : 0) + (Hands.naturalLeaf(world, villager, cell.up()) ? 1 : 0);
+                double cost = Math.sqrt(cell.getSquaredDistance(feet)) + 2 * leaves;
+                if (cost < bestCost) {
+                    bestCost = cost;
+                    best = cell;
+                }
+            }
+        }
+        return best;
+    }
+
+    /** Room for the body once the natural leaves in it are clicked away (some are there), on firm ground, not on a field. */
+    private static boolean fitsThroughLeaves(ServerWorld world, VillagerEntityMCA villager, BlockPos cell) {
+        boolean leafy = false;
+        for (BlockPos c : new BlockPos[]{cell, cell.up()}) {
+            if (Hands.naturalLeaf(world, villager, c)) {
+                leafy = true;
+            } else if (!Mining.passable(world, c)) {
+                return false;
+            }
+        }
+        BlockState floor = world.getBlockState(cell.down());
+        return leafy && Mining.standable(world, cell.down()) && !floor.isIn(BlockTags.LEAVES) && !Obras.cropAt(world, cell.down());
     }
 
     /** Room for the body with a floor under it, and not on a field. */

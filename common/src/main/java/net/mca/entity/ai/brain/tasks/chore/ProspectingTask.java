@@ -127,10 +127,16 @@ public class ProspectingTask extends AbstractChoreTask {
     private static final int RESUME_DISTANCE = 64;
     private static final long RESUME_AGE = 72000;
     private static final int SAVE_TICKS = 1200;
-    /** Ticks without any progress before the watchdog counts a round. */
-    private static final int STUCK_TICKS = 600;
-    /** The same, standing on the land with no ore in view and no step cut. */
-    private static final int SURFACE_STUCK_TICKS = 300;
+    /** Ticks without any progress before the watchdog counts a round: ten seconds, then it thinks again. */
+    private static final int STUCK_TICKS = 200;
+    /** The same, standing on the land with no ore in view and no step cut: seven seconds. */
+    private static final int SURFACE_STUCK_TICKS = 140;
+    /** Building blocks it keeps when it throws its junk away: pillars, bridges, a furnace. */
+    private static final int JUNK_KEEP = 32;
+    /** A field chest of its own this close (and this far up or down) is walked back to before another is made. */
+    private static final int CAMPO_REUSE = 32;
+    /** Ticks a field chest may take (making it, setting it down, filling it) before it gives up and goes home. */
+    private static final int CAMPO_TICKS = 1600;
     /** A spot found no good to start a mine is not tried again for this long. */
     private static final long SITE_FORGET = 6000;
     /** Rounds of no progress on the way home, counted in ticks, before it says it is lost. */
@@ -235,6 +241,30 @@ public class ProspectingTask extends AbstractChoreTask {
     private int placeTicks;
     private int ledgeFails;
     private boolean foraged;
+
+    // a chest wherever it is when the bag fills away from home, like its tables and furnaces; one for junk, left behind
+    private enum Campo {NADA, BASURA, GUARDAR}
+
+    private Campo campo = Campo.NADA;
+    /** The chest it is filling right now. */
+    @Nullable
+    private BlockPos campoCofre;
+    private int campoTicks;
+    private int campoWalk;
+    private long nextCampo;
+    /** The chest it threw its junk into this trip: used again while it is close, never claimed, never named. */
+    @Nullable
+    private BlockPos basura;
+    /** The cell of the tunnel wall it is cutting out to set its chest into, out of the way. */
+    @Nullable
+    private BlockPos nicho;
+    private int nichoFails;
+    private final Hands.Breaker nichoBreaker = new Hands.Breaker();
+    /** Field chests found full (or out of reach) this trip. */
+    private final Set<Long> campoLleno = new HashSet<>();
+    /** The breaking progress seen last tick: still rising means it is digging, not stuck. */
+    private float lastBreak;
+    private boolean breakingNow;
 
     // the climb out: its trail first, a staircase of its own when the trail is gone
     private boolean fallback;
@@ -626,6 +656,9 @@ public class ProspectingTask extends AbstractChoreTask {
         siteExploring = false;
         forceSite = false;
         provisioning = false;
+        campo = Campo.NADA;
+        campoCofre = null;
+        nicho = null;
         explorar.reset();
         resetWatch();
         ItemStack stack = villager.getMainHandStack();
@@ -712,6 +745,9 @@ public class ProspectingTask extends AbstractChoreTask {
                 }
                 return;
             }
+        }
+        if (phase == Phase.SEEK && !midStep && campo != Campo.NADA && campoTick(world, villager)) {
+            return;
         }
         if (!midStep && watchdog(world, villager)) {
             return;
@@ -1124,7 +1160,12 @@ public class ProspectingTask extends AbstractChoreTask {
         long now = world.getTime();
         BlockPos feet = villager.getBlockPos();
         SimpleInventory inv = villager.getInventory();
-        tidyBag(world, villager, false);
+        if (phase == Phase.SEEK && campo == Campo.NADA && now >= nextCampo && !progreso.wantsChest() && campoStart(world, villager)) {
+            return true;
+        }
+        if (campo == Campo.NADA) {
+            tidyBag(world, villager, false);
+        }
         // down in the rock by its own sense of place: a house roof or a tree over its head is not a mine
         boolean underground = Entorno.bajoTierra(world, villager);
         boolean noFood = foodPoints(inv) == 0;
@@ -1134,7 +1175,7 @@ public class ProspectingTask extends AbstractChoreTask {
             leave(world, villager, Trip.FOOD);
             return true;
         }
-        if (now >= nextBagCheck && bagFull(villager)) {
+        if (now >= nextBagCheck && campo == Campo.NADA && bagFull(villager)) {
             tidyBag(world, villager, true);
             if (bagFull(villager)) {
                 say("chore.mining.home");
@@ -1250,6 +1291,9 @@ public class ProspectingTask extends AbstractChoreTask {
     private void leave(ServerWorld world, VillagerEntityMCA villager, Trip why) {
         trip = why;
         BlockPos feet = villager.getBlockPos();
+        if (campo != Campo.NADA) {
+            endCampo(world, villager, world.getTime() + 1200);
+        }
         progreso.leaving();
         tidyBag(world, villager, false);
         if (!motor.midStep(villager)) {
@@ -1481,8 +1525,15 @@ public class ProspectingTask extends AbstractChoreTask {
     private boolean wayOut(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, int fromIdx) {
         if (viaFails < 3 && wayByMemory(world, villager, feet, null)) {
             BlockPos end = via.peekLast();
-            MCA.LOGGER.info("[Tropeles] {} recuerda por dónde salir: {} pasos por donde ya caminó, de {} a {}", name(), via.size(),
-                    feet.toShortString(), end == null ? "?" : end.toShortString());
+            Recuerdos r = Recuerdos.of(world, villager);
+            int nuevos = 0;
+            for (BlockPos cell : via) {
+                if (!r.recuerda(cell)) {
+                    nuevos++;
+                }
+            }
+            MCA.LOGGER.info("[Tropeles] {} recuerda por dónde salir: {} pasos ({} de ellos al lado de lo que pisó o que solo vio), de {} a {}", name(),
+                    via.size(), nuevos, feet.toShortString(), end == null ? "?" : end.toShortString());
             Voluntad.contar(villager, "Subo por donde ya pasé, no hace falta cavar otra escalera.",
                     "I'll go up the way I came, no need to dig another staircase.");
             Recuerdos.anotar(villager, "camino", "subí por donde ya había pasado, " + via.size() + " pasos de " + feet.getX() + " " + feet.getY() + " "
@@ -1506,7 +1557,8 @@ public class ProspectingTask extends AbstractChoreTask {
         List<BlockPos> way;
         try {
             Recuerdos r = Recuerdos.of(world, villager);
-            way = to == null ? r.caminoAfuera(world, feet, viaUsadas) : r.caminoHacia(world, feet, to, 1);
+            // the way out may be a block or two to the side of the steps it remembers, or a staircase it only saw
+            way = to == null ? r.caminoAfuera(world, feet, viaUsadas, Retina.memory(villager)) : r.caminoHacia(world, feet, to, 1);
         } catch (RuntimeException e) {
             MCA.LOGGER.warn("[Tropeles] {} no pudo pensar en un camino recordado: {}", name(), e.toString());
             way = List.of();
@@ -1972,6 +2024,382 @@ public class ProspectingTask extends AbstractChoreTask {
         return false;
     }
 
+    // ------------------------------------------------------------------ a chest wherever it is
+
+    /**
+     * The bag is (nearly) full away from home: like a player it sets a chest down right there instead of walking all
+     * the way back. Junk first ({@link #junkPlan}: loose rock and soil beyond {@value #JUNK_KEEP} building blocks,
+     * rotten flesh and such) into a chest it leaves behind and forgets; with the bag still full of its haul, into a
+     * field chest of its own, remembered by name ({@link Recuerdos#COFRE_CAMPO}) and filled again the next time it is
+     * close. It needs a chest in the bag, or the wood to make one (8 planks and a table, at the table it sets down like
+     * for a pickaxe). True when it starts on that now.
+     */
+    private boolean campoStart(ServerWorld world, VillagerEntityMCA villager) {
+        SimpleInventory inv = villager.getInventory();
+        int free = freeSlots(inv);
+        if (free >= 3) {
+            return false;
+        }
+        boolean chest = inv.count(Items.CHEST) > 0;
+        int junk = junkCount(inv);
+        boolean canMake = chestWood(inv, 0) && (free >= 2 || junk > 0);
+        // a chest only for junk is not worth the wood for its next pickaxe: that much more wood, or the junk goes on the ground
+        if (junk >= 64 && (chest || chestWood(inv, 6) && (free >= 2 || junk > 0) || basuraCerca(world, villager) != null)) {
+            startCampo(world, villager, Campo.BASURA);
+            return true;
+        }
+        ItemStack first = firstToStore(villager);
+        if (free <= 2 && !first.isEmpty()) {
+            BlockPos target = homePos(world, villager);
+            if (!camping && target.isWithinDistance(villager.getBlockPos(), Cofres.HOME_RANGE)) {
+                return false; // home is right here: its chest at home
+            }
+            if (chest || canMake || campoCerca(world, villager, first) != null) {
+                startCampo(world, villager, Campo.GUARDAR);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void startCampo(ServerWorld world, VillagerEntityMCA villager, Campo kind) {
+        campo = kind;
+        campoCofre = null;
+        campoTicks = 0;
+        campoWalk = 0;
+        nicho = null;
+        nichoFails = 0;
+        nichoBreaker.reset(world, villager);
+        if (!motor.midStep(villager)) {
+            motor.reset(world, villager);
+        }
+        plan.clear();
+        villager.getNavigation().stop();
+        resetWatch();
+        SimpleInventory inv = villager.getInventory();
+        boolean known = kind == Campo.BASURA ? basuraCerca(world, villager) != null : campoCerca(world, villager, firstToStore(villager)) != null;
+        if (!known && inv.count(Items.CHEST) == 0 && chestWood(inv, kind == Campo.BASURA ? 6 : 0) && freeSlots(inv) >= 2) {
+            // the wood is for the chest from now on: nothing else gets it first
+            progreso.wantChest();
+        }
+        BlockPos feet = villager.getBlockPos();
+        if (kind == Campo.BASURA) {
+            MCA.LOGGER.info("[Tropeles] {} tiene la mochila llena de cosas que no le sirven ({} de basura) en {}: las deja en un cofre ahí mismo",
+                    name(), junkCount(villager.getInventory()), feet.toShortString());
+            Voluntad.contar(villager, "Tengo la mochila llena de piedras y cosas que no me sirven. Las dejo en un cofre aquí mismo.",
+                    "My bag is full of rocks and junk I don't need. I'll leave them in a chest right here.");
+        } else {
+            MCA.LOGGER.info("[Tropeles] {} tiene la mochila llena lejos de casa en {} ({}): guarda lo suyo en un cofre de campo", name(),
+                    feet.toShortString(), Entorno.lugar(world, villager).palabra());
+            Voluntad.contar(villager, "Tengo la mochila llena y mi casa está lejos. Guardo lo mío en un cofre aquí y sigo trabajando.",
+                    "My bag is full and home is far. I'll store my things in a chest here and keep working.");
+        }
+    }
+
+    private void endCampo(ServerWorld world, VillagerEntityMCA villager, long until) {
+        campo = Campo.NADA;
+        campoCofre = null;
+        nicho = null;
+        nichoBreaker.reset(world, villager);
+        nextCampo = until;
+        progreso.forgetChest();
+        resetWatch();
+    }
+
+    /** One tick of setting a chest down where it is and filling it. True while that has the body. */
+    private boolean campoTick(ServerWorld world, VillagerEntityMCA villager) {
+        long now = world.getTime();
+        SimpleInventory inv = villager.getInventory();
+        VisualMemory memory = Retina.memory(villager);
+        BlockPos feet = villager.getBlockPos();
+        boolean basuraNow = campo == Campo.BASURA;
+        if (++campoTicks > CAMPO_TICKS) {
+            MCA.LOGGER.info("[Tropeles] {} no logró dejar sus cosas en un cofre en {} ticks: sigue como antes", name(), CAMPO_TICKS);
+            endCampo(world, villager, now + 2400);
+            return false;
+        }
+        if (campoCofre != null && !(world.getBlockState(campoCofre).getBlock() instanceof ChestBlock)) {
+            campoCofre = null;
+        }
+        if (campoCofre == null) {
+            campoCofre = basuraNow ? basuraCerca(world, villager) : campoCerca(world, villager, firstToStore(villager));
+            campoWalk = 0;
+            if (campoCofre != null && !basuraNow) {
+                MCA.LOGGER.info("[Tropeles] {} vuelve a su {} en {}", name(), Recuerdos.of(world, villager).nombreCofreDeCampo(campoCofre), campoCofre.toShortString());
+            }
+        }
+        if (campoCofre == null) {
+            if (inv.count(Items.CHEST) == 0) {
+                if (!progreso.wantsChest()) {
+                    if (!chestWood(inv, basuraNow ? 6 : 0) || freeSlots(inv) < 2 && !tossJunk(world, villager)) {
+                        MCA.LOGGER.info("[Tropeles] {} no tiene cofre ni con qué hacer uno", name());
+                        endCampo(world, villager, now + 2400);
+                        return false;
+                    }
+                    // the table and the chest are made the way it makes a pickaxe (gearUp, at the top of the dig)
+                    progreso.wantChest();
+                } else if (progreso.idle() && campoTicks > 100) {
+                    MCA.LOGGER.info("[Tropeles] {} no pudo hacer un cofre aquí", name());
+                    endCampo(world, villager, now + 2400);
+                    return false;
+                }
+                memory.doing(basuraNow ? "haciendo un cofre para la basura" : "haciendo un cofre para guardar lo que lleva", now);
+                return true;
+            }
+            progreso.forgetChest();
+            BlockPos placed = placeCampo(world, villager, feet, memory, now);
+            if (placed == null) {
+                return true; // a niche being cut, or nowhere yet: it keeps trying until its time is up
+            }
+            Lugar lugar = Entorno.lugar(world, villager);
+            if (basuraNow) {
+                basura = placed.toImmutable();
+                Recuerdos.anotar(villager, "cofre", "dejé un cofre para la basura en " + placed.getX() + " " + placed.getY() + " " + placed.getZ()
+                        + " (" + lugar.palabra() + ") y me olvido de él", placed);
+                MCA.LOGGER.info("[Tropeles] {} pone un cofre para la basura en {} ({}): no es suyo, lo deja ahí", name(), placed.toShortString(), lugar.palabra());
+            } else {
+                Cofres.claim(world, villager, placed);
+                Recuerdos r = Recuerdos.of(world, villager);
+                String nombre = r.nombreCofreDeCampo(placed);
+                r.sitio(nombre, placed, now);
+                r.anotar(now, "cofre", "puse mi " + nombre + " en " + placed.getX() + " " + placed.getY() + " " + placed.getZ() + " (" + lugar.palabra()
+                        + "), lejos de casa, para vaciar la mochila", placed);
+                MCA.LOGGER.info("[Tropeles] {} pone su {} en {} ({})", name(), nombre, placed.toShortString(), lugar.palabra());
+            }
+            campoCofre = placed.toImmutable();
+            campoWalk = 0;
+        }
+        if (Retina.visibleFace(world, villager, campoCofre, Retina.BLOCK_REACH) == null) {
+            if (++campoWalk > 400) {
+                // it cannot get to that one: another, or a new one
+                campoLleno.add(campoCofre.asLong());
+                campoCofre = null;
+                return true;
+            }
+            memory.doing(basuraNow ? "yendo al cofre de la basura" : "yendo a su cofre de campo", now);
+            if ((campoWalk % 20) == 1 || villager.getNavigation().isIdle()) {
+                villager.getNavigation().startMovingTo(campoCofre.getX() + 0.5, campoCofre.getY(), campoCofre.getZ() + 0.5, 0.6);
+            }
+            return true;
+        }
+        villager.getNavigation().stop();
+        BlockPos at = campoCofre;
+        int moved;
+        if (basuraNow) {
+            moved = Cofres.dump(world, villager, at, junkPlan(inv));
+            if (moved > 0) {
+                Recuerdos.anotar(villager, "cofre", "tiré " + moved + " cosas que no me sirven en el cofre de la basura en " + at.getX() + " " + at.getY()
+                        + " " + at.getZ(), at);
+            }
+            memory.doing("dejó " + moved + " cosas que no le sirven en un cofre", now);
+            MCA.LOGGER.info("[Tropeles] {} deja {} cosas que no le sirven en el cofre de {}; le quedan {} bloques para construir", name(), moved,
+                    at.toShortString(), Hands.buildingBlockCount(villager));
+        } else {
+            int[] buildingStacks = {0};
+            moved = Cofres.store(world, villager, at, stack -> keep(stack, buildingStacks));
+            Recuerdos r = Recuerdos.of(world, villager);
+            String nombre = r.nombreCofreDeCampo(at);
+            r.sitio(nombre, at, now);
+            if (moved > 0) {
+                r.anotar(now, "cofre", "guardé " + moved + " cosas en mi " + nombre + " en " + at.getX() + " " + at.getY() + " " + at.getZ(), at);
+            }
+            memory.doing("guardó " + moved + " cosas en su " + nombre, now);
+            MCA.LOGGER.info("[Tropeles] {} guarda {} cosas en su {} en {}", name(), moved, nombre, at.toShortString());
+            ItemStack left = firstToStore(villager);
+            if (!left.isEmpty() && freeSlots(inv) <= 2 && !Cofres.roomFor(world, at, left)) {
+                // that one is full: the next one it knows, or a new one beside it, or home when it cannot make one
+                campoLleno.add(at.asLong());
+                campoCofre = null;
+                if (inv.count(Items.CHEST) == 0 && !chestWood(inv, 0) && campoCerca(world, villager, left) == null) {
+                    endCampo(world, villager, now + 2400);
+                    return false;
+                }
+                return true;
+            }
+        }
+        endCampo(world, villager, now + (moved > 0 ? 200 : 2400));
+        return false;
+    }
+
+    /**
+     * Where the chest goes: in a tunnel, into a niche it cuts in the side wall, so it never shuts the way; in the open,
+     * on the floor beside it, never on its trail, in a one-wide passage or at the end of one. Null while the niche is
+     * being cut or when there is nowhere.
+     */
+    @Nullable
+    private BlockPos placeCampo(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, VisualMemory memory, long now) {
+        SimpleInventory inv = villager.getInventory();
+        if (nicho == null && nichoFails < 2) {
+            // the walls to the sides of the way its tunnel runs (never the face it digs on, nor the way back)
+            Direction ahead = Direction.fromHorizontal(tunnelDir & 3);
+            Direction facing = villager.getHorizontalFacing();
+            Direction[] sides = facing.getAxis() == ahead.getAxis()
+                    ? new Direction[]{ahead.rotateYClockwise(), ahead.rotateYCounterclockwise()}
+                    : new Direction[]{facing, facing.getOpposite()};
+            for (Direction side : sides) {
+                BlockPos cell = feet.offset(side);
+                BlockState state = world.getBlockState(cell);
+                if (Mining.isRock(state) && !Mining.isOre(state) && !mina.has(cell) && Mining.standable(world, cell.down()) && !Mining.heat(world, cell)
+                        && world.getFluidState(cell.up()).isEmpty() && !Mining.passable(world, cell.up()) && Obras.mayBreak(world, villager, cell)) {
+                    nicho = cell.toImmutable();
+                    break;
+                }
+            }
+        }
+        if (nicho == null || nichoFails >= 2) {
+            return Progreso.placeBeside(world, villager, Cofres::isChestItem,
+                    cell -> mina.has(cell) || mina.has(cell.down()) || mina.has(cell.down(2)) || narrow(world, cell));
+        }
+        if (!Mining.passable(world, nicho)) {
+            int r = nichoBreaker.tick(world, villager, nicho);
+            if (r == Hands.Breaker.RUNNING) {
+                memory.doing("cavando un hueco en la pared para su cofre", now);
+                return null;
+            }
+            if (r == Hands.Breaker.FAILED && !Mining.passable(world, nicho)) {
+                nichoFails++;
+                nicho = null;
+                return null;
+            }
+        }
+        BlockPos cell = nicho;
+        nicho = null;
+        int slot = Hands.findSlot(inv, Cofres::isChestItem);
+        if (slot >= 0 && Hands.place(world, villager, cell, inv.getStack(slot))) {
+            return cell;
+        }
+        nichoFails++;
+        return null;
+    }
+
+    /** A cell of a one-wide passage (walls on both sides, open ahead and behind) or the dead end of one: a chest there shuts the way. */
+    private static boolean narrow(ServerWorld world, BlockPos cell) {
+        boolean n = Mining.passable(world, cell.north());
+        boolean s = Mining.passable(world, cell.south());
+        boolean e = Mining.passable(world, cell.east());
+        boolean w = Mining.passable(world, cell.west());
+        int open = (n ? 1 : 0) + (s ? 1 : 0) + (e ? 1 : 0) + (w ? 1 : 0);
+        return open <= 1 || n && s && !e && !w || e && w && !n && !s;
+    }
+
+    /** Its nearest field chest it remembers within {@value #CAMPO_REUSE} blocks that still stands and has room for {@code first}. */
+    @Nullable
+    private BlockPos campoCerca(ServerWorld world, VillagerEntityMCA villager, ItemStack first) {
+        if (first.isEmpty()) {
+            return null;
+        }
+        BlockPos feet = villager.getBlockPos();
+        Recuerdos r = Recuerdos.of(world, villager);
+        BlockPos best = null;
+        double bestD = (double) CAMPO_REUSE * CAMPO_REUSE;
+        for (Map.Entry<String, BlockPos> e : r.cofresDeCampo().entrySet()) {
+            BlockPos pos = e.getValue();
+            double d = pos.getSquaredDistance(feet);
+            if (d > bestD || Math.abs(pos.getY() - feet.getY()) > 12 || campoLleno.contains(pos.asLong()) || !world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) {
+                continue;
+            }
+            if (!(world.getBlockState(pos).getBlock() instanceof ChestBlock)) {
+                r.olvidarSitio(e.getKey(), world.getTime()); // it is gone: no use remembering it
+                continue;
+            }
+            if (Cofres.roomFor(world, pos, first)) {
+                best = pos;
+                bestD = d;
+            }
+        }
+        return best;
+    }
+
+    /** The junk chest of this trip, when it is still close and has room. */
+    @Nullable
+    private BlockPos basuraCerca(ServerWorld world, VillagerEntityMCA villager) {
+        if (basura == null || !basura.isWithinDistance(villager.getBlockPos(), 12) || campoLleno.contains(basura.asLong())
+                || !(world.getBlockState(basura).getBlock() instanceof ChestBlock)) {
+            return null;
+        }
+        SimpleInventory inv = villager.getInventory();
+        int[] plan = junkPlan(inv);
+        for (int i = 0; i < plan.length; i++) {
+            if (plan[i] > 0 && Cofres.roomFor(world, basura, inv.getStack(i))) {
+                return basura;
+            }
+        }
+        return null;
+    }
+
+    /** The wood for a chest and the table to make it on, in planks (8 and 4), and {@code spare} planks more. */
+    private static boolean chestWood(SimpleInventory inv, int spare) {
+        int planks = 0;
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack stack = inv.getStack(i);
+            if (stack.isIn(net.minecraft.registry.tag.ItemTags.PLANKS)) {
+                planks += stack.getCount();
+            } else if (stack.isIn(net.minecraft.registry.tag.ItemTags.LOGS)) {
+                planks += 4 * stack.getCount();
+            }
+        }
+        return planks >= 12 + spare && Progreso.canMakeChest(inv);
+    }
+
+    /** Throws its biggest stack of junk on the ground to make room for crafting. False when it has none. */
+    private boolean tossJunk(ServerWorld world, VillagerEntityMCA villager) {
+        SimpleInventory inv = villager.getInventory();
+        int[] plan = junkPlan(inv);
+        int slot = -1;
+        for (int i = 0; i < plan.length; i++) {
+            if (plan[i] > 0 && plan[i] == inv.getStack(i).getCount() && (slot < 0 || plan[i] > plan[slot])) {
+                slot = i;
+            }
+        }
+        return slot >= 0 && Hands.toss(world, villager, slot, 6000);
+    }
+
+    /** What it does not need at all: not food, not worth a thing to a miner. */
+    private static boolean junk(ItemStack stack) {
+        return stack.isOf(Items.ROTTEN_FLESH) || stack.isOf(Items.POISONOUS_POTATO) || stack.isOf(Items.SPIDER_EYE);
+    }
+
+    /**
+     * How much of each slot is junk: loose rock and soil beyond {@value #JUNK_KEEP} building blocks (cobblestone kept
+     * first, the biggest stacks first: for pillars, bridges, walls and a furnace), and everything {@link #junk}.
+     */
+    private static int[] junkPlan(SimpleInventory inv) {
+        int[] out = new int[inv.size()];
+        List<Integer> rocks = new ArrayList<>();
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack stack = inv.getStack(i);
+            if (rubble(stack)) {
+                rocks.add(i);
+            } else if (junk(stack)) {
+                out[i] = stack.getCount();
+            }
+        }
+        rocks.sort((a, b) -> {
+            boolean ca = cobble(inv.getStack(a));
+            boolean cb = cobble(inv.getStack(b));
+            if (ca != cb) {
+                return ca ? -1 : 1;
+            }
+            return Integer.compare(inv.getStack(b).getCount(), inv.getStack(a).getCount());
+        });
+        int keepLeft = JUNK_KEEP;
+        for (int i : rocks) {
+            ItemStack stack = inv.getStack(i);
+            int kept = Hands.isBuildingBlock(stack) ? Math.min(keepLeft, stack.getCount()) : 0;
+            keepLeft -= kept;
+            out[i] = stack.getCount() - kept;
+        }
+        return out;
+    }
+
+    private static int junkCount(SimpleInventory inv) {
+        int n = 0;
+        for (int k : junkPlan(inv)) {
+            n += k;
+        }
+        return n;
+    }
+
     // ------------------------------------------------------------------ back to work
 
     /** Down its own trail to the face it left, or a fresh start where it stands when it knows no trail. */
@@ -2407,7 +2835,12 @@ public class ProspectingTask extends AbstractChoreTask {
             return true;
         }
         // standing still by choice: resting at home, fighting or hiding, its iron in the furnace, asleep
-        boolean byChoice = phase == Phase.REST || troubled() || progreso.cooking() || villager.isSleeping();
+        // and a block being broken that is still cracking (a hard one takes a while): that is digging, not being stuck
+        float breaking = Math.max(motor.breaker().progress(), nichoBreaker.progress());
+        boolean digging = breaking > 0 && breaking != lastBreak;
+        lastBreak = breaking;
+        breakingNow = digging;
+        boolean byChoice = phase == Phase.REST || troubled() || progreso.cooking() || villager.isSleeping() || digging;
         Atasco.Remedio remedy = atasco.tick(world, villager, byChoice, memory.doing() + " (" + phase + ")");
         if (remedy == Atasco.Remedio.NINGUNO) {
             return false;
@@ -2560,6 +2993,10 @@ public class ProspectingTask extends AbstractChoreTask {
         if ((villager.age % 20) != 0) {
             return false;
         }
+        if (breakingNow) {
+            // a hard block still cracking under the pickaxe: that is work, the ten seconds wait for it
+            return false;
+        }
         double progress = progress(world, villager);
         if (bestProgress == Double.NEGATIVE_INFINITY) {
             // a new measure (a new phase, or its own staircase instead of the trail): this is where it starts from
@@ -2602,10 +3039,11 @@ public class ProspectingTask extends AbstractChoreTask {
                 wayOut(world, villager, villager.getBlockPos(), mina.nearLow(world, villager.getBlockPos()));
             } else {
                 climbMode = (climbMode + 1) % 5;
-                if (stuckRounds >= 3) {
+                // rounds are ten seconds now: a call after a minute, a cry for help after a minute and a half
+                if (stuckRounds >= 6) {
                     callOutStuck(world);
                 }
-                if (stuckRounds >= 4) {
+                if (stuckRounds >= 9) {
                     cryForHelp(world);
                 }
             }
@@ -2622,12 +3060,12 @@ public class ProspectingTask extends AbstractChoreTask {
             }
         } else {
             villager.getNavigation().stop();
-            if (stuckRounds >= 3) {
-                // no way home from here: this is the camp now
+            if (stuckRounds >= 6) {
+                // a minute without getting closer: no way home from here, this is the camp now
                 camping = true;
                 homeTarget = villager.getBlockPos().toImmutable();
                 enterHomeStore();
-            } else if (stuckRounds == 2) {
+            } else if (stuckRounds == 2 || stuckRounds == 4) {
                 BlockPos target = homePos(world, villager);
                 BlockPos feet = villager.getBlockPos();
                 BlockPos goal = feet.offset(Direction.getFacing(target.getX() - feet.getX(), 0, target.getZ() - feet.getZ()), 2);
@@ -2663,8 +3101,8 @@ public class ProspectingTask extends AbstractChoreTask {
     }
 
     /**
-     * While digging: nothing moved and nothing new in the bag for half a minute. Drop the plan, forget that ore,
-     * turn; the third time in a row, head up and home and start over from there.
+     * While digging: nothing moved and nothing new in the bag for ten seconds (seven up on the land). Drop the plan,
+     * forget that ore, turn; after a minute of that, head up and home and start over from there.
      */
     private boolean seekWatchdog(ServerWorld world, VillagerEntityMCA villager) {
         if ((villager.age % 20) != 0) {
@@ -2712,7 +3150,7 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         tunnelDir = (tunnelDir + (stuckRounds % 2 == 1 ? 1 : 3)) & 3;
         Retina.memory(villager).doing("atascado: cambia de rumbo", world.getTime());
-        if (stuckRounds >= 3) {
+        if (stuckRounds >= 6) {
             stuckRounds = 0;
             leave(world, villager, Trip.BAG);
         }

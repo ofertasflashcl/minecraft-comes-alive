@@ -382,6 +382,44 @@ public final class Hands {
         return false;
     }
 
+    /**
+     * Leaves the world grew ({@link Obras#natural}: never the persistent ones a player places) and that are nobody's
+     * (no player's, no village's): what a player clicks away by hand when they stand between it and a trunk, over its
+     * head on a pillar or a jump, or across the way it walks. No pick needed, so a step that may not dig still may.
+     */
+    public static boolean naturalLeaf(ServerWorld world, VillagerEntityMCA villager, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        return state.isIn(BlockTags.LEAVES) && Obras.natural(state) && Obras.mayBreak(world, villager, pos);
+    }
+
+    /**
+     * Natural leaves right across the way toward {@code target}: the next one or two cells ahead of its feet, at its feet
+     * or its head, in reach and in sight (head height first, the way a player clears a hedge). Null when nothing
+     * leafy stops it there.
+     */
+    @Nullable
+    public static BlockPos leafAhead(ServerWorld world, VillagerEntityMCA villager, Vec3d target) {
+        double dx = target.x - villager.getX();
+        double dz = target.z - villager.getZ();
+        if (dx * dx + dz * dz < 0.25) {
+            return null;
+        }
+        Direction toward = Math.abs(dx) >= Math.abs(dz) ? (dx > 0 ? Direction.EAST : Direction.WEST) : (dz > 0 ? Direction.SOUTH : Direction.NORTH);
+        BlockPos ahead = villager.getBlockPos();
+        for (int k = 1; k <= 2; k++) {
+            ahead = ahead.offset(toward);
+            for (BlockPos cell : new BlockPos[]{ahead.up(), ahead}) {
+                if (naturalLeaf(world, villager, cell) && Retina.visibleFace(world, villager, cell, Retina.BLOCK_REACH) != null) {
+                    return cell.toImmutable();
+                }
+            }
+            if (!Mining.passable(world, ahead) || !Mining.passable(world, ahead.up())) {
+                return null; // something else stops it first: not leaves' doing
+            }
+        }
+        return null;
+    }
+
     /** A block worth spending on bridges, pillars and walls: a full solid cube that does not fall and is not precious. */
     public static boolean isBuildingBlock(ItemStack stack) {
         if (!(stack.getItem() instanceof BlockItem blockItem) || stack.isEmpty()) {

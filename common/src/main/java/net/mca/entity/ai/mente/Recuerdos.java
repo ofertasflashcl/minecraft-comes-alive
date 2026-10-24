@@ -6,6 +6,7 @@ import net.mca.MCA;
 import net.mca.entity.ai.body.Mining;
 import net.mca.entity.ai.sense.Entorno;
 import net.mca.entity.ai.sense.Lugar;
+import net.mca.entity.ai.sense.VisualMemory;
 import net.mca.util.WorldUtils;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
@@ -263,12 +264,25 @@ public final class Recuerdos {
      * {@code skip}: ends already tried this trip.
      */
     public List<BlockPos> caminoAfuera(ServerWorld world, BlockPos from, Set<Long> skip) {
+        return caminoAfuera(world, from, skip, null);
+    }
+
+    /**
+     * The same, the way a player looks for the way up before cutting a new staircase: the remembered way may be a
+     * block or two to the side of where it stands ({@value #GAP} cells it never stood on, in a row, are crossed by
+     * touch), and with {@code vista} a way over cells whose floor its eyes saw (a staircase, a ramp, steps it never
+     * walked) counts too, up to {@value #SEEN_GAP} of them in a row, and may end at a cell that is out on open ground.
+     */
+    public List<BlockPos> caminoAfuera(ServerWorld world, BlockPos from, Set<Long> skip, @Nullable VisualMemory vista) {
         int y = from.getY();
-        List<BlockPos> way = camino(world, from, (pos, p) -> p.fuera() && p.hondo == 0 && pos.getY() >= y && !skip.contains(pos.asLong()), SEARCH_NODES);
+        Predicate<BlockPos> openEnd = vista == null ? null
+                : pos -> pos.getY() >= y + 2 && !skip.contains(pos.asLong()) && Mining.onSurface(world, pos) && Mining.openGround(world, pos);
+        List<BlockPos> way = camino(world, from, (pos, p) -> p.fuera() && p.hondo == 0 && pos.getY() >= y && !skip.contains(pos.asLong()),
+                SEARCH_NODES, vista, openEnd);
         if (!way.isEmpty()) {
             return way;
         }
-        return camino(world, from, (pos, p) -> p.fuera() && pos.getY() >= y && !skip.contains(pos.asLong()), SEARCH_NODES);
+        return camino(world, from, (pos, p) -> p.fuera() && pos.getY() >= y && !skip.contains(pos.asLong()), SEARCH_NODES, vista, openEnd);
     }
 
     /** A way over walked cells to within {@code near} blocks of {@code target} (its work face, the mouth of its mine). */
@@ -283,6 +297,11 @@ public final class Recuerdos {
         boolean es(BlockPos pos, Paso paso);
     }
 
+    /** Cells it never stood on that a remembered way may cross in a row: the way is a block or two to the side. */
+    public static final int GAP = 3;
+    /** The same, over cells whose floor the eye saw: a staircase or a ramp beside it that it never walked. */
+    public static final int SEEN_GAP = 12;
+
     /**
      * The shortest way, counted in steps, over cells it walked, from the feet (or a walked cell touching them) to the
      * first cell {@code meta} accepts. Every cell of the way is checked now, by touch: room for the body and a floor,
@@ -290,12 +309,25 @@ public final class Recuerdos {
      * is no such way (or the feet are already at one).
      */
     public List<BlockPos> camino(ServerWorld world, BlockPos from, Meta meta, int maxNodes) {
+        return camino(world, from, meta, maxNodes, null, null);
+    }
+
+    /**
+     * As above, but a way may also cross cells it never stood on: up to {@value #GAP} in a row (the remembered way is
+     * a little to the side), or up to {@value #SEEN_GAP} in a row whose floor {@code vista} saw. Such a cell can end the
+     * way only when {@code openEnd} accepts it. Without {@code vista} only walked cells, as above.
+     */
+    public List<BlockPos> camino(ServerWorld world, BlockPos from, Meta meta, int maxNodes, @Nullable VisualMemory vista,
+                                 @Nullable Predicate<BlockPos> openEnd) {
         long now = world.getTime();
+        boolean gaps = vista != null;
         Map<Long, Long> parent = new HashMap<>();
+        Map<Long, Integer> gap = new HashMap<>();
         Map<Long, Boolean> room = new HashMap<>();
         ArrayDeque<Long> open = new ArrayDeque<>();
         long start = from.asLong();
         parent.put(start, Long.MIN_VALUE);
+        gap.put(start, 0);
         open.add(start);
         int nodes = 0;
         BlockPos.Mutable a = new BlockPos.Mutable();
@@ -304,9 +336,12 @@ public final class Recuerdos {
             long at = open.poll();
             a.set(at);
             Paso here = pasos.get(at);
-            if (at != start && here != null && meta.es(a, here)) {
-                return back(parent, at, start);
+            if (at != start) {
+                if (here != null && meta.es(a, here) || here == null && openEnd != null && openEnd.test(a)) {
+                    return back(parent, at, start);
+                }
             }
+            int gapHere = gap.getOrDefault(at, 0);
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dz = -1; dz <= 1; dz++) {
                     for (int dy = -1; dy <= 1; dy++) {
@@ -314,20 +349,41 @@ public final class Recuerdos {
                             continue;
                         }
                         long next = BlockPos.asLong(a.getX() + dx, a.getY() + dy, a.getZ() + dz);
-                        if (parent.containsKey(next) || !pasos.containsKey(next) || cerrado(next, now)) {
+                        if (parent.containsKey(next) || cerrado(next, now)) {
                             continue;
+                        }
+                        boolean walked = pasos.containsKey(next);
+                        int gapNext = 0;
+                        if (!walked) {
+                            if (!gaps) {
+                                continue;
+                            }
+                            gapNext = gapHere + 1;
+                            if (gapNext > SEEN_GAP || gapNext > GAP && !seenFloor(vista, BlockPos.fromLong(next))) {
+                                continue;
+                            }
                         }
                         b.set(next);
                         if (!room(world, room, b) || !transit(world, a, b, dx, dy, dz)) {
                             continue;
                         }
                         parent.put(next, at);
+                        gap.put(next, gapNext);
                         open.add(next);
                     }
                 }
             }
         }
         return List.of();
+    }
+
+    /** The eye saw something to stand on under that cell. */
+    private static boolean seenFloor(@Nullable VisualMemory vista, BlockPos cell) {
+        if (vista == null) {
+            return false;
+        }
+        net.minecraft.block.BlockState floor = vista.stateAt(cell.down());
+        return floor != null && !floor.isAir() && floor.getFluidState().isEmpty();
     }
 
     private static List<BlockPos> back(Map<Long, Long> parent, long end, long start) {
@@ -443,6 +499,46 @@ public final class Recuerdos {
 
     public Map<String, BlockPos> sitios() {
         return Collections.unmodifiableMap(sitios);
+    }
+
+    /** What a chest it set down away from home, to empty a full bag into, is called among its places ("cofre de campo 2"). */
+    public static final String COFRE_CAMPO = "cofre de campo";
+
+    /** The name of its field chest at {@code pos}: the one it already has, or the next "cofre de campo N". */
+    public String nombreCofreDeCampo(BlockPos pos) {
+        int n = 0;
+        for (Map.Entry<String, BlockPos> e : sitios.entrySet()) {
+            if (e.getKey().startsWith(COFRE_CAMPO)) {
+                if (e.getValue().equals(pos)) {
+                    return e.getKey();
+                }
+                try {
+                    n = Math.max(n, Integer.parseInt(e.getKey().substring(COFRE_CAMPO.length()).trim()));
+                } catch (NumberFormatException ignored) {
+                    n = Math.max(n, 1);
+                }
+            }
+        }
+        return COFRE_CAMPO + " " + (n + 1);
+    }
+
+    /** Its field chests by name, as it remembers them (they may be gone since). */
+    public Map<String, BlockPos> cofresDeCampo() {
+        Map<String, BlockPos> out = new LinkedHashMap<>();
+        sitios.forEach((name, pos) -> {
+            if (name.startsWith(COFRE_CAMPO)) {
+                out.put(name, pos);
+            }
+        });
+        return out;
+    }
+
+    /** Forgets a named place (a field chest that is gone). */
+    public void olvidarSitio(String nombre, long t) {
+        if (sitios.remove(nombre) != null) {
+            sitiosCuando.remove(nombre);
+            dirty(t);
+        }
     }
 
     /** "hace un momento", "hace 3 min", "hace 2 h", "hace 1 día" (in-game time). */
