@@ -1678,7 +1678,9 @@ public final class Pruebas {
         @Override
         String state() {
             return "en " + v.getBlockPos().toShortString() + ", haciendo: " + Retina.memory(v).doing() + ", cortados " + order
-                    + ", troncos " + v.getInventory().count(Items.OAK_LOG) + ", " + progreso.debugTree();
+                    + ", troncos " + v.getInventory().count(Items.OAK_LOG) + ", seto "
+                    + hedge.stream().map(p -> p.getY() - 100 + ":" + world.getBlockState(p).getBlock().getName().getString()).toList()
+                    + ", " + progreso.debugTree();
         }
 
         @Override
@@ -1883,6 +1885,33 @@ public final class Pruebas {
             }
         }
         return list;
+    }
+
+    /** Cobblestone that went into what a villager carries: a furnace 8, a stone pickaxe or axe 3, a sword or hoe 2, a shovel 1. */
+    private static int stoneMade(VillagerEntityMCA v) {
+        int n = 0;
+        List<ItemStack> all = new ArrayList<>();
+        for (int i = 0; i < v.getInventory().size(); i++) {
+            all.add(v.getInventory().getStack(i));
+        }
+        all.add(v.getMainHandStack());
+        all.add(v.getOffHandStack());
+        for (ItemStack stack : all) {
+            int each = stack.isOf(Items.FURNACE) ? 8 : stack.isOf(Items.STONE_PICKAXE) || stack.isOf(Items.STONE_AXE) ? 3
+                    : stack.isOf(Items.STONE_SWORD) || stack.isOf(Items.STONE_HOE) ? 2 : stack.isOf(Items.STONE_SHOVEL) ? 1 : 0;
+            n += each * stack.getCount();
+        }
+        return n;
+    }
+
+    private static int furnacesIn(ServerWorld world, BlockPos a, BlockPos b) {
+        int n = 0;
+        for (BlockPos pos : BlockPos.iterate(a, b)) {
+            if (world.getBlockState(pos).isOf(Blocks.FURNACE)) {
+                n++;
+            }
+        }
+        return n;
     }
 
     /** A one-wide, two-high tunnel deep in stone, lit, with the land far over it: where a miner fills its bag. */
@@ -2097,14 +2126,20 @@ public final class Pruebas {
                 int cobble = bag.count(Items.COBBLESTONE);
                 boolean allJunk = in.getOrDefault("minecraft:dirt", 0) == 64 && in.getOrDefault("minecraft:gravel", 0) == 64
                         && in.getOrDefault("minecraft:andesite", 0) == 64 && in.getOrDefault("minecraft:diorite", 0) == 32
-                        && in.getOrDefault("minecraft:rotten_flesh", 0) == 10 && in.getOrDefault("minecraft:cobblestone", 0) >= 150;
-                boolean kept = cobble >= 32 && cobble <= 40 && bag.count(Items.RAW_GOLD) == gold && bag.count(Items.STONE_PICKAXE) + (miner.getMainHandStack().isOf(Items.STONE_PICKAXE) ? 1 : 0) >= 1
+                        && in.getOrDefault("minecraft:rotten_flesh", 0) == 10;
+                // every cobblestone beyond the 32 it keeps went into the chest: what it had (192, and one from the niche it
+                // cut) is the chest's, the bag's and what it made from it with its own hands (a furnace, stone tools)
+                int made = stoneMade(miner) + 8 * furnacesIn(world, boxA, boxB) - 3;
+                int inChest = in.getOrDefault("minecraft:cobblestone", 0);
+                int total = inChest + cobble + made;
+                allJunk &= inChest >= 100 && total >= 192 && total <= 193;
+                boolean kept = cobble == 32 && bag.count(Items.RAW_GOLD) == gold && bag.count(Items.STONE_PICKAXE) + (miner.getMainHandStack().isOf(Items.STONE_PICKAXE) ? 1 : 0) >= 1
                         && in.getOrDefault("minecraft:raw_gold", 0) == 0;
                 boolean unowned = net.mca.server.world.data.TropelesMundo.get(world).chest(pos) == null
                         && !net.mca.entity.ai.mente.Recuerdos.of(world, miner).sitios().containsValue(pos);
                 boolean passed = allJunk && kept && unowned;
                 check(name, passed, "dejó la basura en un cofre en " + pos.toShortString() + " en " + ticks + " ticks: " + in + "; se quedó con "
-                        + cobble + " de piedra y su oro (" + bag.count(Items.RAW_GOLD) + "/" + gold + "); cofre sin dueño ni nombre: " + unowned + "; " + state());
+                        + cobble + " de piedra (gastó " + made + " en lo que fabricó; cuenta " + total + "/192-193) y su oro (" + bag.count(Items.RAW_GOLD) + "/" + gold + "); cofre sin dueño ni nombre: " + unowned + "; " + state());
                 return passed;
             }
             return null;

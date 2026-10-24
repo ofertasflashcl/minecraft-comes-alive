@@ -394,7 +394,8 @@ public final class Hands {
 
     /**
      * Natural leaves right across the way toward {@code target}: the next one or two cells ahead of its feet, at its feet
-     * or its head, in reach and in sight (head height first, the way a player clears a hedge). Null when nothing
+     * or its head, in reach and in sight. The feet first: with the head leaf cut first it would step up onto the
+     * lower one and walk over the leaves instead of through the gap a player cuts. Null when nothing
      * leafy stops it there.
      */
     @Nullable
@@ -408,7 +409,7 @@ public final class Hands {
         BlockPos ahead = villager.getBlockPos();
         for (int k = 1; k <= 2; k++) {
             ahead = ahead.offset(toward);
-            for (BlockPos cell : new BlockPos[]{ahead.up(), ahead}) {
+            for (BlockPos cell : new BlockPos[]{ahead, ahead.up()}) {
                 if (naturalLeaf(world, villager, cell) && Retina.visibleFace(world, villager, cell, Retina.BLOCK_REACH) != null) {
                     return cell.toImmutable();
                 }

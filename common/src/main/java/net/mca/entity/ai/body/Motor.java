@@ -1046,6 +1046,21 @@ public final class Motor {
             }
             return Result.RUNNING;
         }
+        // 2b. a crown's leaves beside the column that the body would brush on the way up (it is never quite centred):
+        // clicked away first, or the jump stops short under them and no block fits in
+        BlockPos brush = leafInTheRise(world, villager);
+        if (brush != null) {
+            standStill(villager);
+            doing = "quita las hojas del paso";
+            int hit = breaker.tick(world, villager, brush);
+            if (hit == Hands.Breaker.DONE) {
+                afterBreak(world, villager, brush);
+            }
+            if (hit != Hands.Breaker.FAILED) {
+                return Result.RUNNING;
+            }
+            // out of sight from here: the jump is tried as it is
+        }
         // 3. jump; the block goes in at the top (RISE)
         centerTicks = 0;
         standStill(villager);
@@ -1121,6 +1136,28 @@ public final class Motor {
     /** Sand or gravel falling right over it or the way. */
     private static boolean fallingNear(ServerWorld world, VillagerEntityMCA villager) {
         return !world.getEntitiesByClass(FallingBlockEntity.class, villager.getBoundingBox().stretch(0, 6, 0).expand(1.0), Entity::isAlive).isEmpty();
+    }
+
+    /**
+     * Natural leaves the body's box would run into on a pillar jump (its box raised by the jump), in sight: the nearest
+     * one, or null. The column itself is {@link #clearance()}'s; these are the cells beside it the box overlaps.
+     */
+    @Nullable
+    private BlockPos leafInTheRise(ServerWorld world, VillagerEntityMCA villager) {
+        net.minecraft.util.math.Box rise = villager.getBoundingBox().stretch(0, 1.3, 0).contract(1.0E-3);
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (BlockPos cell : BlockPos.iterate(BlockPos.ofFloored(rise.minX, rise.minY, rise.minZ), BlockPos.ofFloored(rise.maxX, rise.maxY, rise.maxZ))) {
+            if (cell.getX() == from.getX() && cell.getZ() == from.getZ() || !Hands.naturalLeaf(world, villager, cell)) {
+                continue;
+            }
+            double distance = villager.getEyePos().squaredDistanceTo(Vec3d.ofCenter(cell));
+            if (distance < bestDistance && Retina.visibleFace(world, villager, cell, Retina.BLOCK_REACH) != null) {
+                best = cell.toImmutable();
+                bestDistance = distance;
+            }
+        }
+        return best;
     }
 
     /** Natural rock worth one more dig for room: never its own or Agua's seal, never next to water or lava it saw. */
