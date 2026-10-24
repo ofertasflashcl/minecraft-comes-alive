@@ -66,19 +66,7 @@
     "height": 20,
     "notifyServer": false,
     "targetServer": false,
-    "constraints": "family,!baby",
-    "hideOnFail": true
-  },
-  {
-    "identifier": "gui.button.work",
-    "x": -90,
-    "y": 10,
-    "row": 4,
-    "width": 80,
-    "height": 20,
-    "notifyServer": false,
-    "targetServer": false,
-    "constraints": "!family,mercenary",
+    "constraints": "!baby",
     "hideOnFail": true
   },
   {

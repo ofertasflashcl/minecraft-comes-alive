@@ -25,7 +25,7 @@ public class RelationModule {
             silentHearts = true;
         }
         if (Relationship.IS_PARENT.test(villager, player)) {
-            input.add("$player is $villagers parent. ");
+            input.add("$player is $villager's parent. ");
         }
         if (Relationship.IS_KID.test(villager, player)) {
             input.add("$villager is $player's child. ");

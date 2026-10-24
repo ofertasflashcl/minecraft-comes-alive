@@ -1,0 +1,77 @@
+# Builds the Forge 1.20.1 jar on every push, boots it on a real Forge server and uploads it.
+name: Forge 1.20.1 (Tropeles)
+
+on:
+  push:
+    branches: [ '1.20.1', 'tropeles/**' ]
+  workflow_dispatch:
+
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      NO_COLOR: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Forge jar
+        run: ./gradlew :forge:remapJar --console=plain --non-interactive -Pmod_version=7.6.28-tropeles.1
+
+      - name: Pick jar
+        id: jar
+        run: |
+          ls -la forge/build/libs
+          JAR=$(ls forge/build/libs/*.jar | grep -vE -- '-(sources|dev|dev-shadow|javadoc)\.jar$' | head -1)
+          mkdir -p out
+          cp "$JAR" out/minecraft-comes-alive-1.20.1-forge-tropeles.jar
+          echo "path=out/minecraft-comes-alive-1.20.1-forge-tropeles.jar" >> "$GITHUB_OUTPUT"
+
+      - name: Boot a real Forge 1.20.1 server with the jar
+        run: bash scripts/ci/forge-server-test.sh "${{ steps.jar.outputs.path }}"
+
+      - name: Server log
+        if: always()
+        run: |
+          test -f server/logs/latest.log && grep -nE 'ERROR|Exception|MCA|mca|Tropel|PRUEBA' server/logs/latest.log | head -400 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mca-forge-1.20.1-tropeles
+          path: out/*.jar
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: server-log
+          path: server/logs/
+          if-no-files-found: ignore
+
+      # Only a jar that loaded on a real server and passed every in-game check is published.
+      - name: Publish the jar as a release (downloads without signing in)
+        if: success() && startsWith(github.ref_name, 'tropeles/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=tropeles-forge-1.20.1
+          NOTES="MCA 7.6.28 para Forge 1.20.1 con el ojo, el combate y la minería de Tropeles. Commit ${GITHUB_SHA::7}. Necesita Forge 47.x y Architectury API 9.2.14 para Forge."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${{ steps.jar.outputs.path }}" --clobber
+            gh release edit "$TAG" --notes "$NOTES" --target "$GITHUB_SHA"
+          else
+            gh release create "$TAG" "${{ steps.jar.outputs.path }}" --prerelease --target "$GITHUB_SHA" \
+              --title "MCA 1.20.1 Forge: ojo, combate y minería (Tropeles)" --notes "$NOTES"
+          fi

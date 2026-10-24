@@ -1,13 +1,16 @@
 package net.mca.entity.ai.brain;
 
 import net.mca.Config;
+import net.mca.MCA;
 import net.mca.advancement.criterion.CriterionMCA;
 import net.mca.entity.Status;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.VillagerLike;
 import net.mca.entity.ai.*;
+import net.mca.entity.ai.mente.Voluntad;
 import net.mca.entity.ai.relationship.AgeState;
 import net.mca.entity.ai.relationship.Personality;
+import net.mca.server.ProspectorPresence;
 import net.mca.util.network.datasync.CDataManager;
 import net.mca.util.network.datasync.CDataParameter;
 import net.mca.util.network.datasync.CEnumParameter;
@@ -18,6 +21,7 @@ import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import org.jetbrains.annotations.Nullable;
@@ -38,9 +42,11 @@ public class VillagerBrain<E extends MobEntity & VillagerLike<E>> {
     private static final CDataParameter<Optional<UUID>> CHORE_ASSIGNING_PLAYER = CParameter.create("choreAssigningPlayer", Optional.empty());
     private static final CDataParameter<Boolean> PANICKING = CParameter.create("isPanicking", false);
     private static final CDataParameter<Boolean> WEAR_ARMOR = CParameter.create("wearArmor", false);
+    /** What a connected villager's will is set on, kept across a relog ({@link Voluntad}): "", "SIGUIENDO uuid", "ESPERANDO x y z". */
+    private static final CDataParameter<String> WILL = CParameter.create("tropelesVoluntad", "");
 
     public static <E2 extends Entity> CDataManager.Builder<E2> createTrackedData(CDataManager.Builder<E2> builder) {
-        return builder.addAll(MEMORIES, PERSONALITY, MOOD, MOVE_STATE, ACTIVE_CHORE, CHORE_ASSIGNING_PLAYER, PANICKING, WEAR_ARMOR);
+        return builder.addAll(MEMORIES, PERSONALITY, MOOD, MOVE_STATE, ACTIVE_CHORE, CHORE_ASSIGNING_PLAYER, PANICKING, WEAR_ARMOR, WILL);
     }
 
     private static final long GRIEVE_COOLDOWN = 24000 * 7;
@@ -117,19 +123,35 @@ public class VillagerBrain<E extends MobEntity & VillagerLike<E>> {
         return entity.getTrackedValue(ACTIVE_CHORE);
     }
 
+    /** The one who gave the job, when that player is in the villager's own world. */
     public Optional<PlayerEntity> getJobAssigner() {
         return entity.getTrackedValue(CHORE_ASSIGNING_PLAYER).map(id -> entity.getWorld().getPlayerByUuid(id));
+    }
+
+    /** The UUID of the one who gave the job, even while that player is in another dimension or offline. */
+    public Optional<UUID> getJobAssignerUuid() {
+        return entity.getTrackedValue(CHORE_ASSIGNING_PLAYER);
     }
 
     /**
      * Tells the villager to stop doing whatever it's doing.
      */
     public void abandonJob() {
+        boolean wasProspecting = getCurrentJob() == Chore.PROSPECT;
         entity.getBrain().doExclusively(Activity.IDLE);
         entity.setTrackedValue(ACTIVE_CHORE, Chore.NONE);
         entity.setTrackedValue(CHORE_ASSIGNING_PLAYER, Optional.empty());
+        if (entity instanceof VillagerEntityMCA villager) {
+            // disconnected: its will (following, waiting) ends with the connection
+            Voluntad.olvidar(villager);
+        }
 
         resetsBrain();
+
+        if (wasProspecting) {
+            // it leaves the Tab list as soon as it stops, like a player logging off
+            refreshPresence();
+        }
     }
 
     /**
@@ -141,8 +163,31 @@ public class VillagerBrain<E extends MobEntity & VillagerLike<E>> {
         entity.setTrackedValue(CHORE_ASSIGNING_PLAYER, Optional.of(player.getUuid()));
         entity.getBrain().forget(MemoryModuleTypeMCA.PLAYER_FOLLOWING.get());
         entity.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+        if (entity instanceof VillagerEntityMCA villager) {
+            // a new connection (or another job) starts in its own life, not in the last one's mode
+            Voluntad.olvidar(villager);
+        }
 
         resetsBrain();
+
+        if (chore == Chore.PROSPECT) {
+            // in Tab and "<Inas> ..." in chat from its very first word, not up to a second later
+            refreshPresence();
+        }
+    }
+
+    /** Brings the Tab list of prospecting villagers ({@link ProspectorPresence}) up to date now, on the server thread. */
+    private void refreshPresence() {
+        MinecraftServer server = entity.getServer();
+        if (server == null || !server.isOnThread()) {
+            return;
+        }
+        try {
+            ProspectorPresence.refreshNow(server);
+        } catch (RuntimeException e) {
+            // how it is shown must never undo the job change itself
+            MCA.LOGGER.error("[Tropeles] no se pudo poner al día a {} en Tab", entity.getName().getString(), e);
+        }
     }
 
     public void randomize() {
@@ -231,6 +276,16 @@ public class VillagerBrain<E extends MobEntity & VillagerLike<E>> {
         if (entity.asEntity() instanceof VillagerEntityMCA villager) {
             villager.reinitializeBrain((ServerWorld)villager.getWorld());
         }
+    }
+
+    /** The will of a connected villager as saved ({@link Voluntad}). */
+    public String getWill() {
+        String will = entity.getTrackedValue(WILL);
+        return will == null ? "" : will;
+    }
+
+    public void setWill(String will) {
+        entity.setTrackedValue(WILL, will == null ? "" : will);
     }
 
     public void setArmorWear(boolean s) {

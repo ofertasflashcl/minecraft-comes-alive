@@ -47,7 +47,7 @@ public final class MCAFabric implements ModInitializer {
         ResourceManagerHelper.get(ResourceType.SERVER_DATA).registerReloadListener(new FabricBuildingTypes());
 
         ServerTickEvents.END_WORLD_TICK.register(w -> VillageManager.get(w).tick());
-        ServerTickEvents.END_SERVER_TICK.register(s -> ServerInteractionManager.getInstance().tick());
+        ServerTickEvents.END_SERVER_TICK.register(s -> ServerInteractionManager.getInstance().tick(s));
 
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
                 ServerInteractionManager.getInstance().onPlayerJoin(handler.player)

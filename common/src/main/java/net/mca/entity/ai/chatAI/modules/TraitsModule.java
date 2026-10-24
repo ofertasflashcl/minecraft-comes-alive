@@ -31,7 +31,8 @@ public class TraitsModule {
 
     public static void apply(List<String> input, VillagerEntityMCA villager, ServerPlayerEntity player) {
         for (Traits.Trait trait : villager.getTraits().getTraits()) {
-            input.add(traitDescription.getOrDefault(trait.id(), "$villager has " + translate(trait.id()) + ". "));
+            // the descriptions end without a space: keep the sentences apart in the prompt
+            input.add(traitDescription.getOrDefault(trait.id(), "$villager has " + translate(trait.id()) + ".").trim() + " ");
         }
     }
 }

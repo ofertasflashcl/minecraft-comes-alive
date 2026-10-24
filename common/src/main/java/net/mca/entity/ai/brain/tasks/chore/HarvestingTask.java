@@ -135,8 +135,9 @@ public class HarvestingTask extends AbstractChoreTask {
 
     private boolean isValidMature(BlockPos pos) {
         BlockState state = villager.getWorld().getBlockState(pos);
+        // a melon or pumpkin counts only hanging from its stem: one standing alone is somebody's block
         return (state.getBlock() instanceof CropBlock crop && crop.isMature(state))
-                || state.getBlock() instanceof GourdBlock;
+                || state.getBlock() instanceof GourdBlock && net.mca.entity.ai.sense.Obras.cropAt(villager.getWorld(), pos);
     }
 
     private boolean isValidImmature(BlockPos pos) {

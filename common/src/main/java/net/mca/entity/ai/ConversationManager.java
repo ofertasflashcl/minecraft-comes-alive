@@ -3,6 +3,7 @@ package net.mca.entity.ai;
 
 import net.mca.entity.VillagerEntityMCA;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.text.MutableText;
 
 import java.util.Optional;
@@ -83,9 +84,11 @@ public class ConversationManager {
             this.text = text;
         }
 
+        /** Said to its receiver first, wherever they stand, then out loud to whoever else is around. */
         @Override
         public void deliver() {
-            this.entity.sendChatToAllAround(text);
+            this.entity.sendChatMessage(text.copy(), getReceiver());
+            this.entity.sendChatToAllAroundExcept(text, getReceiver());
             super.deliver();
         }
     }
@@ -98,9 +101,13 @@ public class ConversationManager {
             this.text = text;
         }
 
+        /** Said to its receiver first, in their own words, then out loud to whoever else is around. */
         @Override
         public void deliver() {
-            this.entity.sendChatToAllAround(text);
+            if (getReceiver() instanceof PlayerEntity player) {
+                this.entity.sendChatMessage(player, text);
+            }
+            this.entity.sendPhraseToAllAroundExcept(getReceiver(), text);
             super.deliver();
         }
     }

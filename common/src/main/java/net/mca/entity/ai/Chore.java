@@ -7,7 +7,6 @@ import org.jetbrains.annotations.Nullable;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -21,10 +20,11 @@ public enum Chore {
     ESCORT  ("escort", SwordItem.class);
 
     private static final Chore[] VALUES = values();
-    private static final Map<String, Chore> REGISTRY = Stream.of(VALUES).collect(Collectors.toMap(
-            c -> c.friendlyName,
-            Function.identity())
-    );
+    private static final Map<String, Chore> REGISTRY = Stream.concat(
+            Stream.of(VALUES).map(c -> Map.entry(c.friendlyName, c)),
+            // "Conectar": the villager's own life as a player; PROSPECT keeps its name and place, worlds have it saved
+            Stream.of(Map.entry("connect", PROSPECT), Map.entry("conectar", PROSPECT))
+    ).collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
 
     private final String friendlyName;
 

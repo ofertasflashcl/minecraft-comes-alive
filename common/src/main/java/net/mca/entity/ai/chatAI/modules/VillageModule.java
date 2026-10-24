@@ -40,7 +40,7 @@ public class VillageModule {
             }
         }
 
-        input.add("$villager lives in a " + size + ", medieval village in a " + biome.replace("_", " ") + " biom. ");
+        input.add("$villager lives in a " + size + ", medieval village in a " + biome.replace("_", " ") + " biome. ");
 
         // Buildings
         village.ifPresent(v -> {
@@ -49,6 +49,7 @@ public class VillageModule {
                     .map(b -> nameExceptions.getOrDefault(b, b))
                     .filter(s -> !s.isEmpty())
                     .distinct()
+                    .limit(10)
                     .collect(Collectors.joining(", "));
             if (!buildings.isEmpty()) {
                 input.add("The village has a " + buildings + ". ");

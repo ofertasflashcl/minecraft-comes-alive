@@ -1,6 +1,8 @@
 package net.mca.mixin;
 
+import net.mca.entity.ai.body.Cofres;
 import net.mca.item.BabyItem;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.screen.ScreenHandler;
@@ -26,6 +28,13 @@ abstract class MixinScreenHandler {
         ItemStack stack = mca$getDroppedStack(slotIndex, actionType, player);
         if (BabyItem.shouldCancelDrop(stack, player)) {
             info.cancel();
+        }
+    }
+
+    @Inject(method = "onClosed", at = @At("HEAD"))
+    private void mca$onClosed(PlayerEntity player, CallbackInfo info) {
+        if (player instanceof ServerPlayerEntity serverPlayer) {
+            Cofres.closedBy(serverPlayer);
         }
     }
 

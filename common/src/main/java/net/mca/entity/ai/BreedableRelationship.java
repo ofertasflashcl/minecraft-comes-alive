@@ -147,10 +147,15 @@ public class BreedableRelationship extends Relationship<VillagerEntityMCA> {
     }
 
     private void acceptGift(ItemStack stack, GiftType gift, ServerPlayerEntity player, Memories memory) {
-        // inventory full
+        // inventory full: it goes into one of its chests, if it has room there
+        boolean toChest = false;
         if (!entity.getInventory().canInsert(stack)) {
-            rejectGift(player, "villager.inventory.full");
-            return;
+            if (entity.getWorld() instanceof net.minecraft.server.world.ServerWorld world && net.mca.entity.ai.body.Cofres.hasRoom(world, entity, stack.copyWithCount(1))) {
+                toChest = true;
+            } else {
+                rejectGift(player, "villager.inventory.full");
+                return;
+            }
         }
 
         IntAnalysis analysis = gift.getSatisfactionFor(entity, stack, player);
@@ -184,7 +189,12 @@ public class BreedableRelationship extends Relationship<VillagerEntityMCA> {
             //take the gift
             getGiftSaturation().add(stack);
             entity.getWorld().sendEntityStatus(entity, Status.MCA_VILLAGER_POS_INTERACTION);
-            entity.getInventory().addStack(stack.split(1));
+            if (toChest) {
+                net.mca.entity.ai.body.Cofres.storeGift((net.minecraft.server.world.ServerWorld) entity.getWorld(), entity, stack.split(1));
+                entity.sendChatMessage(player, "chore.chest.gift");
+            } else {
+                entity.getInventory().addStack(stack.split(1));
+            }
         }
 
         //modify mood and hearts

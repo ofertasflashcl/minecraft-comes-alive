@@ -3,6 +3,7 @@ package net.mca.entity.ai.brain.tasks;
 import com.google.common.collect.ImmutableMap;
 import net.mca.Config;
 import net.mca.entity.VillagerEntityMCA;
+import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.ConversationManager;
 import net.mca.entity.ai.Memories;
 import net.mca.entity.ai.Relationship;
@@ -24,10 +25,12 @@ public class GreetPlayerTask extends MultiTickTask<VillagerEntityMCA> {
         super(ImmutableMap.of(), 0);
     }
 
+    /** A villager at work does not stop to come and greet you: it keeps its eyes and hands on the job. */
     @Override
     protected boolean shouldRun(ServerWorld world, VillagerEntityMCA entity) {
         cooldown--;
-        return cooldown < 0 && entity.getBrain().getOptionalMemory(MemoryModuleType.ATTACK_TARGET).isEmpty();
+        return cooldown < 0 && entity.getVillagerBrain().getCurrentJob() == Chore.NONE
+                && entity.getBrain().getOptionalMemory(MemoryModuleType.ATTACK_TARGET).isEmpty();
     }
 
     @Override
