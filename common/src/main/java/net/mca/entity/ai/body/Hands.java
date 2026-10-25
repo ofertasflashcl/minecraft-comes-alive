@@ -194,6 +194,11 @@ public final class Hands {
                     Retina.memory(miner).doing("no rompe " + state.getBlock().getName().getString() + ": es " + Obras.kind(world, miner, target).label, world.getTime());
                     return FAILED;
                 }
+                // a cell it kept digging and filling just now: left alone for a while (buried, it still digs out)
+                if (!urgent && Toques.forbidden(miner, target, world.getTime())) {
+                    Retina.memory(miner).doing("no vuelve a romper " + target.toShortString() + ": ya lo rompió y puso varias veces", world.getTime());
+                    return FAILED;
+                }
                 pos = target.toImmutable();
                 holdBestTool(miner, state);
             }
@@ -282,6 +287,7 @@ public final class Hands {
             return;
         }
         Obras.broken(world, pos);
+        Toques.broke(miner, pos, world.getTime());
         if (!tool.isEmpty()) {
             tool.getItem().postMine(tool, world, state, pos, miner);
         }
@@ -355,8 +361,19 @@ public final class Hands {
         };
     }
 
-    /** Places one block of {@code stack} into {@code target} against a face the eye can see. */
+    /**
+     * Places one block of {@code stack} into {@code target} against a face the eye can see. Never into a cell it kept
+     * breaking and filling just now ({@link Toques#forbidden}).
+     */
     public static boolean place(ServerWorld world, VillagerEntityMCA villager, BlockPos target, ItemStack stack) {
+        if (Toques.forbidden(villager, target, world.getTime())) {
+            return false;
+        }
+        return placeUrgent(world, villager, target, stack);
+    }
+
+    /** {@link #place} also into a cell of a loop: lava pouring out of a hole is plugged whatever it did there before. */
+    public static boolean placeUrgent(ServerWorld world, VillagerEntityMCA villager, BlockPos target, ItemStack stack) {
         if (!(stack.getItem() instanceof BlockItem blockItem) || stack.isEmpty()) {
             return false;
         }
@@ -375,6 +392,7 @@ public final class Hands {
         ActionResult result = blockItem.place(context);
         if (result.isAccepted()) {
             Obras.placedByVillager(world, villager, target);
+            Toques.placed(villager, target, world.getTime());
             villager.swingHand(Hand.MAIN_HAND);
             Retina.memory(villager).see(target, world.getBlockState(target), support.getSide(), support.getPos(), villager.getEyePos().distanceTo(support.getPos()), world.getLightLevel(target), world.getTime());
             return true;

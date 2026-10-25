@@ -124,7 +124,7 @@ public class VillagerTasksMCA {
             brain.setTaskList(Activity.CORE, VillagerTasksMCA.getGuardCorePackage(villager));
             brain.setTaskList(Activity.PANIC, VillagerTasksMCA.getPanicPackage(0.5F));
             brain.setTaskList(Activity.REST, VillagerTasksMCA.getRestPackage(0.5F), ImmutableSet.of(Pair.of(MemoryModuleType.ATTACK_TARGET, MemoryModuleState.VALUE_ABSENT)));
-            brain.setTaskList(ActivityMCA.CHORE.get(), VillagerTasksMCA.getChorePackage());
+            brain.setTaskList(ActivityMCA.CHORE.get(), VillagerTasksMCA.getChorePackage(villager));
             noDefault = true;
         } else if (!villager.requiresHome()) {
             brain.setSchedule(SchedulesMCA.GUESTS);
@@ -168,7 +168,7 @@ public class VillagerTasksMCA {
             brain.setTaskList(Activity.PANIC, VillagerTasksMCA.getPanicPackage(0.5F));
             brain.setTaskList(Activity.PRE_RAID, VillagerTasksMCA.getPreRaidPackage(0.5F));
             brain.setTaskList(Activity.HIDE, VillagerTasksMCA.getHidePackage(0.5F));
-            brain.setTaskList(ActivityMCA.CHORE.get(), VillagerTasksMCA.getChorePackage());
+            brain.setTaskList(ActivityMCA.CHORE.get(), VillagerTasksMCA.getChorePackage(villager));
         }
 
         brain.setCoreActivities(ImmutableSet.of(Activity.CORE));
@@ -594,6 +594,22 @@ public class VillagerTasksMCA {
                 Pair.of(0, new HarvestingTask()),
                 Pair.of(0, new HuntingTask()),
                 Pair.of(0, new ProspectingTask()),
+                Pair.of(0, new EscortTask())
+        );
+    }
+
+    /**
+     * The chores of this villager: a connected one ({@link ProspectingTask}) keeps its own task object through every
+     * new brain MCA builds for it (a job given, a move state, a profession taken at a job site near home), so its trip
+     * home, its mine and its plans are not forgotten when that happens.
+     */
+    public static ImmutableList<Pair<Integer, ? extends Task<? super VillagerEntityMCA>>> getChorePackage(VillagerEntityMCA villager) {
+        return ImmutableList.of(
+                Pair.of(0, new ChoppingTask()),
+                Pair.of(0, new FishingTask()),
+                Pair.of(0, new HarvestingTask()),
+                Pair.of(0, new HuntingTask()),
+                Pair.of(0, ProspectingTask.of(villager)),
                 Pair.of(0, new EscortTask())
         );
     }

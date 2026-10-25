@@ -369,8 +369,11 @@ public final class Cofres {
         if (chest == null) {
             return Store.NONE;
         }
-        // following or told to stay, it still has to walk to the chest; it goes back to that afterwards
-        net.mca.entity.ai.MoveState before = villager.getVillagerBrain().getMoveState();
+        // following or told to stay, it still has to walk to the chest; it goes back to that afterwards. A connected
+        // villager's following and waiting are its will's (Voluntad), never the move state: changing that would build it
+        // a new brain, and setting FOLLOW back afterwards would end its connection (VillagerBrain#setMoveState)
+        boolean connected = net.mca.entity.ai.mente.Voluntad.conectado(villager);
+        net.mca.entity.ai.MoveState before = connected ? net.mca.entity.ai.MoveState.MOVE : villager.getVillagerBrain().getMoveState();
         if (before != net.mca.entity.ai.MoveState.MOVE) {
             villager.getVillagerBrain().setMoveState(net.mca.entity.ai.MoveState.MOVE, null);
         }
@@ -413,6 +416,9 @@ public final class Cofres {
     }
 
     private static void restore(VillagerEntityMCA villager, Pending pending, @Nullable ServerPlayerEntity player) {
+        if (net.mca.entity.ai.mente.Voluntad.conectado(villager)) {
+            return; // connected: its move state is not how it follows or waits, and FOLLOW would disconnect it
+        }
         if (pending.before() == net.mca.entity.ai.MoveState.FOLLOW && player != null) {
             villager.getVillagerBrain().setMoveState(net.mca.entity.ai.MoveState.FOLLOW, player);
         } else if (pending.before() == net.mca.entity.ai.MoveState.STAY) {

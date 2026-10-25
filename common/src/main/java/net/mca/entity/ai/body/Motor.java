@@ -31,8 +31,13 @@ import org.jetbrains.annotations.Nullable;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.PriorityQueue;
+import java.util.function.Predicate;
 
 /**
  * Moves a villager one block at a time the way a player gets through terrain: walks when the way is
@@ -179,6 +184,27 @@ public final class Motor {
     private int alt;
     /** This call is a pillar step straight up ({@link #pillarStep}): never a stair sideways, never another way. */
     private boolean straightUp;
+    /** This call walks a way that is already there ({@link #walkPath}): nothing is broken or placed, no other way is tried. */
+    private boolean noTouch;
+    /** The cell of a break/place loop ({@link Toques#forbidden}) that made the last step give up, or null. */
+    @Nullable
+    private BlockPos loopCell;
+    /** The way {@link #walkPath} is walking, the index of the next cell on it, and how long since that index moved on. */
+    @Nullable
+    private List<BlockPos> walking;
+    private int walkIdx = -1;
+    private int walkIdle;
+    private int walkFails;
+    /** {@link #climbExisting}: the goal its path was found for, and the path (null: none found from there). */
+    @Nullable
+    private BlockPos existingGoal;
+    @Nullable
+    private List<BlockPos> existingPath;
+    private long existingAt = Long.MIN_VALUE / 2;
+    /** Ticks with the next cell of a way it walks not reached before the way is given up. */
+    private static final int WALK_IDLE = 140;
+    /** Failed steps toward the same cell of a walked way before the way is given up. */
+    private static final int WALK_FAILS = 3;
 
     public String doing() {
         return doing;
@@ -191,6 +217,13 @@ public final class Motor {
     public void reset(ServerWorld world, VillagerEntityMCA villager) {
         breaker.reset(world, villager);
         endStep();
+        if (!noTouch) {
+            // walkPath gives a step up by itself and goes on along the same way; anyone else's reset drops the way
+            walking = null;
+            walkIdx = -1;
+            existingGoal = null;
+            existingPath = null;
+        }
         alt = 0;
         lastFeet = null;
         settleTicks = 0;
@@ -317,7 +350,7 @@ public final class Motor {
                 return Result.RUNNING;
             }
             // water: shut it out of the way before going on, and climb out of it when swimming in a hole
-            if (keepDry(world, villager, from == null ? List.of() : route())) {
+            if (!noTouch && keepDry(world, villager, from == null ? List.of() : route())) {
                 return Result.RUNNING;
             }
             if (from != null && Agua.overwhelmed(villager, world.getTime()) && route().stream().anyMatch(cell -> Agua.water(world, cell))) {
@@ -425,7 +458,7 @@ public final class Motor {
         failAt = now;
         boolean sideways = goal != null && from != null && (goal.getX() != from.getX() || goal.getZ() != from.getZ());
         reset(world, villager);
-        if (goal != null && sideways && !straightUp && failCount <= ALTERNATIVES) {
+        if (goal != null && sideways && !straightUp && !noTouch && failCount <= ALTERNATIVES) {
             alt = failCount;
             doing = alt == 1 ? "prueba a saltar lo que le corta el paso" : "prueba a rodear lo que le corta el paso";
             return Result.RUNNING;
@@ -455,6 +488,288 @@ public final class Motor {
         } finally {
             straightUp = false;
         }
+    }
+
+    /** The cell of a break/place loop that made the last step give up (BLOCKED), or null: that way is shut for a while. */
+    @Nullable
+    public BlockPos loopCell() {
+        return loopCell;
+    }
+
+    // ------------------------------------------------------------------ walking a way that is already there
+
+    /** A cell the feet can be in without touching anything: something to stand on, room for the feet and the head, no heat. */
+    public static boolean standCell(World world, BlockPos feet) {
+        return open(world, feet) && open(world, feet.up()) && Mining.standable(world, feet.down()) && !Mining.heat(world, feet)
+                && !Mining.heat(world, feet.up());
+    }
+
+    /** A rung of a ladder or vines to hold on to here, with room for the body. */
+    private static boolean rung(World world, BlockPos feet) {
+        return ladderOrVine(world.getBlockState(feet)) && open(world, feet.up()) && !Mining.heat(world, feet);
+    }
+
+    /**
+     * The way from {@code start} to (within {@code within} blocks of) {@code goal} over what is already there, the way a
+     * player walks it: level, up a one-high step (with room for the head on the jump), off a drop of at most
+     * {@link #SAFE_DROP}, up or down a ladder. Nothing is dug or placed on it. {@code allowed} (may be null) says which
+     * cells it may use (what it saw or walked); the start always. At most {@code maxNodes} cells are looked at.
+     * The feet cells from start to the end, or null when there is no such way.
+     */
+    @Nullable
+    public static List<BlockPos> findWalk(World world, BlockPos start, BlockPos goal, double within, int maxNodes, @Nullable Predicate<BlockPos> allowed) {
+        BlockPos begin = start.toImmutable();
+        double reach = within * within;
+        Map<Long, Long> cameFrom = new HashMap<>();
+        Map<Long, Double> cost = new HashMap<>();
+        PriorityQueue<Node> open = new PriorityQueue<>((a, b) -> Double.compare(a.f, b.f));
+        cost.put(begin.asLong(), 0.0);
+        open.add(new Node(Math.sqrt(begin.getSquaredDistance(goal)), begin.asLong()));
+        int looked = 0;
+        List<BlockPos> next = new ArrayList<>(8);
+        List<Double> price = new ArrayList<>(8);
+        while (!open.isEmpty() && looked < maxNodes) {
+            Node top = open.poll();
+            long key = top.key;
+            BlockPos cell = BlockPos.fromLong(key);
+            double g = cost.getOrDefault(key, Double.MAX_VALUE);
+            if (top.f - Math.sqrt(cell.getSquaredDistance(goal)) > g + 1.0E-6) {
+                continue; // a stale entry: a cheaper way here was found after it was queued
+            }
+            looked++;
+            if (cell.getSquaredDistance(goal) <= reach) {
+                List<BlockPos> path = new ArrayList<>();
+                Long at = key;
+                while (at != null) {
+                    path.add(BlockPos.fromLong(at));
+                    at = cameFrom.get(at);
+                }
+                Collections.reverse(path);
+                return path;
+            }
+            next.clear();
+            price.clear();
+            for (Direction d : Direction.Type.HORIZONTAL) {
+                BlockPos side = cell.offset(d);
+                if (standCell(world, side) || rung(world, side)) {
+                    next.add(side);
+                    price.add(1.0);
+                    continue;
+                }
+                // a step up: the step is solid with room over it, and room over its own head for the jump
+                if (Mining.standable(world, side) && standCell(world, side.up()) && open(world, cell.up(2))) {
+                    next.add(side.up());
+                    price.add(2.0);
+                    continue;
+                }
+                // off an edge: the way over the drop is open, something to land on within SAFE_DROP
+                if (open(world, side) && open(world, side.up())) {
+                    BlockPos fall = side.down();
+                    for (int k = 1; k <= SAFE_DROP && open(world, fall); k++, fall = fall.down()) {
+                        if (standCell(world, fall)) {
+                            next.add(fall.toImmutable());
+                            price.add(1.0 + 0.5 * k);
+                            break;
+                        }
+                    }
+                }
+            }
+            // a ladder or vines: straight up and down
+            if (ladderOrVine(world.getBlockState(cell)) || ladderOrVine(world.getBlockState(cell.up()))) {
+                BlockPos up = cell.up();
+                if (open(world, up.up()) && (rung(world, up) || standCell(world, up))) {
+                    next.add(up);
+                    price.add(1.5);
+                }
+            }
+            BlockPos down = cell.down();
+            if (rung(world, down)) {
+                next.add(down);
+                price.add(1.5);
+            }
+            for (int i = 0; i < next.size(); i++) {
+                BlockPos n = next.get(i);
+                if (allowed != null && !n.equals(goal) && !allowed.test(n)) {
+                    continue;
+                }
+                long nk = n.asLong();
+                double ng = g + price.get(i);
+                if (ng < cost.getOrDefault(nk, Double.MAX_VALUE)) {
+                    cost.put(nk, ng);
+                    cameFrom.put(nk, key);
+                    open.add(new Node(ng + Math.sqrt(n.getSquaredDistance(goal)), nk));
+                }
+            }
+        }
+        return null;
+    }
+
+    /** A cell waiting in {@link #findWalk}: its packed position and the cost so far plus the straight line still to go. */
+    private record Node(double f, long key) {
+    }
+
+    /** The way {@link #walkPath} is walking now, or null. */
+    @Nullable
+    public List<BlockPos> walkingPath() {
+        return walking;
+    }
+
+    /** The index on {@link #walkingPath()} of the next cell it goes to, or -1. */
+    public int walkingIndex() {
+        return walking == null ? -1 : walkIdx;
+    }
+
+    /** The cell of {@code path} nearest to {@code feet}, preferring later ones on a tie. */
+    private static int nearest(List<BlockPos> path, BlockPos feet) {
+        int best = 0;
+        double bestDistance = Double.MAX_VALUE;
+        for (int i = 0; i < path.size(); i++) {
+            double d = path.get(i).getSquaredDistance(feet);
+            if (d <= bestDistance) {
+                best = i;
+                bestDistance = d;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * One tick along {@code path} (feet cells, each next to the one before it, up a one-high step, down a drop of at
+     * most {@link #SAFE_DROP} or a ladder rung), the way a player walks up a staircase that is already cut: never breaking or
+     * placing anything. Pass the same list every tick; a new list starts from its cell nearest the feet. ARRIVED on its
+     * last cell, BLOCKED when the way is shut now or it gets no further along it for a while.
+     */
+    public Result walkPath(ServerWorld world, VillagerEntityMCA villager, List<BlockPos> path) {
+        if (path.isEmpty()) {
+            return Result.BLOCKED;
+        }
+        BlockPos feet = villager.getBlockPos();
+        boolean settled = settled(villager);
+        if (path != walking) {
+            if (busy()) {
+                endStep();
+            }
+            walking = path;
+            int near = nearest(path, feet);
+            walkIdx = path.get(near).equals(feet) ? near + 1 : near;
+            walkIdle = 0;
+            walkFails = 0;
+        }
+        // on a cell further along (it went faster, cut a corner, slid down): from there on
+        if (settled) {
+            for (int i = Math.max(0, walkIdx - 1); i < Math.min(path.size(), walkIdx + 4); i++) {
+                if (path.get(i).equals(feet) && i + 1 > walkIdx && !midStep(villager)) {
+                    walkIdx = i + 1;
+                    walkIdle = 0;
+                    walkFails = 0;
+                    if (busy() && !feet.equals(planGoal)) {
+                        endStep();
+                    }
+                }
+            }
+        }
+        if (walkIdx >= path.size()) {
+            BlockPos last = path.get(path.size() - 1);
+            if (feet.equals(last) && onCell(world, villager, feet)) {
+                endWalk(world, villager);
+                return Result.ARRIVED;
+            }
+            walkIdx = path.size() - 1; // past it in the air: back onto the last cell
+        }
+        BlockPos target = path.get(walkIdx);
+        if (!standCell(world, target) && !rung(world, target) && !midStep(villager)) {
+            // dug out, filled in or flooded since: this way is shut now
+            net.mca.MCA.LOGGER.info("[Tropeles] {} encuentra cortado {} en el camino ya hecho", villager.getName().getString(), target.toShortString());
+            endWalk(world, villager);
+            return Result.BLOCKED;
+        }
+        if (++walkIdle > WALK_IDLE) {
+            net.mca.MCA.LOGGER.info("[Tropeles] {} no avanza hacia {} por el camino ya hecho", villager.getName().getString(), target.toShortString());
+            endWalk(world, villager);
+            return Result.BLOCKED;
+        }
+        noTouch = true;
+        Result r;
+        try {
+            r = step(world, villager, target, false, false);
+        } finally {
+            noTouch = false;
+        }
+        if (r == Result.ARRIVED) {
+            walkIdx++;
+            walkIdle = 0;
+            walkFails = 0;
+            if (walkIdx >= path.size()) {
+                endWalk(world, villager);
+                return Result.ARRIVED;
+            }
+            return Result.RUNNING;
+        }
+        if (r == Result.BLOCKED) {
+            if (++walkFails > WALK_FAILS) {
+                endWalk(world, villager);
+                return Result.BLOCKED;
+            }
+            noTouch = true;
+            try {
+                reset(world, villager); // the same way, a fresh step
+            } finally {
+                noTouch = false;
+            }
+            doing = "sube por el camino ya hecho";
+            return Result.RUNNING;
+        }
+        if (doing.equals("subiendo") || doing.equals("caminando") || doing.equals("bajando por la escalera")) {
+            doing = "sube por el camino ya hecho";
+        }
+        return Result.RUNNING;
+    }
+
+    private void endWalk(ServerWorld world, VillagerEntityMCA villager) {
+        walking = null;
+        walkIdx = -1;
+        walkIdle = 0;
+        walkFails = 0;
+        if (busy()) {
+            breaker.reset(world, villager);
+            endStep();
+        }
+    }
+
+    /**
+     * Up (or along) a way that is already there to {@code goal}: the way is found once with {@link #findWalk} (again when
+     * the goal moves or after it gave up on one) and walked with {@link #walkPath}. Never breaks or places anything.
+     * BLOCKED at once when there is no such way: then, and only then, the caller digs.
+     */
+    public Result climbExisting(ServerWorld world, VillagerEntityMCA villager, BlockPos goal, double within, int maxNodes, @Nullable Predicate<BlockPos> allowed) {
+        long now = world.getTime();
+        BlockPos feet = villager.getBlockPos();
+        if (existingGoal == null || !existingGoal.equals(goal) || existingPath == null && now - existingAt > 40
+                || existingPath != null && walking != existingPath && !midStep(villager)) {
+            existingGoal = goal.toImmutable();
+            existingAt = now;
+            existingPath = feet.getSquaredDistance(goal) <= within * within ? List.of(feet.toImmutable()) : findWalk(world, feet, goal, within, maxNodes, allowed);
+            if (existingPath != null) {
+                net.mca.MCA.LOGGER.info("[Tropeles] {} sube por lo ya hecho hacia {}: {} pasos sin romper nada",
+                        villager.getName().getString(), goal.toShortString(), existingPath.size() - 1);
+            }
+        }
+        List<BlockPos> path = existingPath;
+        if (path == null) {
+            return Result.BLOCKED;
+        }
+        if (path.size() == 1 && path.get(0).equals(feet) && onCell(world, villager, feet)) {
+            existingPath = null;
+            existingGoal = null;
+            return Result.ARRIVED;
+        }
+        Result r = walkPath(world, villager, path);
+        if (r != Result.RUNNING) {
+            existingPath = null;
+            existingGoal = r == Result.BLOCKED ? existingGoal : null;
+            existingAt = now;
+        }
+        return r;
     }
 
     private boolean needsPlan(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, BlockPos goal) {
@@ -505,6 +820,7 @@ public final class Motor {
     // ------------------------------------------------------------------ planning
 
     private void plan(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, BlockPos goal, boolean dig, boolean build) {
+        loopCell = null;
         from = feet.toImmutable();
         planGoal = goal.toImmutable();
         phase = Phase.PREPARE;
@@ -550,7 +866,7 @@ public final class Motor {
             }
             return;
         }
-        if (toward != null && horizontal > Math.abs(dy) && (walkable(world, feet.offset(toward)) || throughLeaves(world, villager, feet.offset(toward)))) {
+        if (toward != null && horizontal > Math.abs(dy) && (walkable(world, feet.offset(toward)) || !noTouch && throughLeaves(world, villager, feet.offset(toward)))) {
             // more ahead than up or down, and the way ahead is open: walk it first, climb or go down nearer the goal
             kind = Kind.LEVEL;
             stand = feet.offset(toward);
@@ -579,14 +895,14 @@ public final class Motor {
         int stairDetour = horizontal == 0 ? COST_OFF_AXIS + 1 : 0;
         int pillarDetour = horizontal > 1 ? COST_OFF_AXIS : 0;
         int best = Integer.MAX_VALUE;
-        int ahead = stairCost(world, villager, feet, facing, dig, blocks, memory);
+        int ahead = stairCost(world, villager, feet, facing, dig, blocks, memory, noTouch);
         if (ahead >= 0) {
             best = ahead + stairDetour;
             kind = Kind.UP;
             dir = facing;
             stand = feet.offset(facing).up();
         }
-        if (blocks && pillarSafe(world, villager, feet, dig, memory)) {
+        if (blocks && pillarSafe(world, villager, feet, dig, memory) && !Toques.forbidden(villager, feet, world.getTime())) {
             int cost = (open(world, feet.up(2)) ? 0 : COST_DIG) + COST_PLACE + COST_PILLAR + pillarDetour;
             if (cost < best) {
                 best = cost;
@@ -597,8 +913,9 @@ public final class Motor {
         }
         Direction[] others = {facing.rotateYClockwise(), facing.rotateYCounterclockwise(), facing.getOpposite()};
         int[] penalty = {COST_SIDE, COST_SIDE, COST_BACK};
-        for (int i = 0; i < others.length; i++) {
-            int cost = stairCost(world, villager, feet, others[i], dig, blocks, memory);
+        for (int i = 0; i < (noTouch ? 0 : others.length); i++) {
+            // walking a way that is there: the step it leads up, never one beside it
+            int cost = stairCost(world, villager, feet, others[i], dig, blocks, memory, noTouch);
             if (cost >= 0 && cost + stairDetour + penalty[i] < best) {
                 best = cost + stairDetour + penalty[i];
                 kind = Kind.UP;
@@ -666,13 +983,18 @@ public final class Motor {
      * What a step up toward {@code d} costs: the cells to dig and the block to set as the step, or -1 when it
      * cannot be done (a build in the way, lava seen there, nothing to stand on and nothing to set a block on).
      */
-    private static int stairCost(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, Direction d, boolean dig, boolean blocks, VisualMemory memory) {
+    private static int stairCost(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, Direction d, boolean dig, boolean blocks, VisualMemory memory,
+                                 boolean noTouch) {
         BlockPos step = feet.offset(d);
         BlockPos stair = step.up();
+        long now = world.getTime();
         int cost = 0;
         for (BlockPos cell : new BlockPos[]{feet.up(2), stair.up(), stair}) {
             if (open(world, cell)) {
                 continue;
+            }
+            if (noTouch || Toques.forbidden(villager, cell, now) || Toques.lately(villager, cell, now, true, Toques.STEP)) {
+                return -1; // nothing to break on this walk; never a step it set just now, never a cell it keeps digging and filling
             }
             if (Hands.naturalLeaf(world, villager, cell) && !Mining.lavaSeen(memory, cell)) {
                 cost += COST_DIG; // leaves over the step: by hand, pick or no pick
@@ -686,8 +1008,9 @@ public final class Motor {
         if (Mining.standable(world, step)) {
             return Mining.lavaSeen(memory, step) ? -1 : cost;
         }
-        if (!blocks || !world.getBlockState(step).isReplaceable() || Mining.lavaSeen(memory, step)) {
-            return -1;
+        if (!blocks || !world.getBlockState(step).isReplaceable() || Mining.lavaSeen(memory, step)
+                || Toques.forbidden(villager, step, now) || Toques.lately(villager, step, now, false, Toques.DIG)) {
+            return -1; // never a step block into the cell a step dug out just now: that is how it digs and fills forever
         }
         // the step is a block of its own, set against the floor under it or a wall beside it, both in sight from here
         if (Mining.standable(world, step.down())) {
@@ -775,7 +1098,19 @@ public final class Motor {
             // natural leaves across the way, over its head on a pillar or a climb: clicked away by hand like a player,
             // also on a step that may not dig (a persistent leaf, a player's, is a build like any other)
             boolean leaf = Hands.naturalLeaf(world, villager, cell);
-            if (!dig && !leaf) {
+            if (noTouch || !dig && !leaf) {
+                return blocked(world, villager);
+            }
+            long now = world.getTime();
+            if (Toques.forbidden(villager, cell, now)) {
+                // it broke and set this cell over and over: that way is a loop, the caller has to choose another
+                loopCell = cell.toImmutable();
+                return blocked(world, villager);
+            }
+            if (kind != Kind.PILLAR && Toques.lately(villager, cell, now, true, Toques.STEP)) {
+                // the step or bridge block it set just now is the way it came by: not dug out again
+                net.mca.MCA.LOGGER.info("[Tropeles] {} no rompe el bloque que acaba de poner en {}: busca otro paso",
+                        villager.getName().getString(), cell.toShortString());
                 return blocked(world, villager);
             }
             BlockState state = world.getBlockState(cell);
@@ -792,6 +1127,7 @@ public final class Motor {
             }
             if (r == Hands.Breaker.DONE) {
                 afterBreak(world, villager, cell);
+                Toques.mark(villager, cell, kind == Kind.PILLAR || kind == Kind.CLIMB ? Toques.PILLAR : Toques.DIG);
             }
             return Result.RUNNING;
         }
@@ -815,6 +1151,15 @@ public final class Motor {
             // a gap with a short walk round it: walk it, the blocks stay in the bag
             return Result.RUNNING;
         }
+        long now = world.getTime();
+        if (!block.isEmpty() && world.getBlockState(ground).isReplaceable() && !lavaBelow
+                && (Toques.forbidden(villager, ground, now) || Toques.lately(villager, ground, now, false, Toques.DIG))) {
+            // it dug this cell out just now to get through, or keeps digging and filling it: no block back in there
+            if (Toques.forbidden(villager, ground, now)) {
+                loopCell = ground.toImmutable();
+            }
+            return blocked(world, villager);
+        }
         if (!block.isEmpty() && world.getBlockState(ground).isReplaceable() && !lavaBelow) {
             doing = kind == Kind.UP ? "pone un escalón" : "haciendo un puente";
             if (overGap && !villager.isTouchingWater()) {
@@ -826,6 +1171,7 @@ public final class Motor {
                 }
             }
             if (Hands.place(world, villager, ground, block)) {
+                Toques.mark(villager, ground, Toques.STEP);
                 acted = true;
                 placeTicks = 0;
                 bridged = overGap;
@@ -882,7 +1228,7 @@ public final class Motor {
             if (++tries > MAX_JUMPS) {
                 return blocked(world, villager);
             }
-            if (tries >= 2 && !headroom && worthDigging(world, villager, from.up(3), dig)) {
+            if (tries >= 2 && !headroom && !noTouch && worthDigging(world, villager, from.up(3), dig)) {
                 // its head may be what stops it: one more block of room, dug standing still
                 headroom = true;
                 phase = Phase.PREPARE;
@@ -953,6 +1299,7 @@ public final class Motor {
             }
             if (villager.getY() >= from.getY() + PLACE_HEIGHT) {
                 if (!block.isEmpty() && Hands.place(world, villager, from, block)) {
+                    Toques.mark(villager, from, Toques.PILLAR);
                     acted = true;
                     phase = Phase.LAND;
                 }
@@ -1273,7 +1620,7 @@ public final class Motor {
         doing = lava ? "tapando lava" : "tapando el agua";
         ItemStack block = Hands.buildingBlock(villager);
         BlockPos plug = lavaHere || water || Mining.passable(world, hole) ? hole : null;
-        if (plug != null && !block.isEmpty() && Hands.place(world, villager, plug, block)) {
+        if (plug != null && !block.isEmpty() && (lava ? Hands.placeUrgent(world, villager, plug, block) : Hands.place(world, villager, plug, block))) {
             justBroken = null;
             reset(world, villager);
             return true;

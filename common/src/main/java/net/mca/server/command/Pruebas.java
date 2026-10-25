@@ -101,6 +101,12 @@ public final class Pruebas {
                 case "cofre-campo" -> start(new CofreCampo(world));
                 case "cofre-basura" -> start(new CofreBasura(world));
                 case "hojas" -> start(new Hojas(world));
+                case "bucle" -> start(new Bucle(world));
+                case "escalera-hecha" -> start(new EscaleraHecha(world));
+                case "dormir" -> start(new Sueno(world));
+                case "vuelta-escalera" -> start(new VueltaEscalera(world));
+                case "mina-guardada" -> start(new MinaGuardada(world));
+                case "casa-conectado" -> start(new CasaConectado(world));
                 case "resumen" -> resumen();
                 default -> {
                     ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | progreso | nombre | obras | robo | regalo | arco-cerca | horno | hogar | cultivos | agua-tunel | agua-pozo | explorar | ia-local | ia-red | resumen"));
@@ -2172,6 +2178,813 @@ public final class Pruebas {
             net.mca.entity.ai.mente.Recuerdos.olvidar(world, miner);
             miner.discard();
             clearChests(world, boxA, boxB);
+        }
+    }
+
+    // ------------------------------------------------------------------ round 11 (body): no dig-and-fill loop, the stair that is there, sleep counts
+
+    /**
+     * "Mina el mismo bloque y lo pone una y otra vez": three ways a body loops at one cell. (A) a stone in its tunnel
+     * with a spring on either side of it, an aquifer: each time it is dug the hole fills with a new source, and the
+     * Motor plugged it (its lava/water watch) and dug it out again, forever. (B) it set a bridge block over a dip and
+     * the next plan (a step down into the dip) dug it straight out again. (C) a cell broken and placed three times.
+     * The body must never touch one cell more than three times in 400 ticks, never dig out the step it just set, and
+     * tell its caller (BLOCKED, {@code loopCell}) when the only way is a loop cell.
+     */
+    private static final class Bucle extends Scenario {
+        private final BlockPos o;
+        private final VillagerEntityMCA a;
+        private final net.mca.entity.ai.body.Motor motorA = new net.mca.entity.ai.body.Motor();
+        private final BlockPos spring;
+        private final BlockPos goalA;
+        private int maxTouchesA;
+        private int blockedA;
+        private boolean doneA;
+        private boolean arrivedA;
+        private final VillagerEntityMCA b;
+        private final net.mca.entity.ai.body.Motor motorB = new net.mca.entity.ai.body.Motor();
+        private final BlockPos dip;
+        private final BlockPos goalB1;
+        private boolean bridged;
+        private int bridgedAt;
+        private boolean blockedB;
+        private boolean dugB;
+        private boolean doneB;
+        private final VillagerEntityMCA c;
+        private final net.mca.entity.ai.body.Motor motorC = new net.mca.entity.ai.body.Motor();
+        private final net.mca.entity.ai.body.Hands.Breaker breakerC = new net.mca.entity.ai.body.Hands.Breaker();
+        private final BlockPos q;
+        private final BlockPos goalC;
+        private int stageC;
+        private int stageTicks;
+        private boolean doneC;
+        private boolean okC;
+        private String whyC = "";
+
+        Bucle(ServerWorld world) {
+            super("bucle", world, 1500);
+            o = new BlockPos(7805, 100, 0);
+            load(world, o, 24);
+            fill(world, o.add(-3, -4, -10), o.add(14, 4, 10), Blocks.STONE.getDefaultState());
+            // A: a tunnel east, a stone across it with a water source behind each side of it
+            fill(world, o.add(0, 0, 0), o.add(9, 1, 0), Blocks.AIR.getDefaultState());
+            spring = o.add(4, 0, 0);
+            world.setBlockState(spring, Blocks.STONE.getDefaultState(), 2);
+            world.setBlockState(spring.north(), Blocks.WATER.getDefaultState(), 2);
+            world.setBlockState(spring.south(), Blocks.WATER.getDefaultState(), 2);
+            goalA = o.add(8, 0, 0);
+            // B: a short tunnel with a one-deep dip in its floor, walls on both sides (no way round)
+            fill(world, o.add(0, 0, 6), o.add(4, 1, 6), Blocks.AIR.getDefaultState());
+            dip = o.add(1, -1, 6);
+            world.setBlockState(dip, Blocks.AIR.getDefaultState(), 2);
+            goalB1 = o.add(3, 0, 6);
+            // C: a short tunnel; the cell ahead is set, broken and set again by hand
+            fill(world, o.add(0, 0, -6), o.add(4, 1, -6), Blocks.AIR.getDefaultState());
+            q = o.add(1, 0, -6);
+            goalC = o.add(3, 0, -6);
+            for (int z : new int[]{0, 6, -6}) {
+                for (int x = 0; x <= 8; x += 4) {
+                    world.setBlockState(o.add(x, 2, z), Blocks.GLOWSTONE.getDefaultState(), 2);
+                }
+            }
+            a = villager(world, o, Direction.EAST, "Teo Bucle");
+            b = villager(world, o.add(0, 0, 6), Direction.EAST, "Ana Bucle");
+            c = villager(world, o.add(0, 0, -6), Direction.EAST, "Luz Bucle");
+            for (VillagerEntityMCA v : new VillagerEntityMCA[]{a, b, c}) {
+                v.getInventory().addStack(new ItemStack(Items.DIAMOND_PICKAXE));
+                v.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 32));
+                face(v, -90.0F, 0.0F);
+                Retina.lookAll(world, v);
+            }
+        }
+
+        @Override
+        Boolean step() {
+            long now = world.getTime();
+            if (!doneA) {
+                net.mca.entity.ai.body.Motor.Result r = motorA.step(world, a, goalA, true, true);
+                maxTouchesA = Math.max(maxTouchesA, net.mca.entity.ai.body.Toques.touches(a, spring, now));
+                if (r == net.mca.entity.ai.body.Motor.Result.ARRIVED) {
+                    doneA = true;
+                    arrivedA = true;
+                } else if (r == net.mca.entity.ai.body.Motor.Result.BLOCKED) {
+                    motorA.reset(world, a);
+                    blockedA++;
+                }
+                if (ticks > 1200) {
+                    doneA = true;
+                }
+            }
+            if (!doneB) {
+                net.mca.entity.ai.body.Motor.Result r = motorB.step(world, b, bridged ? dip : goalB1, true, true);
+                if (!bridged && !world.getBlockState(dip).isAir()) {
+                    // the bridge block is in: now the plan changes its mind and wants down into the dip
+                    bridged = true;
+                    bridgedAt = ticks;
+                    MCA.LOGGER.info("PRUEBA bucle: B puso el puente en " + dip.toShortString() + ", ahora quiere bajar al hoyo");
+                } else if (bridged) {
+                    dugB |= world.getBlockState(dip).isAir();
+                    if (r == net.mca.entity.ai.body.Motor.Result.BLOCKED) {
+                        blockedB = true;
+                        motorB.reset(world, b);
+                    }
+                    if (dugB || r == net.mca.entity.ai.body.Motor.Result.ARRIVED || ticks - bridgedAt > 120) {
+                        doneB = true;
+                    }
+                } else if (ticks > 600) {
+                    doneB = true;
+                }
+            }
+            if (!doneC) {
+                stepC(now);
+            }
+            if (!doneA || !doneB || !doneC) {
+                return null;
+            }
+            boolean okA = maxTouchesA <= net.mca.entity.ai.body.Toques.LOOP_TOUCHES;
+            boolean okB = bridged && blockedB && !dugB;
+            boolean passed = okA && okB && okC;
+            check(name, passed, "A (manantial): llegó " + arrivedA + ", veces que tocó el bloque " + maxTouchesA + " (máx 3), bloqueado " + blockedA
+                    + ", prohibido " + net.mca.entity.ai.body.Toques.forbidden(a, spring, now) + "; B (puente y luego bajar): puso el puente " + bridged
+                    + ", lo volvió a romper " + dugB + ", BLOCKED " + blockedB + "; C (tres toques): " + okC + " " + whyC + "; " + state());
+            return passed;
+        }
+
+        private void stepC(long now) {
+            stageTicks++;
+            switch (stageC) {
+                case 0, 2 -> {
+                    if (net.mca.entity.ai.body.Hands.place(world, c, q, net.mca.entity.ai.body.Hands.buildingBlock(c))) {
+                        stageC++;
+                        stageTicks = 0;
+                    } else if (stageTicks > 60) {
+                        doneC = true;
+                        whyC = "no pudo poner el bloque (etapa " + stageC + ")";
+                    }
+                }
+                case 1 -> {
+                    int r = breakerC.tick(world, c, q);
+                    if (r == net.mca.entity.ai.body.Hands.Breaker.DONE) {
+                        stageC++;
+                        stageTicks = 0;
+                    } else if (r == net.mca.entity.ai.body.Hands.Breaker.FAILED || stageTicks > 100) {
+                        doneC = true;
+                        whyC = "no pudo romper el bloque";
+                    }
+                }
+                case 3 -> {
+                    // three touches: the cell is a loop now, the hands leave it alone
+                    boolean forbidden = net.mca.entity.ai.body.Toques.forbidden(c, q, now);
+                    int hit = breakerC.tick(world, c, q);
+                    if (!forbidden || hit != net.mca.entity.ai.body.Hands.Breaker.FAILED) {
+                        doneC = true;
+                        whyC = "tras 3 toques prohibido " + forbidden + ", romper otra vez da " + hit;
+                        return;
+                    }
+                    stageC++;
+                    stageTicks = 0;
+                }
+                case 4 -> {
+                    net.mca.entity.ai.body.Motor.Result r = motorC.step(world, c, goalC, true, true);
+                    if (r == net.mca.entity.ai.body.Motor.Result.BLOCKED) {
+                        BlockPos loop = motorC.loopCell();
+                        okC = q.equals(loop) && !world.getBlockState(q).isAir() && q.equals(net.mca.entity.ai.body.Toques.lastLoop(c));
+                        whyC = "el motor dice BLOCKED con la celda del bucle " + (loop == null ? "ninguna" : loop.toShortString())
+                                + ", el bloque sigue " + !world.getBlockState(q).isAir();
+                        doneC = true;
+                    } else if (r == net.mca.entity.ai.body.Motor.Result.ARRIVED || stageTicks > 300) {
+                        whyC = "el motor no se rindió ante la celda del bucle: " + r + ", bloque " + world.getBlockState(q).getBlock().getName().getString();
+                        doneC = true;
+                    }
+                }
+                default -> doneC = true;
+            }
+        }
+
+        @Override
+        String state() {
+            return "A en " + a.getBlockPos().toShortString() + " (" + motorA.doing() + "), B en " + b.getBlockPos().toShortString() + " ("
+                    + motorB.doing() + "), C etapa " + stageC + " (" + motorC.doing() + ")";
+        }
+
+        @Override
+        void cleanup() {
+            for (VillagerEntityMCA v : new VillagerEntityMCA[]{a, b, c}) {
+                net.mca.entity.ai.body.Toques.clear(v);
+                v.discard();
+            }
+        }
+    }
+
+    /**
+     * The screenshot of round 11: a miner at the foot of a one-wide stair cut in the rock (steps one high, three of room
+     * over each, a turn half way, torches on it), standing a block to the side of its first step. The Motor's no-dig
+     * walk ({@code climbExisting}) must find that stair and climb it to the top: nothing broken, nothing placed.
+     */
+    private static final class EscaleraHecha extends Scenario {
+        private final net.mca.entity.ai.body.Motor motor = new net.mca.entity.ai.body.Motor();
+        private final VillagerEntityMCA v;
+        private final BlockPos o;
+        private final BlockPos top;
+        private final BlockPos boxA;
+        private final BlockPos boxB;
+        @Nullable
+        private boolean[] before;
+        private int found = -1;
+        private int blocked;
+
+        EscaleraHecha(ServerWorld world) {
+            super("escalera-hecha", world, 1400);
+            o = new BlockPos(7950, 100, 0);
+            load(world, o, 24);
+            fill(world, o.add(-6, -14, -10), o.add(12, -1, 6), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-6, 0, -10), o.add(12, 6, 6), Blocks.AIR.getDefaultState());
+            // the pocket at the foot, ten down
+            fill(world, o.add(-2, -10, -1), o.add(0, -8, 1), Blocks.AIR.getDefaultState());
+            // five steps up to the east, then a turn and five more to the north, three of room over every step
+            List<BlockPos> steps = new ArrayList<>();
+            for (int k = 1; k <= 5; k++) {
+                BlockPos s = o.add(k, -10 + k, 0);
+                fill(world, s, s.up(2), Blocks.AIR.getDefaultState());
+                steps.add(s);
+            }
+            for (int j = 1; j <= 5; j++) {
+                BlockPos s = o.add(5, -5 + j, -j);
+                fill(world, s, s.up(2), Blocks.AIR.getDefaultState());
+                steps.add(s);
+            }
+            top = o.add(5, 0, -5);
+            // torches on some steps, as it left them on the way down
+            for (int i = 1; i < steps.size(); i += 3) {
+                world.setBlockState(steps.get(i), Blocks.TORCH.getDefaultState(), 2);
+            }
+            world.setBlockState(o.add(-1, -7, 0), Blocks.GLOWSTONE.getDefaultState(), 2);
+            boxA = o.add(-6, -14, -10);
+            boxB = o.add(12, 6, 6);
+            v = villager(world, o.add(-1, -10, 1), Direction.EAST, "Teo Peldaño");
+            v.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+            v.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 32));
+            face(v, -90.0F, 0.0F);
+            Retina.lookAll(world, v);
+        }
+
+        @Override
+        Boolean step() {
+            if (!v.isAlive()) {
+                fail(name, "murió; " + state());
+                return Boolean.FALSE;
+            }
+            if (before == null) {
+                before = airIn(world, boxA, boxB);
+                List<BlockPos> way = net.mca.entity.ai.body.Motor.findWalk(world, v.getBlockPos(), top, 0.5, 4000, null);
+                found = way == null ? 0 : way.size();
+                MCA.LOGGER.info("PRUEBA escalera-hecha: camino sin cavar de " + found + " celdas desde " + v.getBlockPos().toShortString());
+            }
+            net.mca.entity.ai.body.Motor.Result r = motor.climbExisting(world, v, top, 0.5, 4000, null);
+            int[] changed = changedIn(world, boxA, boxB, before);
+            if (changed[0] > 0 || changed[1] > 0) {
+                fail(name, "rompió " + changed[0] + " y puso " + changed[1] + " bloques en una escalera que ya estaba hecha; " + state());
+                return Boolean.FALSE;
+            }
+            if (r == net.mca.entity.ai.body.Motor.Result.BLOCKED && ++blocked > 20) {
+                fail(name, "no encontró o no pudo subir la escalera hecha (" + blocked + " veces BLOCKED, camino " + found + "); " + state());
+                return Boolean.FALSE;
+            }
+            if (r != net.mca.entity.ai.body.Motor.Result.ARRIVED) {
+                return null;
+            }
+            boolean passed = v.getBlockPos().equals(top) && found > 0 && changed[0] == 0 && changed[1] == 0;
+            check(name, passed, "subió la escalera hecha en " + ticks + " ticks por " + found + " celdas, rotos " + changed[0] + ", puestos "
+                    + changed[1] + ", veces bloqueado " + blocked + "; " + state());
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "en " + v.getBlockPos().toShortString() + ", haciendo: " + motor.doing() + ", paso " + motor.walkingIndex()
+                    + (motor.walkingPath() == null ? "" : "/" + motor.walkingPath().size());
+        }
+
+        @Override
+        void cleanup() {
+            v.discard();
+        }
+    }
+
+    /**
+     * "Que la cama lo reconozca como un jugador real, que aparezca que hay 1/2 jugadores durmiendo": two villagers
+     * counted as connected lie down in two beds with no real player online. The world's sleep counter must count them
+     * (sleeping +2, total +2, the X/Y of the action bar from the same numbers), the rule must be the vanilla one, and
+     * once the sleepers needed have slept 100 ticks the night must be skipped (here: with the percentage set so that
+     * these two are enough, as the other checks' connected miners are awake) and both must get up.
+     */
+    private static final class Sueno extends Scenario {
+        private final VillagerEntityMCA a;
+        private final VillagerEntityMCA b;
+        private final BlockPos bedA;
+        private final BlockPos bedB;
+        private final int oldPercentage;
+        private int stage;
+        private int lay;
+        private long skipBefore;
+        private long timeOfDay;
+        private String counts = "";
+        private boolean countsOk;
+        private boolean earlySkip;
+
+        Sueno(ServerWorld world) {
+            super("dormir", world, 1000);
+            BlockPos o = new BlockPos(8100, 100, 0);
+            load(world, o, 16);
+            fill(world, o.add(-4, -1, -4), o.add(6, -1, 4), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-4, 0, -4), o.add(6, 4, 4), Blocks.AIR.getDefaultState());
+            bedA = o.add(1, 0, -2);
+            bedB = o.add(1, 0, 2);
+            for (BlockPos head : new BlockPos[]{bedA, bedB}) {
+                BlockState foot = Blocks.RED_BED.getDefaultState().with(net.minecraft.block.BedBlock.FACING, Direction.EAST)
+                        .with(net.minecraft.block.BedBlock.PART, net.minecraft.block.enums.BedPart.FOOT);
+                world.setBlockState(head.west(), foot, 2);
+                world.setBlockState(head, foot.with(net.minecraft.block.BedBlock.PART, net.minecraft.block.enums.BedPart.HEAD), 2);
+            }
+            a = villager(world, o.add(1, 0, -1), Direction.EAST, "Rosa Sueño");
+            b = villager(world, o.add(1, 0, 1), Direction.EAST, "Pablo Sueño");
+            for (VillagerEntityMCA v : new VillagerEntityMCA[]{a, b}) {
+                v.setAiDisabled(true);
+                net.mca.entity.ai.sense.Dormir.contarComoConectado(v, true);
+            }
+            oldPercentage = world.getGameRules().getInt(net.minecraft.world.GameRules.PLAYERS_SLEEPING_PERCENTAGE);
+        }
+
+        @Override
+        Boolean step() {
+            int pct = world.getGameRules().getInt(net.minecraft.world.GameRules.PLAYERS_SLEEPING_PERCENTAGE);
+            if (stage == 0) {
+                // the rule itself, as vanilla has it
+                boolean rule = net.mca.entity.ai.sense.Dormir.saltaNoche(2, 2, 100) && !net.mca.entity.ai.sense.Dormir.saltaNoche(2, 1, 100)
+                        && net.mca.entity.ai.sense.Dormir.saltaNoche(2, 1, 50) && !net.mca.entity.ai.sense.Dormir.saltaNoche(3, 1, 50)
+                        && net.mca.entity.ai.sense.Dormir.necesarios(0, 100) == 1 && !net.mca.entity.ai.sense.Dormir.saltaNoche(2, 2, 101);
+                int[] awake = net.mca.entity.ai.sense.Dormir.cuenta(world);
+                boolean lyingA = net.mca.entity.ai.sense.Dormir.acostarPrueba(world, a, bedA);
+                boolean lyingB = net.mca.entity.ai.sense.Dormir.acostarPrueba(world, b, bedB);
+                int[] asleep = net.mca.entity.ai.sense.Dormir.cuenta(world);
+                net.minecraft.server.world.SleepManager manager = ((net.mca.mixin.MixinServerWorldSleepAccessor) world).mca$sleepManager();
+                boolean counter = manager.getSleeping() == asleep[1] && manager.getNightSkippingRequirement(pct) == net.mca.entity.ai.sense.Dormir.necesarios(asleep[0], pct);
+                countsOk = rule && lyingA && lyingB && a.isSleeping() && b.isSleeping() && asleep[0] == awake[0] && asleep[1] == awake[1] + 2
+                        && asleep[0] >= 2 + world.getPlayers().size() && counter;
+                counts = "jugadores reales " + world.getPlayers().size() + ", conectados " + net.mca.entity.ai.sense.Dormir.conectados(world)
+                        + ", antes " + awake[1] + "/" + awake[0] + ", acostados " + asleep[1] + "/" + asleep[0] + ", el contador del mundo dice "
+                        + manager.getSleeping() + "/" + manager.getNightSkippingRequirement(pct) + " (regla " + rule + ", acostados " + lyingA + " " + lyingB + ")";
+                MCA.LOGGER.info("PRUEBA dormir: " + counts);
+                if (!countsOk) {
+                    fail(name, "no los cuenta como jugadores durmiendo: " + counts);
+                    return Boolean.FALSE;
+                }
+                // the other checks' connected miners are awake: the percentage that makes these two enough
+                int needed = Math.max(1, 200 / Math.max(1, asleep[0]));
+                world.getGameRules().get(net.minecraft.world.GameRules.PLAYERS_SLEEPING_PERCENTAGE).set(Math.min(100, needed), world.getServer());
+                skipBefore = net.mca.entity.ai.sense.Dormir.ultimaNocheSaltada(world);
+                timeOfDay = world.getTimeOfDay();
+                lay = ticks;
+                stage = 1;
+                return null;
+            }
+            boolean skipped = net.mca.entity.ai.sense.Dormir.ultimaNocheSaltada(world) != skipBefore;
+            if (ticks - lay < 60) {
+                // not slept long enough yet: no skip
+                earlySkip |= skipped;
+                return null;
+            }
+            if (!skipped) {
+                if (ticks - lay > 400) {
+                    fail(name, "durmieron " + (ticks - lay) + " ticks y la noche no pasó; " + counts + "; " + state());
+                    return Boolean.FALSE;
+                }
+                return null;
+            }
+            boolean up = !a.isSleeping() && !b.isSleeping();
+            // doDaylightCycle is off in the checks: the night "passes" (everyone gets up), the clock stays
+            boolean clock = world.getGameRules().getBoolean(net.minecraft.world.GameRules.DO_DAYLIGHT_CYCLE) || world.getTimeOfDay() == timeOfDay;
+            boolean passed = countsOk && !earlySkip && up && clock;
+            check(name, passed, "los cuenta: " + counts + "; la noche pasó a los " + (ticks - lay) + " ticks de dormir (antes de 60: " + earlySkip
+                    + "), se levantaron " + up + ", reloj respetado " + clock);
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "durmiendo " + a.isSleeping() + " " + b.isSleeping() + ", cuenta " + java.util.Arrays.toString(net.mca.entity.ai.sense.Dormir.cuenta(world));
+        }
+
+        @Override
+        void cleanup() {
+            world.getGameRules().get(net.minecraft.world.GameRules.PLAYERS_SLEEPING_PERCENTAGE).set(oldPercentage, world.getServer());
+            for (VillagerEntityMCA v : new VillagerEntityMCA[]{a, b}) {
+                net.mca.entity.ai.sense.Dormir.levantar(world, v);
+                net.mca.entity.ai.sense.Dormir.contarComoConectado(v, false);
+                v.discard();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ round 11: the way back it made, its first mine, never offline at home
+
+    /**
+     * "Aun teniendo la subida al lado, prefiere romper bloques con la mano que subir por la escalera ya hecha" (the
+     * screenshot): a miner in a cave pocket two blocks beside the foot of the one-wide stone staircase it cut on its way
+     * down, torches on its steps, the stair turning a corner on the way up. Called home it walks up its own stair (its
+     * trail); then, put back in the pocket with its trail forgotten, a second time torch to torch. Not one block broken
+     * or placed, either time.
+     */
+    private static final class VueltaEscalera extends Scenario {
+        private final VillagerEntityMCA miner;
+        private final BlockPos o;
+        private final BlockPos pocket;
+        private final Paseo paseo;
+        private final List<BlockPos> trail = new ArrayList<>();
+        private final List<BlockPos> torches = new ArrayList<>();
+        private final BlockPos boxA;
+        private final BlockPos boxB;
+        @Nullable
+        private boolean[] before;
+        private ProspectingTask task = new ProspectingTask();
+        /** 0 walking down (its memories), 1 up by its trail, 2 up with the trail forgotten. */
+        private int round;
+        private int climbStart;
+        private final java.util.Set<String> ways = new java.util.LinkedHashSet<>();
+        private String firstWays = "";
+
+        VueltaEscalera(ServerWorld world) {
+            super("vuelta-escalera", world, 2400);
+            o = new BlockPos(7450, 100, 0);
+            load(world, o, 32);
+            fill(world, o.add(-12, -16, -8), o.add(16, -2, 14), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-12, -1, -8), o.add(16, -1, 14), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-12, 0, -8), o.add(16, 8, 14), Blocks.AIR.getDefaultState());
+            List<BlockPos> walk = new ArrayList<>();
+            for (int x = -4; x <= 0; x++) {
+                walk.add(o.add(x, 0, 0));
+            }
+            trail.add(o);
+            // the stair it cut going down: east, then round a corner to the south, every step one down, three of room
+            for (int k = 1; k <= 5; k++) {
+                BlockPos c = o.add(k, -k, 0);
+                fill(world, c, c.up(2), Blocks.AIR.getDefaultState());
+                walk.add(c);
+                trail.add(c);
+            }
+            for (int j = 1; j <= 4; j++) {
+                BlockPos c = o.add(5, -5 - j, j);
+                fill(world, c, c.up(2), Blocks.AIR.getDefaultState());
+                walk.add(c);
+                trail.add(c);
+            }
+            // the cave pocket beside the stair's foot, where it was working
+            fill(world, o.add(5, -9, 5), o.add(8, -7, 7), Blocks.AIR.getDefaultState());
+            for (BlockPos c : new BlockPos[]{o.add(5, -9, 5), o.add(6, -9, 6), o.add(7, -9, 6)}) {
+                walk.add(c);
+                trail.add(c);
+            }
+            pocket = o.add(7, -9, 6);
+            for (BlockPos t : new BlockPos[]{o.add(1, -1, 0), o.add(4, -4, 0), o.add(5, -7, 2), o.add(6, -9, 6)}) {
+                world.setBlockState(t, Blocks.TORCH.getDefaultState(), 2);
+                torches.add(t);
+            }
+            paseo = new Paseo(walk);
+            boxA = o.add(-12, -16, -8);
+            boxB = o.add(16, 8, 14);
+            miner = villager(world, o.add(-4, 0, 0), Direction.EAST, "Teo Vuelta");
+            miner.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            miner.setAiDisabled(true);
+            miner.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+            miner.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 32));
+            miner.getInventory().addStack(new ItemStack(Items.BREAD, 6));
+        }
+
+        /** A trail from the door (first) to the work face (last), as a miner's feet would have left it. */
+        static net.mca.entity.ai.body.Mina minaDe(List<BlockPos> cells, int dir) {
+            net.minecraft.nbt.NbtCompound nbt = new net.minecraft.nbt.NbtCompound();
+            long[] keys = new long[cells.size()];
+            for (int i = 0; i < keys.length; i++) {
+                keys[i] = cells.get(i).asLong();
+            }
+            nbt.putLongArray("c", keys);
+            nbt.putBoolean("door", true);
+            nbt.putInt("dir", dir);
+            return net.mca.entity.ai.body.Mina.fromNbt(nbt);
+        }
+
+        private void call(boolean withTrail) {
+            task = new ProspectingTask();
+            task.setHome(o.add(-10, 0, 0));
+            task.setFood(20);
+            if (withTrail) {
+                task.setMina(minaDe(trail, Direction.EAST.getHorizontal()));
+            }
+            face(miner, -90.0F, 0.0F);
+            ProspectingTask.callHome(miner, false);
+            climbStart = ticks;
+        }
+
+        @Override
+        Boolean step() {
+            if (!miner.isAlive()) {
+                fail(name, "el minero murió; " + state());
+                return Boolean.FALSE;
+            }
+            if (round == 0) {
+                if (!paseo.tick(world, miner, ticks)) {
+                    return null;
+                }
+                // the marks it set on its way down, in that order: the door, its torches, the corner and the foot of the stair
+                var r = net.mca.entity.ai.mente.Recuerdos.of(world, miner);
+                long t = world.getTime();
+                r.marcar(net.mca.entity.ai.mente.Recuerdos.ENTRADA, o, t);
+                r.marcar(net.mca.entity.ai.mente.Recuerdos.ANTORCHA, torches.get(0), t);
+                r.marcar(net.mca.entity.ai.mente.Recuerdos.ANTORCHA, torches.get(1), t);
+                r.marcar(net.mca.entity.ai.mente.Recuerdos.ESCALERA, o.add(5, -5, 0), t);
+                r.marcar(net.mca.entity.ai.mente.Recuerdos.ANTORCHA, torches.get(2), t);
+                r.marcar(net.mca.entity.ai.mente.Recuerdos.ESCALERA, o.add(5, -9, 4), t);
+                r.marcar(net.mca.entity.ai.mente.Recuerdos.ANTORCHA, torches.get(3), t);
+                miner.setAiDisabled(false);
+                before = airIn(world, boxA, boxB);
+                call(true);
+                round = 1;
+                MCA.LOGGER.info("PRUEBA vuelta-escalera: recuerda " + r.size() + " pasos y " + r.marcas().size()
+                        + " marcas, al pie de su escalera, lo llaman a casa desde " + miner.getBlockPos().toShortString());
+                return null;
+            }
+            task.practice(world, miner);
+            if (!task.viaDe().isEmpty()) {
+                ways.add(task.viaDe());
+            }
+            if ((ticks - climbStart) % 100 == 0) {
+                MCA.LOGGER.info("PRUEBA vuelta-escalera vuelta " + round + " t=" + (ticks - climbStart) + ": " + state());
+            }
+            int[] changed = changedIn(world, boxA, boxB, before);
+            if (changed[0] > 0 || changed[1] > 0) {
+                fail(name, "vuelta " + round + ": rompió " + changed[0] + " y puso " + changed[1] + " bloques en vez de subir por su escalera; "
+                        + "caminos " + ways + "; " + state());
+                return Boolean.FALSE;
+            }
+            boolean up = miner.getBlockY() >= o.getY() && world.isSkyVisible(miner.getBlockPos().up()) && miner.isOnGround();
+            if (!up || task.fase().equals("HOME_UP")) {
+                return null;
+            }
+            if (round == 1) {
+                firstWays = ways + " en " + (ticks - climbStart) + " ticks";
+                ways.clear();
+                // back down in the pocket, its trail forgotten: only its steps and its torches to go by
+                miner.refreshPositionAndAngles(pocket.getX() + 0.5, pocket.getY(), pocket.getZ() + 0.5, 0, 0);
+                miner.setVelocity(Vec3d.ZERO);
+                call(false);
+                round = 2;
+                return null;
+            }
+            boolean torch = ways.contains("sus antorchas");
+            check(name, torch, "subió sin romper ni poner nada: primero por " + firstWays + ", sin su camino por " + ways + " en "
+                    + (ticks - climbStart) + " ticks (antorcha a antorcha: " + torch + "); " + state());
+            return torch;
+        }
+
+        @Override
+        String state() {
+            return "en " + miner.getBlockPos().toShortString() + ", fase " + task.fase() + ", haciendo: " + Retina.memory(miner).doing()
+                    + ", tarea " + task.debug();
+        }
+
+        @Override
+        void cleanup() {
+            net.mca.entity.ai.mente.Recuerdos.olvidar(world, miner);
+            miner.discard();
+        }
+    }
+
+    /**
+     * "Aún no recuerda la primera mina que hizo": its mine (door, staircase, tunnel, work face) was saved with the world
+     * before it walked home, seventy blocks away, and the server was restarted. Connected again at home, it walks back
+     * to that same door and down that same trail to its work face: no new staircase anywhere near home.
+     */
+    private static final class MinaGuardada extends Scenario {
+        private final VillagerEntityMCA v;
+        private final net.minecraft.server.network.ServerPlayerEntity p;
+        private final BlockPos o;
+        private final BlockPos face;
+        private final BlockPos homeA;
+        private final BlockPos homeB;
+        private final boolean[] beforeHome;
+        private double closest = Double.MAX_VALUE;
+
+        MinaGuardada(ServerWorld world) {
+            super("mina-guardada", world, 3000);
+            o = new BlockPos(7600, 100, 40);
+            load(world, o.add(-36, 0, 0), 56);
+            fill(world, o.add(-84, -12, -6), o.add(14, -2, 6), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-84, -1, -6), o.add(14, -1, 6), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-84, 0, -6), o.add(14, 6, 6), Blocks.AIR.getDefaultState());
+            List<BlockPos> trail = minaHecha(world, o);
+            face = trail.get(trail.size() - 1);
+            BlockPos home = o.add(-72, 0, 0);
+            v = villager(world, home, Direction.EAST, "Ana Vuelve");
+            v.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            v.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+            v.getInventory().addStack(new ItemStack(Items.BREAD, 8));
+            v.getInventory().addStack(new ItemStack(Items.TORCH, 8));
+            v.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 16));
+            chestFor(world, v, home.add(0, 0, 2));
+            // its mine as it was saved with the world before the restart
+            VueltaEscalera.minaDe(trail, Direction.EAST.getHorizontal()).save(world, v.getUuid());
+            homeA = o.add(-84, -12, -6);
+            homeB = o.add(-20, 6, 6);
+            beforeHome = airIn(world, homeA, homeB);
+            p = fakePlayer(world, "Prueba_Vuelve", Vec3d.ofBottomCenter(home.add(0, 0, -3)));
+            v.getVillagerBrain().assignJob(net.mca.entity.ai.Chore.PROSPECT, p);
+        }
+
+        /**
+         * A mine at {@code o} (its door, on open grass): a one-wide staircase six steps down to the east, three of room on
+         * each, then a lit tunnel four long. The trail from the door to the work face.
+         */
+        static List<BlockPos> minaHecha(ServerWorld world, BlockPos o) {
+            List<BlockPos> trail = new ArrayList<>();
+            trail.add(o);
+            for (int k = 1; k <= 6; k++) {
+                BlockPos c = o.add(k, -k, 0);
+                fill(world, c, c.up(2), Blocks.AIR.getDefaultState());
+                trail.add(c);
+            }
+            for (int x = 7; x <= 10; x++) {
+                BlockPos c = o.add(x, -6, 0);
+                fill(world, c, c.up(), Blocks.AIR.getDefaultState());
+                trail.add(c);
+            }
+            world.setBlockState(o.add(8, -4, 0), Blocks.GLOWSTONE.getDefaultState(), 2);
+            return trail;
+        }
+
+        @Override
+        Boolean step() {
+            if (!v.isAlive()) {
+                fail(name, "el minero murió; " + state());
+                return Boolean.FALSE;
+            }
+            if (v.getVillagerBrain().getCurrentJob() != net.mca.entity.ai.Chore.PROSPECT) {
+                fail(name, "se desconectó; " + state());
+                return Boolean.FALSE;
+            }
+            if (ticks % 200 == 0) {
+                MCA.LOGGER.info("PRUEBA mina-guardada t=" + ticks + ": " + state());
+            }
+            closest = Math.min(closest, v.getPos().distanceTo(Vec3d.ofBottomCenter(face)));
+            int[] changed = changedIn(world, homeA, homeB, beforeHome);
+            if (changed[0] > 0) {
+                fail(name, "empezó a cavar otra mina lejos de la suya (" + changed[0] + " bloques rotos cerca de casa); " + state());
+                return Boolean.FALSE;
+            }
+            if (closest > 2.5) {
+                return null;
+            }
+            ProspectingTask task = ProspectingTask.of(v);
+            boolean same = o.equals(task.minaEntrada()) && face.equals(task.frente()) || o.equals(task.minaEntrada()) && task.minaPasos() >= 11;
+            check(name, same, "volvió desde casa (a 72 bloques) a su misma mina guardada en " + ticks + " ticks: boca " + task.minaEntrada()
+                    + ", " + task.minaPasos() + " pasos; " + state());
+            return same;
+        }
+
+        @Override
+        String state() {
+            ProspectingTask task = ProspectingTask.of(v);
+            return "en " + v.getBlockPos().toShortString() + ", trabajo " + v.getVillagerBrain().getCurrentJob() + ", fase " + task.fase()
+                    + ", haciendo: " + Retina.memory(v).doing() + ", tarea " + task.debug() + String.format(", a %.1f del frente", closest);
+        }
+
+        @Override
+        void cleanup() {
+            v.getVillagerBrain().abandonJob();
+            net.mca.entity.ai.body.Mina.forget(world, v.getUuid());
+            net.mca.entity.ai.mente.Recuerdos.olvidar(world, v);
+            v.discard();
+        }
+    }
+
+    /**
+     * "Cada vez que vuelve a casa se desconecta, no debe desconectarse, debe ir a guardar sus cosas y luego seguir, quizá
+     * dormir": connected (its job given by a player), its bag full, hungry and no food anywhere, it climbs out of its mine,
+     * walks home, stores its haul in its chest, finds no food there either, goes to bed at night (the checks' night), gets
+     * up and goes back down to the same work face, connected the whole time; a new brain built for it at home (as MCA
+     * does at a job site) keeps the same task, mid-trip.
+     */
+    private static final class CasaConectado extends Scenario {
+        private final VillagerEntityMCA v;
+        private final net.minecraft.server.network.ServerPlayerEntity p;
+        private final ProspectingTask task;
+        private final BlockPos o;
+        private final BlockPos face;
+        private final BlockPos chest;
+        private final BlockPos bed;
+        private boolean home;
+        private boolean slept;
+        private double bedClosest = Double.MAX_VALUE;
+        private String reset = "";
+        private boolean resetKept = true;
+
+        CasaConectado(ServerWorld world) {
+            super("casa-conectado", world, 4000);
+            o = new BlockPos(7720, 100, 100);
+            load(world, o.add(-10, 0, 0), 40);
+            fill(world, o.add(-30, -12, -8), o.add(14, -2, 8), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-30, -1, -8), o.add(14, -1, 8), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-30, 0, -8), o.add(14, 6, 8), Blocks.AIR.getDefaultState());
+            List<BlockPos> trail = MinaGuardada.minaHecha(world, o);
+            face = trail.get(trail.size() - 1);
+            BlockPos h = o.add(-20, 0, 0);
+            bed = h.add(1, 0, 3);
+            world.setBlockState(h.add(0, 0, 3), Blocks.RED_BED.getDefaultState().with(net.minecraft.block.BedBlock.FACING, Direction.EAST)
+                    .with(net.minecraft.block.BedBlock.PART, net.minecraft.block.enums.BedPart.FOOT), 2);
+            world.setBlockState(bed, Blocks.RED_BED.getDefaultState().with(net.minecraft.block.BedBlock.FACING, Direction.EAST)
+                    .with(net.minecraft.block.BedBlock.PART, net.minecraft.block.enums.BedPart.HEAD), 2);
+            v = villager(world, face, Direction.EAST, "Rafa Casa");
+            v.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            v.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+            v.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 16));
+            v.getInventory().addStack(new ItemStack(Items.TORCH, 4));
+            for (int i = 0; i < 24; i++) {
+                v.getInventory().addStack(new ItemStack(Items.RAW_GOLD, 64));
+            }
+            chest = chestFor(world, v, h.add(0, 0, -2));
+            VueltaEscalera.minaDe(trail, Direction.EAST.getHorizontal()).save(world, v.getUuid());
+            p = fakePlayer(world, "Prueba_Casa", Vec3d.ofBottomCenter(h.add(0, 0, -4)));
+            v.getVillagerBrain().assignJob(net.mca.entity.ai.Chore.PROSPECT, p);
+            task = ProspectingTask.of(v);
+            task.setFood(5);
+            task.setNoche(true);
+        }
+
+        private int gold() {
+            var inv = Cofres.inventory(world, chest);
+            return inv == null ? 0 : Cofres.contents(inv).getOrDefault("minecraft:raw_gold", 0);
+        }
+
+        @Override
+        Boolean step() {
+            if (!v.isAlive()) {
+                fail(name, "el minero murió; " + state());
+                return Boolean.FALSE;
+            }
+            if (v.getVillagerBrain().getCurrentJob() != net.mca.entity.ai.Chore.PROSPECT) {
+                fail(name, "se desconectó en casa; " + state());
+                return Boolean.FALSE;
+            }
+            if (ProspectingTask.of(v) != task) {
+                fail(name, "su cerebro nuevo perdió la tarea que llevaba; " + state());
+                return Boolean.FALSE;
+            }
+            String f = task.fase();
+            if (ticks % 200 == 0) {
+                MCA.LOGGER.info("PRUEBA casa-conectado t=" + ticks + ": " + state());
+            }
+            if (f.equals("HOME_STORE") || f.equals("SLEEP")) {
+                home = true;
+                if (reset.isEmpty()) {
+                    // what MCA does when a villager takes or loses a job site near home: a whole new brain
+                    v.reinitializeBrain(world);
+                    reset = f + " -> " + task.fase();
+                    resetKept = ProspectingTask.of(v) == task && task.fase().equals(f);
+                    MCA.LOGGER.info("PRUEBA casa-conectado: cerebro nuevo en casa, " + reset + ", la misma tarea: " + resetKept);
+                }
+            }
+            if (f.equals("SLEEP")) {
+                bedClosest = Math.min(bedClosest, v.getPos().distanceTo(Vec3d.ofBottomCenter(bed)));
+            }
+            if (task.vecesDormido() > 0 && !slept) {
+                slept = true;
+                task.setNoche(null);
+            }
+            if (!home || v.getPos().distanceTo(Vec3d.ofBottomCenter(face)) > 2.5) {
+                return null;
+            }
+            int gold = gold();
+            boolean same = o.equals(task.minaEntrada());
+            boolean passed = gold >= 64 * 20 && slept && resetKept && same;
+            check(name, passed, "conectado todo el viaje: guardó " + gold + " de oro crudo, se acostó: " + slept + String.format(" (a %.1f de la cama)", bedClosest)
+                    + ", cerebro nuevo en casa " + reset + " con la misma tarea: " + resetKept + ", de vuelta en su misma mina (boca " + task.minaEntrada()
+                    + ") en " + ticks + " ticks; " + state());
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "en " + v.getBlockPos().toShortString() + ", trabajo " + v.getVillagerBrain().getCurrentJob() + ", fase " + task.fase()
+                    + ", comida " + task.food() + ", haciendo: " + Retina.memory(v).doing() + ", tarea " + task.debug() + ", oro en el cofre " + gold();
+        }
+
+        @Override
+        void cleanup() {
+            v.getVillagerBrain().abandonJob();
+            net.mca.entity.ai.body.Mina.forget(world, v.getUuid());
+            net.mca.entity.ai.mente.Recuerdos.olvidar(world, v);
+            world.setBlockState(chest, Blocks.AIR.getDefaultState(), 3);
+            net.mca.server.world.data.TropelesMundo.get(world).removed(chest);
+            v.discard();
         }
     }
 

@@ -35,6 +35,12 @@ mca-prueba conectar
 mca-prueba ia-local
 mca-prueba ia-red
 mca-prueba hojas
+mca-prueba bucle
+mca-prueba escalera-hecha
+mca-prueba dormir
+mca-prueba vuelta-escalera
+mca-prueba mina-guardada
+mca-prueba casa-conectado
 sleep 290
 mca-prueba resumen
 sleep 2

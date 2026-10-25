@@ -570,6 +570,11 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
 
     @Override
     public final boolean damage(DamageSource source, float damageAmount) {
+        // a hit gets a sleeper up, as it does a player: whatever held it in bed lets go
+        if (!getWorld().isClient && isSleeping() && !isInvulnerableTo(source)) {
+            net.mca.entity.ai.sense.Dormir.herido(this);
+        }
+
         // no baby squishes
         if (getVehicle() instanceof PlayerEntity) {
             return super.damage(source, 0.0f);
@@ -784,6 +789,19 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
         }
 
         return false;
+    }
+
+    /**
+     * Lying in a bed by its own will ({@link net.mca.entity.ai.sense.Dormir#acostar}), a connected villager is not got up
+     * by its brain (the WakeUpTask wakes any villager outside the REST activity): only by a hit, the bed going, the
+     * morning, the night being skipped or getting up on purpose.
+     */
+    @Override
+    public void wakeUp() {
+        if (!getWorld().isClient && net.mca.entity.ai.sense.Dormir.retenido(this)) {
+            return;
+        }
+        super.wakeUp();
     }
 
     @Override

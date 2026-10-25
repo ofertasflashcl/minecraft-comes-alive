@@ -100,7 +100,7 @@ import java.util.WeakHashMap;
 public class ProspectingTask extends AbstractChoreTask {
     private enum Phase {
         SEEK, FIGHT, SHELTER_DIG, SHELTER_ENTER, SHELTER_SEAL, ESCAPE, RECOVER, HOME_UP, HOME_WALK, HOME_STORE, FORAGE,
-        SURFACE_WORK, RETURN, REST
+        SURFACE_WORK, RETURN, REST, SLEEP
     }
 
     /** Why it is on its way up: a full bag, hunger, no pickaxe left, or someone called it out of the mine. */
@@ -123,9 +123,13 @@ public class ProspectingTask extends AbstractChoreTask {
     private static final int LEVEL_SHIFT_MAX = 15;
     /** A bed or a chest of its own this far away (across) still counts as home; beyond that it camps by the mine. */
     private static final int HOME_REACH = 128;
-    /** A saved mine is taken up again only when this close and this recent. */
-    private static final int RESUME_DISTANCE = 64;
-    private static final long RESUME_AGE = 72000;
+    /**
+     * A saved mine is taken up again only when this close and this recent: as far as home may be from it (home is up
+     * to {@link #HOME_REACH} away, the walk back from there must not forget it) and for days of game time, so a
+     * night's sleep, a trip home or a restart never makes it start another one.
+     */
+    private static final int RESUME_DISTANCE = HOME_REACH + 32;
+    private static final long RESUME_AGE = 24000L * 20;
     private static final int SAVE_TICKS = 1200;
     /** Ticks without any progress before the watchdog counts a round: ten seconds, then it thinks again. */
     private static final int STUCK_TICKS = 200;
@@ -160,7 +164,8 @@ public class ProspectingTask extends AbstractChoreTask {
     private static final TagKey<Biome> MOUNTAINS = TagKey.of(RegistryKeys.BIOME, new Identifier("minecraft", "is_mountain"));
 
     private final Motor motor = new Motor();
-    private final Progreso progreso = new Progreso();
+    /** Not final: after it gave up finding wood it starts its gear over, connected, a while later. */
+    private Progreso progreso = new Progreso();
     private boolean wasGearing;
     private final Deque<BlockPos> plan = new ArrayDeque<>();
     private final Map<Long, Long> ignored = new LinkedHashMap<>();
@@ -172,6 +177,8 @@ public class ProspectingTask extends AbstractChoreTask {
     private boolean started;
     /** Run by the in-game checks: nothing is kept with the world. */
     private boolean practicing;
+    /** The checks set its mine ({@link #setMina}): the first start keeps it. */
+    private boolean minaDada;
     private Mina mina = new Mina();
     @Nullable
     private BlockPos ore;
@@ -293,6 +300,37 @@ public class ProspectingTask extends AbstractChoreTask {
     /** The phase a step aside or a dig-out of the anti-stuck layer was started in. */
     @Nullable
     private Phase nudgePhase;
+    /** The way it walks now as one list, start included: the body's no-dig walker ({@link Motor#walkPath}) wants the same list every tick. */
+    private List<BlockPos> viaLista = List.of();
+    /** The no-dig walker gave that way up: it goes on cell by cell with the step machine, still never digging. */
+    private boolean viaPaso;
+    /** What the way it walks is: its trail, its torches, its steps, or a way it worked out over what it saw. For the log. */
+    private String viaDe = "";
+    /** Its own trail (the crumbs of its mine) was already tried as the way out this trip. */
+    private boolean trailTried;
+    /** It said it cannot find the way home this trip (it keeps trying, connected). */
+    private boolean lostSaid;
+
+    // the night: like a player it sleeps when it is home in the dark, then goes on
+    /** The bed it is going to (its head), or null. */
+    @Nullable
+    private BlockPos cama;
+    private int camaTicks;
+    /** It lay down this night: once it is up again the night is over for it. */
+    private boolean slept;
+    /** It went to bed while waiting at home (called home): it waits on in the morning. */
+    private boolean sleepFromRest;
+    /** Times it lay down in a bed (for the checks). */
+    private int timesSlept;
+    /** Not before this to look for a bed again (none free, or it could not lie down). */
+    private long nextSleepTry;
+    /** For the checks: night or day whatever the clock says (null: the clock). */
+    @Nullable
+    private Boolean nocheForzada;
+    /** It gave up finding wood for a pickaxe: it rests, connected, until then and starts its gear over. */
+    private long nowoodUntil;
+    /** Not before this to walk back to its old mine on its own after a walk back that got nowhere. */
+    private long nextMineReturn;
 
     // back down
     private int returnTicks;
@@ -393,6 +431,26 @@ public class ProspectingTask extends AbstractChoreTask {
 
     /** The miners at work right now, so the chat can ask one how its trip is going. */
     private static final Map<VillagerEntityMCA, ProspectingTask> RUNNING = new WeakHashMap<>();
+    /**
+     * The one task object of each villager, kept across brain resets: MCA builds a new brain (and new task objects)
+     * when the job is given, the move state changes, a profession is taken or lost at a job site near home, and so on.
+     * A new object would forget the trip it was on and the mine it was working in; the same object goes on with them.
+     */
+    private static final Map<java.util.UUID, java.lang.ref.WeakReference<ProspectingTask>> OF_VILLAGER = new HashMap<>();
+
+    /** The mining task of this villager: the one it already has (in its old brain), or a new one. For the brain's task lists. */
+    public static ProspectingTask of(VillagerEntityMCA villager) {
+        java.lang.ref.WeakReference<ProspectingTask> ref = OF_VILLAGER.get(villager.getUuid());
+        ProspectingTask task = ref == null ? null : ref.get();
+        if (task == null) {
+            if (OF_VILLAGER.size() > 512) {
+                OF_VILLAGER.values().removeIf(r -> r.get() == null);
+            }
+            task = new ProspectingTask();
+            OF_VILLAGER.put(villager.getUuid(), new java.lang.ref.WeakReference<>(task));
+        }
+        return task;
+    }
     /** A trip home it decided on itself after someone suggested it: true = hungry. */
     private static final Map<VillagerEntityMCA, Boolean> DECIDED = new WeakHashMap<>();
     /** When someone last suggested going back, and how many times in a row, to tell a passing remark from insisting. */
@@ -566,7 +624,13 @@ public class ProspectingTask extends AbstractChoreTask {
 
     @Override
     protected void run(ServerWorld world, VillagerEntityMCA villager, long time) {
+        VillagerEntityMCA before = this.villager;
         super.run(world, villager, time);
+        if (before != null && before != villager) {
+            // the same villager loaded again as a new body: the half-made step belonged to the old one
+            motor.reset(world, villager);
+            plan.clear();
+        }
         if (tooYoung(villager)) {
             abandonJobWithMessage("chore.mining.tooyoung");
             return;
@@ -583,6 +647,9 @@ public class ProspectingTask extends AbstractChoreTask {
     private void init(ServerWorld world, VillagerEntityMCA villager) {
         tunnelDir = villager.getHorizontalFacing().getHorizontal();
         base = villager.getBlockPos().toImmutable();
+        if (minaDada) {
+            return; // the checks gave it its mine
+        }
         mina = new Mina();
         if (practicing) {
             return;
@@ -741,7 +808,7 @@ public class ProspectingTask extends AbstractChoreTask {
             }
             if (!equipPick(villager)) {
                 if (progreso.gaveUp()) {
-                    abandonJobWithMessage("chore.mining.nowood");
+                    noWood(world, villager);
                 }
                 return;
             }
@@ -765,6 +832,7 @@ public class ProspectingTask extends AbstractChoreTask {
             case SURFACE_WORK -> surfaceWork(world, villager);
             case RETURN -> returnToMine(world, villager);
             case REST -> rest(world, villager);
+            case SLEEP -> sleep(world, villager);
         }
     }
 
@@ -825,7 +893,7 @@ public class ProspectingTask extends AbstractChoreTask {
         return phase + (phase == Phase.HOME_UP || phase == Phase.HOME_WALK || phase == Phase.HOME_STORE ? " (" + trip + ")" : "")
                 + (ore == null ? "" : " hacia " + ore.toShortString()) + (plan.isEmpty() ? "" : " plan " + plan.peekFirst().toShortString())
                 + ", camino " + mina.size() + (fallback ? " (escalera propia, modo " + climbMode + ")" : "")
-                + (viaMemoria ? " (por donde ya pasó, " + via.size() + " pasos)" : "");
+                + (viaMemoria ? " (por " + viaDe + ", " + via.size() + " pasos" + (viaPaso ? ", paso a paso" : "") + ")" : "");
     }
 
     /** For the checks: the phase it is in ("HOME_WALK"), and whether it is walking a way it remembers. */
@@ -849,6 +917,45 @@ public class ProspectingTask extends AbstractChoreTask {
 
     public void setHome(BlockPos pos) {
         home = pos;
+    }
+
+    /** For the checks: the mine it has (its trail from the door to the work face), as if it had dug it. */
+    public void setMina(Mina saved) {
+        mina = saved;
+        minaDada = true;
+        tunnelDir = saved.dir & 3;
+        branchLeft = saved.left;
+    }
+
+    /** For the checks: night (true) or day (false) whatever the clock says; null goes back to the clock. */
+    public void setNoche(@Nullable Boolean night) {
+        nocheForzada = night;
+    }
+
+    /** The door of the mine it works in, or null. */
+    @Nullable
+    public BlockPos minaEntrada() {
+        return mina.entrance();
+    }
+
+    /** Its work face (the deepest cell of its trail), or null. */
+    @Nullable
+    public BlockPos frente() {
+        return mina.last();
+    }
+
+    public int minaPasos() {
+        return mina.size();
+    }
+
+    /** Times it lay down in a bed. */
+    public int vecesDormido() {
+        return timesSlept;
+    }
+
+    /** What the way it walks now is ("sus antorchas", "su camino de la mina"...), empty when it walks none. */
+    public String viaDe() {
+        return viaMemoria ? viaDe : "";
     }
 
     /** The step machine this miner moves with (tests look at it). */
@@ -1089,6 +1196,10 @@ public class ProspectingTask extends AbstractChoreTask {
             return;
         }
         if (Mining.onSurface(world, feet) && Mining.openGround(world, feet) || roofOut(world, villager, feet)) {
+            if (oldMine(world, feet)) {
+                // up on the land with a mine of its own to go back to: that mine is not thrown away for a new one
+                return;
+            }
             // the mine starts where the sky ends: the door on open ground, where the way up counts as out, the open
             // top of the staircase already part of the way in; under the eaves of a house at the land's level too
             if (mina.outside(world, villager)) {
@@ -1098,7 +1209,40 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         if (mina.walked(world, villager)) {
             levelCells++;
+            markTrail(world, villager);
         }
+    }
+
+    /**
+     * Its marks along the trail as it goes in: the mouth of the mine at its first step under the sky's end, and the
+     * top and the foot of every flight of steps (where the trail turns from level to sloping or back).
+     */
+    private void markTrail(ServerWorld world, VillagerEntityMCA villager) {
+        int n = mina.size();
+        if (n == 2 && mina.entrance() != null) {
+            Recuerdos.marcar(villager, Recuerdos.ENTRADA, mina.entrance());
+        }
+        if (n < 3) {
+            return;
+        }
+        BlockPos c0 = mina.crumb(n - 3);
+        BlockPos c1 = mina.crumb(n - 2);
+        BlockPos c2 = mina.crumb(n - 1);
+        if ((c0.getY() == c1.getY()) != (c1.getY() == c2.getY())) {
+            Recuerdos.marcar(villager, Recuerdos.ESCALERA, c1);
+        }
+    }
+
+    /**
+     * It has a mine of its own it can still walk into (its door and its work face open, the door within reach) and
+     * it is not on its trail now: up on the land that mine is where it goes back to, not a new one.
+     */
+    private boolean oldMine(ServerWorld world, BlockPos feet) {
+        if (!mina.known() || world.getTime() < nextMineReturn || mina.nearHigh(world, feet) >= 0) {
+            return false;
+        }
+        BlockPos door = mina.entrance();
+        return door != null && horizontalSq(door, villager) <= (double) (HOME_REACH + 16) * (HOME_REACH + 16) && mina.usable(world);
     }
 
     /** Every cell its feet stand on solidly goes into its memories ({@link Recuerdos}). Never stops the task. */
@@ -1318,6 +1462,8 @@ public class ProspectingTask extends AbstractChoreTask {
         endVia();
         viaFails = 0;
         viaUsadas.clear();
+        trailTried = false;
+        lostSaid = false;
         climbFromIdx = mina.nearLow(world, feet);
         BlockPos target = homePos(world, villager);
         homeDir = Direction.getFacing(target.getX() - villager.getX(), 0, target.getZ() - villager.getZ()).getHorizontal();
@@ -1412,7 +1558,9 @@ public class ProspectingTask extends AbstractChoreTask {
         // it still rises over its head. Under the eaves of a house at the land's level it is out as well
         boolean open = Mining.openGround(world, feet);
         boolean eaves = !open && roofOut(world, villager, feet);
-        boolean out = open && Mining.onSurface(world, feet) || eaves || !camping && (open && feet.getY() >= target.getY() - 1
+        // the door of its own mine is out by what it was when it went in there (the last cell under the open sky)
+        boolean door = mina.entrance() != null && feet.equals(mina.entrance());
+        boolean out = open && Mining.onSurface(world, feet) || eaves || door || !camping && (open && feet.getY() >= target.getY() - 1
                 || feet.getY() >= target.getY() && feet.isWithinDistance(target, 24));
         // never off its feet: leaving in mid-jump drops the block it was about to stand on
         if (out && villager.isOnGround() && !motor.midStep(villager)) {
@@ -1438,20 +1586,13 @@ public class ProspectingTask extends AbstractChoreTask {
                 goal = nextVia(feet);
             }
             if (goal != null) {
-                memory.doing("subiendo por donde ya pasó (" + via.size() + " pasos)", now);
+                memory.doing("subiendo por " + viaDe + " (" + via.size() + " pasos)", now);
             }
         }
         if (goal == null && !fallback && !viaMemoria) {
-            int i = mina.nearLow(world, feet);
-            if (i > 0) {
-                goal = mina.crumb(Math.max(0, i - 1 - skip));
-                memory.doing("subiendo por su camino (" + i + " pasos)", now);
-            } else if (i == 0 && mina.entrance() != null && !feet.equals(mina.crumb(0))) {
-                // one step from the door: out through it, not a new staircase beside it
-                goal = mina.crumb(0);
-                memory.doing("saliendo por la boca de su mina", now);
-            } else if (wayOut(world, villager, feet, i)) {
-                // off the trail, or at its first crumb underground: a way it remembers walking, before any digging
+            // the way it came, walked and never dug: its trail, its torches, the steps it remembers, any way over what
+            // it saw; a staircase of its own only when there is none of those
+            if (wayOut(world, villager, feet, mina.nearLow(world, feet))) {
                 goal = nextVia(feet);
             }
         }
@@ -1464,7 +1605,7 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         boolean remembered = viaMemoria;
         // a remembered way is walked, never dug: what it walked once has room for it still (checked by touch)
-        Motor.Result result = motor.step(world, villager, goal, !remembered, !remembered);
+        Motor.Result result = remembered ? walkVia(world, villager, goal) : motor.step(world, villager, goal, true, true);
         if (result == Motor.Result.ARRIVED) {
             skip = 0;
             trailFails = 0;
@@ -1523,7 +1664,7 @@ public class ProspectingTask extends AbstractChoreTask {
      * remembers none, a staircase of its own. True when it walks a remembered way now.
      */
     private boolean wayOut(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, int fromIdx) {
-        if (viaFails < 3 && wayByMemory(world, villager, feet, null)) {
+        if (viaFails < 4 && buscarVia(world, villager, feet, null)) {
             BlockPos end = via.peekLast();
             Recuerdos r = Recuerdos.of(world, villager);
             int nuevos = 0;
@@ -1532,11 +1673,11 @@ public class ProspectingTask extends AbstractChoreTask {
                     nuevos++;
                 }
             }
-            MCA.LOGGER.info("[Tropeles] {} recuerda por dónde salir: {} pasos ({} de ellos al lado de lo que pisó o que solo vio), de {} a {}", name(),
-                    via.size(), nuevos, feet.toShortString(), end == null ? "?" : end.toShortString());
+            MCA.LOGGER.info("[Tropeles] {} recuerda por dónde salir ({}): {} pasos ({} de ellos al lado de lo que pisó o que solo vio), de {} a {}", name(),
+                    viaDe, via.size(), nuevos, feet.toShortString(), end == null ? "?" : end.toShortString());
             Voluntad.contar(villager, "Subo por donde ya pasé, no hace falta cavar otra escalera.",
                     "I'll go up the way I came, no need to dig another staircase.");
-            Recuerdos.anotar(villager, "camino", "subí por donde ya había pasado, " + via.size() + " pasos de " + feet.getX() + " " + feet.getY() + " "
+            Recuerdos.anotar(villager, "camino", "subí por " + viaDe + ", " + via.size() + " pasos de " + feet.getX() + " " + feet.getY() + " "
                     + feet.getZ() + (end == null ? "" : " a " + end.getX() + " " + end.getY() + " " + end.getZ()), feet);
             return true;
         }
@@ -1566,10 +1707,22 @@ public class ProspectingTask extends AbstractChoreTask {
         if (way.isEmpty() || higher && way.get(way.size() - 1).getY() <= feet.getY()) {
             return false;
         }
+        setVia(world, villager, feet, way, to, "por donde ya pasó");
+        return true;
+    }
+
+    /** That way is the one it walks now (never digging), to {@code to} or out when null. */
+    private void setVia(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, List<BlockPos> way, @Nullable BlockPos to, String de) {
         via.clear();
         via.addAll(way);
         viaMemoria = true;
         viaDestino = to;
+        viaDe = de;
+        viaPaso = false;
+        List<BlockPos> lista = new ArrayList<>(way.size() + 1);
+        lista.add(feet.toImmutable());
+        lista.addAll(way);
+        viaLista = lista;
         plan.clear();
         if (!motor.midStep(villager)) {
             motor.reset(world, villager);
@@ -1577,7 +1730,99 @@ public class ProspectingTask extends AbstractChoreTask {
         // its measure of getting somewhere is the way left now
         bestProgress = Double.NEGATIVE_INFINITY;
         stuckTicks = 0;
+    }
+
+    /**
+     * Looks for a way it can walk without digging or placing anything, in the order a player would think of them: out
+     * ({@code to} null) its own trail backwards, then torch to torch ({@link Recuerdos#caminoPorMarcas}), then the steps
+     * it remembers ({@link Recuerdos#caminoAfuera}), then any way over cells it walked or saw ({@link Recuerdos#caminoA});
+     * to {@code to} the steps it remembers, then any such way. True when it walks one now.
+     */
+    private boolean buscarVia(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, @Nullable BlockPos to) {
+        List<BlockPos> way = List.of();
+        String de = "";
+        try {
+            Recuerdos r = Recuerdos.of(world, villager);
+            VisualMemory vista = Retina.memory(villager);
+            if (to == null) {
+                if (!trailTried) {
+                    trailTried = true;
+                    way = trailWay(world, feet);
+                    de = "su camino de la mina";
+                }
+                if (way.isEmpty()) {
+                    way = r.caminoPorMarcas(world, feet, viaUsadas, vista);
+                    de = "sus antorchas";
+                }
+                if (way.isEmpty()) {
+                    way = r.caminoAfuera(world, feet, viaUsadas, vista);
+                    de = "por donde ya pasó";
+                }
+                if (way.isEmpty()) {
+                    int y = feet.getY();
+                    BlockPos hacia = mina.entrance() != null ? mina.entrance() : r.sitio("mina");
+                    way = r.caminoA(world, feet, (pos, p) -> p.fuera() && pos.getY() >= y && !viaUsadas.contains(pos.asLong()), hacia, vista,
+                            pos -> pos.getY() >= y + 2 && !viaUsadas.contains(pos.asLong()) && Mining.onSurface(world, pos) && Mining.openGround(world, pos),
+                            Recuerdos.FAR_NODES);
+                    de = "un camino sin cavar";
+                }
+            } else {
+                way = r.caminoHacia(world, feet, to, 1);
+                de = "por donde ya pasó";
+                if (way.isEmpty()) {
+                    way = r.caminoA(world, feet, (pos, p) -> pos.isWithinDistance(to, 1.5), to, vista, pos -> pos.isWithinDistance(to, 1.5),
+                            Recuerdos.FAR_NODES);
+                    de = "un camino sin cavar";
+                }
+            }
+        } catch (RuntimeException e) {
+            MCA.LOGGER.warn("[Tropeles] {} no pudo pensar en un camino sin cavar: {}", name(), e.toString());
+            way = List.of();
+        }
+        if (way.isEmpty()) {
+            return false;
+        }
+        setVia(world, villager, feet, way, to, de);
         return true;
+    }
+
+    /** Its own trail from where it stands back to the door of its mine, every crumb still open; empty when it is not on it. */
+    private List<BlockPos> trailWay(ServerWorld world, BlockPos feet) {
+        int i = mina.nearLow(world, feet);
+        if (i < 0 || mina.entrance() == null) {
+            return List.of();
+        }
+        List<BlockPos> way = new ArrayList<>();
+        for (int k = feet.equals(mina.crumb(i)) ? i - 1 : i; k >= 0; k--) {
+            if (!mina.open(world, k)) {
+                return List.of(); // something fell in or was built there: another way
+            }
+            way.add(mina.crumb(k));
+        }
+        return way;
+    }
+
+    /**
+     * One tick along the way it walks, never breaking or placing anything: the body's walker over the whole way, and
+     * when that gives up, the step machine cell by cell (still no digging, no blocks) before the way counts as shut.
+     */
+    private Motor.Result walkVia(ServerWorld world, VillagerEntityMCA villager, BlockPos goal) {
+        if (!viaPaso) {
+            Motor.Result r = motor.walkPath(world, villager, viaLista);
+            if (r == Motor.Result.BLOCKED) {
+                viaPaso = true;
+                if (!motor.midStep(villager)) {
+                    motor.reset(world, villager);
+                }
+                MCA.LOGGER.info("[Tropeles] {} no sigue {} de corrido en {}: paso a paso, sin cavar", name(), viaDe, villager.getBlockPos().toShortString());
+                return Motor.Result.RUNNING;
+            }
+            if (r == Motor.Result.ARRIVED) {
+                via.clear();
+            }
+            return r;
+        }
+        return motor.step(world, villager, goal, false, false);
     }
 
     /** The next cell of the remembered way: cells it already stands on or passed are dropped. Null at its end. */
@@ -1601,6 +1846,8 @@ public class ProspectingTask extends AbstractChoreTask {
         via.clear();
         viaMemoria = false;
         viaDestino = null;
+        viaLista = List.of();
+        viaPaso = false;
     }
 
     /** A cell of the remembered way is shut now: skipped for a while, and another remembered way, or none. */
@@ -1609,7 +1856,7 @@ public class ProspectingTask extends AbstractChoreTask {
         BlockPos to = viaDestino;
         endVia();
         MCA.LOGGER.info("[Tropeles] {} encuentra cerrado {} en el camino que recordaba (vez {})", name(), cell.toShortString(), viaFails + 1);
-        if (++viaFails < 3 && wayByMemory(world, villager, feet, to)) {
+        if (++viaFails < 4 && buscarVia(world, villager, feet, to)) {
             return;
         }
         if (phase == Phase.HOME_UP) {
@@ -1713,6 +1960,9 @@ public class ProspectingTask extends AbstractChoreTask {
         BlockPos feet = villager.getBlockPos();
         if (fallback && !climb.isEmpty() && mina.rebase(world, climb, climbFromIdx)) {
             MCA.LOGGER.info("[Tropeles] {} guarda la escalera por la que salió como camino a su mina ({} pasos)", name(), mina.size());
+            // the foot and the head of the staircase it cut are marks on its way, like its torches
+            Recuerdos.marcar(villager, Recuerdos.ESCALERA, climb.get(0));
+            Recuerdos.marcar(villager, Recuerdos.ENTRADA, mina.crumb(0));
         }
         fallback = false;
         climb.clear();
@@ -1870,6 +2120,7 @@ public class ProspectingTask extends AbstractChoreTask {
                         homeChest = placed;
                         chestsMade++;
                         Recuerdos.sitio(villager, "cofre", placed);
+                        Recuerdos.marcar(villager, "cofre", placed);
                         Recuerdos.anotar(villager, "cofre", "puse mi cofre en " + placed.getX() + " " + placed.getY() + " " + placed.getZ(), placed);
                         return;
                     }
@@ -1991,10 +2242,9 @@ public class ProspectingTask extends AbstractChoreTask {
                 return;
             }
             if (food <= GO_HOME_BELOW) {
-                // nothing to eat at home either: it stays
-                phase = Phase.SEEK;
-                abandonJobWithMessage("chore.mining.nofood");
-                return;
+                // nothing to eat at home either: a player does not log off for that. It stays connected, goes on (a
+                // night's sleep first when it is dark) and looks for food again in a while
+                noFoodAtHome(world, villager);
             }
         }
         if (trip == Trip.CALLED) {
@@ -2004,7 +2254,21 @@ public class ProspectingTask extends AbstractChoreTask {
             say("chore.mining.waiting");
             return;
         }
+        if (wantsSleep(world, villager)) {
+            startSleep(world, villager);
+            return;
+        }
         beginReturn(world, villager);
+    }
+
+    /** No food in the bag nor at home: it says so and goes on, connected; the next food trip waits a while. */
+    private void noFoodAtHome(ServerWorld world, VillagerEntityMCA villager) {
+        nextFoodTrip = world.getTime() + 6000;
+        foraged = true;
+        MCA.LOGGER.info("[Tropeles] {} no tiene nada que comer ni en casa (comida {}): sigue conectado y vuelve a lo suyo", name(), food);
+        Recuerdos.anotar(villager, "viaje", "no había comida ni en casa; seguí con lo mío", villager.getBlockPos());
+        Voluntad.contar(villager, "En casa tampoco hay comida. Sigo con lo mío y busco algo de comer más tarde.",
+                "There's no food at home either. I'll carry on and look for something to eat later.");
     }
 
     /** What a miner keeps on it: tools, weapons, arrows, light, food, crafting stuff, fuel, iron to smelt and some blocks. */
@@ -2162,6 +2426,7 @@ public class ProspectingTask extends AbstractChoreTask {
                 Recuerdos r = Recuerdos.of(world, villager);
                 String nombre = r.nombreCofreDeCampo(placed);
                 r.sitio(nombre, placed, now);
+                r.marcar("cofre", placed, now);
                 r.anotar(now, "cofre", "puse mi " + nombre + " en " + placed.getX() + " " + placed.getY() + " " + placed.getZ() + " (" + lugar.palabra()
                         + "), lejos de casa, para vaciar la mochila", placed);
                 MCA.LOGGER.info("[Tropeles] {} pone su {} en {} ({})", name(), nombre, placed.toShortString(), lugar.palabra());
@@ -2447,13 +2712,22 @@ public class ProspectingTask extends AbstractChoreTask {
         BlockPos face = viaDestino;
         if (goal == null || face != null && feet.isWithinDistance(face, 1.5)) {
             endVia();
-            if (mina.last() != null && feet.isWithinDistance(mina.last(), 2)) {
-                tunnelDir = mina.dir & 3;
-                branchLeft = mina.left;
-            }
             plan.clear();
             if (!motor.midStep(villager)) {
                 motor.reset(world, villager);
+            }
+            int i = mina.nearHigh(world, feet);
+            if (mina.known() && i >= 0 && i < mina.size() - 1) {
+                // at the door of its mine (or on its trail): down the trail from here
+                returnTicks = 0;
+                returnFails = 0;
+                resetWatch();
+                memory.doing("en la boca de su mina", now);
+                return;
+            }
+            if (mina.last() != null && feet.isWithinDistance(mina.last(), 2)) {
+                tunnelDir = mina.dir & 3;
+                branchLeft = mina.left;
             }
             phase = Phase.SEEK;
             resetWatch();
@@ -2461,8 +2735,8 @@ public class ProspectingTask extends AbstractChoreTask {
             return;
         }
         villager.getNavigation().stop();
-        memory.doing("bajando a su mina por donde ya pasó (" + via.size() + " pasos)", now);
-        Motor.Result result = motor.step(world, villager, goal, false, false);
+        memory.doing("bajando a su mina por " + viaDe + " (" + via.size() + " pasos)", now);
+        Motor.Result result = walkVia(world, villager, goal);
         if (result == Motor.Result.ARRIVED) {
             if (goal.equals(via.peekFirst())) {
                 via.pollFirst();
@@ -2471,8 +2745,9 @@ public class ProspectingTask extends AbstractChoreTask {
             motor.reset(world, villager);
             viaBlocked(world, villager, feet, goal, now);
             if (!viaMemoria) {
-                // no remembered way down any more: it digs on from where it is
+                // no remembered way down any more: it digs on from where it is (up on the land, its mine waits a minute)
                 phase = Phase.SEEK;
+                nextMineReturn = now + 1200;
             }
         }
     }
@@ -2495,10 +2770,12 @@ public class ProspectingTask extends AbstractChoreTask {
             if (returnTicks <= 9600 && faceByMemory(world, villager, feet)) {
                 return;
             }
-            // too long on the way, or no trail: it starts a new mine where it stands. A trail it can still walk is kept
+            // too long on the way, or no trail: it starts a new mine where it stands. A trail it can still walk is kept,
+            // and it tries that mine again in a while
             if (!mina.usable(world)) {
                 mina.clear();
             }
+            nextMineReturn = world.getTime() + 6000;
             phase = Phase.SEEK;
             return;
         }
@@ -2517,7 +2794,14 @@ public class ProspectingTask extends AbstractChoreTask {
             }
             memory.doing(String.format("volviendo a su mina, a %.0f bloques", Math.sqrt(feet.getSquaredDistance(door))), now);
             if ((returnTicks % 40) == 1 || villager.getNavigation().isIdle()) {
-                villager.getNavigation().startMovingTo(door.getX() + 0.5, door.getY(), door.getZ() + 0.5, 0.7);
+                if (!villager.getNavigation().startMovingTo(door.getX() + 0.5, door.getY(), door.getZ() + 0.5, 0.7) || villager.getNavigation().isIdle()) {
+                    // too far for one walk: a way it remembers (it walked from there to here), else a leg of the way
+                    if (returnTicks > 40 && (returnTicks % 200) == 41 && buscarVia(world, villager, feet, door)) {
+                        MCA.LOGGER.info("[Tropeles] {} vuelve a la boca de su mina {} por {} ({} pasos)", name(), door.toShortString(), viaDe, via.size());
+                        return;
+                    }
+                    walkToward(world, villager, door);
+                }
             }
             return;
         }
@@ -2537,7 +2821,9 @@ public class ProspectingTask extends AbstractChoreTask {
         villager.getNavigation().stop();
         BlockPos goal = mina.crumb(i + 1);
         memory.doing("bajando por su camino a la mina (" + (mina.size() - 1 - i) + " pasos)", now);
-        Motor.Result result = motor.step(world, villager, goal, true, true);
+        // its own trail is walked: digging only once it found it shut (gravel came down, something grew in)
+        boolean dig = returnFails >= 2;
+        Motor.Result result = motor.step(world, villager, goal, dig, dig);
         if (result == Motor.Result.ARRIVED) {
             returnFails = 0;
         } else if (result == Motor.Result.BLOCKED) {
@@ -2551,6 +2837,20 @@ public class ProspectingTask extends AbstractChoreTask {
         }
     }
 
+    /** A leg of a long walk: as far toward {@code to} as the path finder goes in one go. */
+    private void walkToward(ServerWorld world, VillagerEntityMCA villager, BlockPos to) {
+        double dx = to.getX() + 0.5 - villager.getX();
+        double dz = to.getZ() + 0.5 - villager.getZ();
+        double d = Math.sqrt(dx * dx + dz * dz);
+        if (d < 1) {
+            return;
+        }
+        double leg = Math.min(d, 24);
+        // the path finder settles the aim on the ground under (or over) it
+        BlockPos aim = BlockPos.ofFloored(villager.getX() + dx / d * leg, villager.getY(), villager.getZ() + dz / d * leg);
+        villager.getNavigation().startMovingTo(aim.getX() + 0.5, aim.getY(), aim.getZ() + 0.5, 0.7);
+    }
+
     /** Called out of the mine: it waits at home, doing its gear, until told to go back down (or a while passes). */
     private void rest(ServerWorld world, VillagerEntityMCA villager) {
         if (gearUp(world, villager)) {
@@ -2558,6 +2858,11 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         BlockPos target = homePos(world, villager);
         Retina.memory(villager).doing("esperando en casa", world.getTime());
+        if (wantsSleep(world, villager)) {
+            // waiting at home into the night: to bed like everyone else, and on waiting in the morning
+            startSleep(world, villager);
+            return;
+        }
         if (++restTicks > REST_TICKS) {
             beginReturn(world, villager);
             return;
@@ -2567,13 +2872,177 @@ public class ProspectingTask extends AbstractChoreTask {
         }
     }
 
+    /**
+     * It looked everywhere it could walk and found no tree for a pickaxe: it does not log off. It waits a couple of
+     * minutes (connected, in Tab, talking) and then starts its gear over and looks again, further this time.
+     */
+    private void noWood(ServerWorld world, VillagerEntityMCA villager) {
+        long now = world.getTime();
+        if (nowoodUntil == 0) {
+            nowoodUntil = now + 2400;
+            MCA.LOGGER.info("[Tropeles] {} no encontró madera para un pico: sigue conectado, descansa y vuelve a buscar", name());
+            Voluntad.contar(villager, "No encuentro árboles por aquí. Descanso un poco y vuelvo a buscar.",
+                    "I can't find any trees around here. I'll rest a bit and look again.");
+            Motor.standStill(villager);
+            return;
+        }
+        Retina.memory(villager).doing("descansando antes de volver a buscar árboles", now);
+        if (now >= nowoodUntil) {
+            nowoodUntil = 0;
+            progreso = new Progreso();
+            explorar.reset();
+            resetWatch();
+        }
+    }
+
+    // ------------------------------------------------------------------ the night
+
+    /** Night for it: the clock (or the checks' say-so). */
+    private boolean night(ServerWorld world) {
+        return nocheForzada != null ? nocheForzada : world.isNight();
+    }
+
+    /** At home in the dark with a bed to go to: it sleeps, the way a player does before going on. */
+    private boolean wantsSleep(ServerWorld world, VillagerEntityMCA villager) {
+        if (!night(world) || world.getTime() < nextSleepTry || tooYoung(villager)) {
+            return false;
+        }
+        cama = findBed(world, villager);
+        if (cama == null) {
+            nextSleepTry = world.getTime() + 1200;
+            return false;
+        }
+        return true;
+    }
+
+    /** Its own bed in the village when it is near, else any free bed close by (its head cell), or null. */
+    @Nullable
+    private BlockPos findBed(ServerWorld world, VillagerEntityMCA villager) {
+        BlockPos feet = villager.getBlockPos();
+        var home = villager.getResidency().getHome();
+        if (home.isPresent() && home.get().getDimension() == world.getRegistryKey() && home.get().getPos().isWithinDistance(feet, 48)) {
+            BlockPos head = bedHead(world, home.get().getPos());
+            if (head != null && !world.getBlockState(head).get(net.minecraft.block.BedBlock.OCCUPIED)) {
+                return head;
+            }
+        }
+        return net.mca.entity.ai.sense.Dormir.camaLibre(world, feet, 24);
+    }
+
+    /** The head cell of the bed at {@code pos} (either half), or null when there is no bed there. */
+    @Nullable
+    private static BlockPos bedHead(ServerWorld world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        if (!(state.getBlock() instanceof net.minecraft.block.BedBlock)) {
+            return null;
+        }
+        if (state.get(net.minecraft.block.BedBlock.PART) == net.minecraft.block.enums.BedPart.HEAD) {
+            return pos.toImmutable();
+        }
+        BlockPos head = pos.offset(state.get(net.minecraft.block.HorizontalFacingBlock.FACING));
+        return world.getBlockState(head).getBlock() instanceof net.minecraft.block.BedBlock ? head : null;
+    }
+
+    private void startSleep(ServerWorld world, VillagerEntityMCA villager) {
+        sleepFromRest = phase == Phase.REST;
+        phase = Phase.SLEEP;
+        camaTicks = 0;
+        slept = false;
+        plan.clear();
+        if (!motor.midStep(villager)) {
+            motor.reset(world, villager);
+        }
+        resetWatch();
+        MCA.LOGGER.info("[Tropeles] {} se va a dormir a la cama de {} (sigue conectado)", name(), cama == null ? "?" : cama.toShortString());
+        Recuerdos.anotar(villager, "viaje", "me fui a dormir", cama);
+        Voluntad.contar(villager, "Ya es de noche. Me voy a dormir un rato y sigo mañana.", "It's night. I'll get some sleep and carry on tomorrow.");
+    }
+
+    /**
+     * To bed and asleep ({@link net.mca.entity.ai.sense.Dormir}: counted like a player's sleep for the night skip),
+     * still connected; up again in the morning (or when the night is skipped, or something woke it), it goes on with
+     * what it was doing: back to its mine, or waiting at home when it was called home.
+     */
+    private void sleep(ServerWorld world, VillagerEntityMCA villager) {
+        long now = world.getTime();
+        VisualMemory memory = Retina.memory(villager);
+        if (net.mca.entity.ai.sense.Dormir.dormido(villager)) {
+            slept = true;
+            Motor.standStill(villager);
+            memory.doing("durmiendo", now);
+            return;
+        }
+        if (slept || !night(world)) {
+            if (slept) {
+                Recuerdos.anotar(villager, "viaje", "me desperté", villager.getBlockPos());
+                Voluntad.contar(villager, "Buenos días. Sigo con lo mío.", "Good morning. Back to it.");
+            }
+            wakeUpAndGoOn(world, villager);
+            return;
+        }
+        if (cama == null || bedHead(world, cama) == null || world.getBlockState(cama).get(net.minecraft.block.BedBlock.OCCUPIED)) {
+            cama = findBed(world, villager);
+            if (cama == null) {
+                nextSleepTry = now + 1200;
+                wakeUpAndGoOn(world, villager);
+                return;
+            }
+        }
+        if (++camaTicks > 1200) {
+            // could not get to it or lie down: not tonight, it goes on
+            MCA.LOGGER.info("[Tropeles] {} no pudo acostarse en {}: sigue con lo suyo", name(), cama.toShortString());
+            nextSleepTry = now + 2400;
+            wakeUpAndGoOn(world, villager);
+            return;
+        }
+        double d2 = villager.squaredDistanceTo(Vec3d.ofBottomCenter(cama));
+        memory.doing("yendo a dormir", now);
+        if (d2 <= 2.0 * 2.0) {
+            villager.getNavigation().stop();
+            // the checks' night lies down in daylight too (the clock stays at noon for them)
+            boolean lay = Boolean.TRUE.equals(nocheForzada) ? net.mca.entity.ai.sense.Dormir.acostarPrueba(world, villager, cama)
+                    : net.mca.entity.ai.sense.Dormir.acostar(world, villager, cama);
+            if (lay) {
+                slept = true;
+                timesSlept++;
+                MCA.LOGGER.info("[Tropeles] {} se acostó en {}", name(), cama.toShortString());
+            } else if (camaTicks > 200) {
+                // by the bed and it will not have it (day after all, or a monster near): not tonight
+                nextSleepTry = now + 2400;
+                MCA.LOGGER.info("[Tropeles] {} no puede acostarse ahora en {}: sigue con lo suyo", name(), cama.toShortString());
+                wakeUpAndGoOn(world, villager);
+            }
+            return;
+        }
+        if ((camaTicks % 20) == 1 || villager.getNavigation().isIdle()) {
+            villager.getNavigation().startMovingTo(cama.getX() + 0.5, cama.getY(), cama.getZ() + 0.5, 0.6);
+        }
+    }
+
+    private void wakeUpAndGoOn(ServerWorld world, VillagerEntityMCA villager) {
+        if (net.mca.entity.ai.sense.Dormir.dormido(villager)) {
+            net.mca.entity.ai.sense.Dormir.levantar(world, villager);
+        }
+        slept = false;
+        cama = null;
+        camaTicks = 0;
+        villager.getNavigation().stop();
+        if (sleepFromRest) {
+            sleepFromRest = false;
+            phase = Phase.REST;
+            resetWatch();
+            return;
+        }
+        beginReturn(world, villager);
+    }
+
     /** Up for wood: a pickaxe (and a kit) made outside, then back down. */
     private void surfaceWork(ServerWorld world, VillagerEntityMCA villager) {
         if (gearUp(world, villager)) {
             return;
         }
         if (progreso.gaveUp()) {
-            abandonJobWithMessage("chore.mining.nowood");
+            noWood(world, villager);
             return;
         }
         surfaceTicks++;
@@ -2713,9 +3182,8 @@ public class ProspectingTask extends AbstractChoreTask {
             }
         }
         if (carried == 0 && food <= GO_HOME_BELOW) {
-            phase = Phase.SEEK;
-            abandonJobWithMessage("chore.mining.nofood");
-            return;
+            // nothing out there either: connected all the same, it goes on and tries again later
+            noFoodAtHome(world, villager);
         }
         if (trip == Trip.CALLED) {
             enterHomeWalk();
@@ -3023,8 +3491,22 @@ public class ProspectingTask extends AbstractChoreTask {
         if (phase == Phase.HOME_UP || phase == Phase.HOME_WALK) {
             lostTicks += STUCK_TICKS;
             if (lostTicks > LOST_TICKS) {
-                phase = Phase.SEEK;
-                abandonJobWithMessage("chore.mining.lost");
+                // lost for a long while: it says so and asks for help, still connected, and keeps trying (its own
+                // staircase up, or a camp where it stands on the land)
+                lostTicks = 0;
+                if (!lostSaid) {
+                    lostSaid = true;
+                    say("chore.mining.lost");
+                }
+                lastStuckCall = -1200;
+                callOutStuck(world);
+                if (phase == Phase.HOME_UP && !fallback) {
+                    startFallback(world, villager, villager.getBlockPos(), mina.nearLow(world, villager.getBlockPos()));
+                } else if (phase == Phase.HOME_WALK) {
+                    camping = true;
+                    homeTarget = villager.getBlockPos().toImmutable();
+                    enterHomeStore();
+                }
                 return true;
             }
         }
@@ -3174,6 +3656,13 @@ public class ProspectingTask extends AbstractChoreTask {
     private void seek(ServerWorld world, VillagerEntityMCA villager) {
         VisualMemory memory = Retina.memory(villager);
         long now = world.getTime();
+        if (ore == null && plan.isEmpty() && !motor.busy() && !Entorno.bajoTierra(world, villager) && oldMine(world, villager.getBlockPos())) {
+            // up on the land, its own mine still there: back to it and on from its work face, never a new one beside it
+            MCA.LOGGER.info("[Tropeles] {} está en la superficie con su mina en {}: vuelve a ella ({} pasos)", name(),
+                    mina.entrance() == null ? "?" : mina.entrance().toShortString(), mina.size());
+            beginReturn(world, villager);
+            return;
+        }
         maybePlaceTorch(world, villager);
 
         if (ore != null && !stillOre(memory, ore)) {
@@ -3696,7 +4185,10 @@ public class ProspectingTask extends AbstractChoreTask {
         if (slot < 0 || !world.getBlockState(feet).isAir() || !Blocks.TORCH.getDefaultState().canPlaceAt(world, feet)) {
             return;
         }
-        Hands.place(world, villager, feet, villager.getInventory().getStack(slot));
+        if (Hands.place(world, villager, feet, villager.getInventory().getStack(slot))) {
+            // every torch it sets is a mark on its way back, as a player finds the way out torch to torch
+            Recuerdos.marcar(villager, Recuerdos.ANTORCHA, feet);
+        }
     }
 
     private void announceOre(ServerWorld world, BlockState state) {

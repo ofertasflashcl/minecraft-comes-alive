@@ -107,6 +107,9 @@ public final class Recuerdos {
         }
     };
     private final Deque<Hecho> hechos = new ArrayDeque<>();
+    /** Its own marks along the ways it made, in the order it set them: torches, stair heads, the mouth of a mine, chests. */
+    private final List<Marca> marcas = new ArrayList<>();
+    private int marcasN;
     private final Map<String, BlockPos> sitios = new LinkedHashMap<>();
     private final Map<String, Long> sitiosCuando = new HashMap<>();
     /** Cells found shut on a way it tried (a block fell in, someone built there): skipped until then. Not kept. */
@@ -446,6 +449,303 @@ public final class Recuerdos {
         return best;
     }
 
+    // ------------------------------------------------------------------ its own marks: the torches it set, the heads of its stairs
+
+    /** Marks kept at most; past that the oldest goes. */
+    public static final int MAX_MARCAS = 2048;
+    /** Kinds of mark: a torch it set, the head of a staircase it cut, the mouth of a mine, a chest, a table, a furnace. */
+    public static final String ANTORCHA = "antorcha";
+    public static final String ESCALERA = "escalera";
+    public static final String ENTRADA = "entrada";
+    /** Cells looked at to get from one mark to the one before it (a torch is never far from the next). */
+    public static final int HOP_NODES = 3000;
+    /** Cells looked at in one search for a way out over the cells themselves, when its marks and steps do not do it. */
+    public static final int FAR_NODES = 40000;
+    /** Blocks it walks off on a way it plans (a player drops three without getting hurt). */
+    public static final int DROP = 3;
+
+    /** One of its marks: what kind, where, when it set it and in which order ({@code n} grows with every mark). */
+    public record Marca(String tipo, BlockPos pos, long t, int n) {
+    }
+
+    /** It set a mark at {@code pos} (a torch it put down, the head of a staircase it cut). The same spot again only moves it to now. */
+    public void marcar(String tipo, BlockPos pos, long t) {
+        BlockPos at = pos.toImmutable();
+        for (int i = marcas.size() - 1; i >= 0 && i >= marcas.size() - 64; i--) {
+            Marca m = marcas.get(i);
+            if (m.pos().equals(at) && m.tipo().equals(tipo)) {
+                marcas.set(i, new Marca(tipo, at, t, m.n()));
+                dirty(t);
+                return;
+            }
+        }
+        marcas.add(new Marca(tipo, at, t, ++marcasN));
+        while (marcas.size() > MAX_MARCAS) {
+            marcas.remove(0);
+        }
+        dirty(t);
+    }
+
+    /** {@link #marcar} for {@code villager} where it is (server thread); never throws. */
+    public static void marcar(LivingEntity villager, String tipo, BlockPos pos) {
+        try {
+            Recuerdos r = of(villager);
+            if (r != null) {
+                r.marcar(tipo, pos, villager.getWorld().getTime());
+            }
+        } catch (RuntimeException e) {
+            MCA.LOGGER.warn("[Tropeles] {} no pudo recordar su {}: {}", villager.getName().getString(), tipo, e.toString());
+        }
+    }
+
+    /** Its marks, oldest first. */
+    public List<Marca> marcas() {
+        return Collections.unmodifiableList(marcas);
+    }
+
+    /** How many marks of that kind it remembers. */
+    public int marcas(String tipo) {
+        int n = 0;
+        for (Marca m : marcas) {
+            if (m.tipo().equals(tipo)) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /** A mark that is gone (a torch someone took): forgotten. */
+    public void olvidarMarca(BlockPos pos, long t) {
+        if (marcas.removeIf(m -> m.pos().equals(pos))) {
+            dirty(t);
+        }
+    }
+
+    /**
+     * The way back the way it came, mark to mark: from the most recent of its marks it can walk to from the feet,
+     * on to the one it set before that, and so on back to the mouth of its mine or a cell that was out at the land's
+     * level, as a player walks back torch to torch. Each hop is a short search over cells it can stand in without
+     * digging or placing anything ({@link #caminoA}). Empty when no mark is close enough to start from, or the chain
+     * does not get it out. {@code skip}: ends already tried this trip.
+     */
+    public List<BlockPos> caminoPorMarcas(ServerWorld world, BlockPos from, Set<Long> skip, @Nullable VisualMemory vista) {
+        long now = world.getTime();
+        // the marks near enough to matter, newest first: torches and stair heads lead back up, chests do not
+        List<Marca> chain = new ArrayList<>();
+        for (int i = marcas.size() - 1; i >= 0; i--) {
+            Marca m = marcas.get(i);
+            if ((m.tipo().equals(ANTORCHA) || m.tipo().equals(ESCALERA) || m.tipo().equals(ENTRADA))
+                    && m.pos().getSquaredDistance(from) <= 160.0 * 160.0 && !cerrado(m.pos().asLong(), now)) {
+                chain.add(m);
+            }
+        }
+        if (chain.isEmpty()) {
+            return List.of();
+        }
+        // the first hop: to the mark nearest the feet (within a short walk) that has a way to it; from there on back
+        // through the ones it set before
+        Integer[] order = new Integer[Math.min(chain.size(), 48)];
+        for (int i = 0; i < order.length; i++) {
+            order[i] = i;
+        }
+        java.util.Arrays.sort(order, (x, z) -> Double.compare(chain.get(x).pos().getSquaredDistance(from), chain.get(z).pos().getSquaredDistance(from)));
+        int first = -1;
+        int hops = 0;
+        List<BlockPos> way = new ArrayList<>();
+        for (int k = 0; k < order.length && hops < 8; k++) {
+            BlockPos at = chain.get(order[k]).pos();
+            if (at.getSquaredDistance(from) > 24.0 * 24.0) {
+                break;
+            }
+            if (at.equals(from)) {
+                first = order[k];
+                break;
+            }
+            hops++;
+            List<BlockPos> hop = caminoA(world, from, en(at), at, vista, at::equals, HOP_NODES);
+            if (!hop.isEmpty()) {
+                way.addAll(hop);
+                first = order[k];
+                break;
+            }
+        }
+        if (first < 0) {
+            return List.of();
+        }
+        BlockPos here = way.isEmpty() ? from : way.get(way.size() - 1);
+        int y = from.getY();
+        for (int i = first; i < chain.size(); i++) {
+            Marca m = chain.get(i);
+            Paso p = pasos.get(here.asLong());
+            boolean out = p != null && p.fuera() && here.getY() >= y || m.tipo().equals(ENTRADA) && m.pos().isWithinDistance(here, 1.5);
+            if (out && !skip.contains(here.asLong())) {
+                return way;
+            }
+            if (i + 1 >= chain.size()) {
+                break;
+            }
+            // the mark set before this one: a hop there, or one further back when that one has no way to it
+            boolean moved = false;
+            for (int j = i + 1; j < chain.size() && j <= i + 4 && hops < 160; j++) {
+                BlockPos next = chain.get(j).pos();
+                if (next.getSquaredDistance(here) > 32.0 * 32.0) {
+                    continue;
+                }
+                hops++;
+                List<BlockPos> hop = caminoA(world, here, en(next), next, vista, next::equals, HOP_NODES);
+                if (!hop.isEmpty()) {
+                    way.addAll(hop);
+                    here = hop.get(hop.size() - 1);
+                    i = j - 1;
+                    moved = true;
+                    break;
+                }
+            }
+            if (!moved) {
+                break;
+            }
+            if (way.size() > 2000) {
+                break;
+            }
+        }
+        // the chain ran out short of the land: from its last mark the rest of the way over cells it can stand in
+        List<BlockPos> rest = caminoA(world, here, (pos, paso) -> paso.fuera() && pos.getY() >= y && !skip.contains(pos.asLong()), null, vista,
+                vista == null ? null : pos -> pos.getY() >= y + 2 && !skip.contains(pos.asLong()) && Mining.onSurface(world, pos)
+                        && Mining.openGround(world, pos), HOP_NODES * 2);
+        Paso last = pasos.get(here.asLong());
+        if (rest.isEmpty() && !(last != null && last.fuera() && here.getY() >= y)) {
+            return List.of();
+        }
+        way.addAll(rest);
+        return way;
+    }
+
+    /** The way ends on that very cell: its marks are cells its feet stood in. */
+    private static Meta en(BlockPos target) {
+        return (pos, p) -> pos.equals(target);
+    }
+
+    /**
+     * A way over cells it can stand in, found the way a player plans a walk: best first ({@code hacia}, when known,
+     * pulls the search toward it), four ways round, one block up (with room for the head on the jump) or down as far
+     * as {@value #DROP} blocks (room all the way down), never digging or placing anything. The cells may be ones it
+     * walked, ones beside them ({@value #GAP} in a row) or ones whose floor its eye saw ({@value #SEEN_GAP} in a row);
+     * every one is checked by touch now. The way ends at the first cell it walked that {@code meta} accepts, or at an
+     * unwalked one {@code openEnd} accepts. Cells only, from the one after {@code from}; empty when there is none.
+     * A walked cell costs less than one it never stood on, so it keeps to its own steps when it can.
+     */
+    public List<BlockPos> caminoA(ServerWorld world, BlockPos from, Meta meta, @Nullable BlockPos hacia, @Nullable VisualMemory vista,
+                                  @Nullable Predicate<BlockPos> openEnd, int maxNodes) {
+        long now = world.getTime();
+        Map<Long, Long> parent = new HashMap<>();
+        Map<Long, Double> cost = new HashMap<>();
+        Map<Long, Integer> gap = new HashMap<>();
+        Map<Long, Boolean> room = new HashMap<>();
+        java.util.PriorityQueue<Nodo> open = new java.util.PriorityQueue<>((x, z) -> Double.compare(x.f(), z.f()));
+        long start = from.asLong();
+        parent.put(start, Long.MIN_VALUE);
+        cost.put(start, 0.0);
+        gap.put(start, 0);
+        open.add(new Nodo(start, h(start, hacia)));
+        int nodes = 0;
+        BlockPos.Mutable a = new BlockPos.Mutable();
+        BlockPos.Mutable b = new BlockPos.Mutable();
+        while (!open.isEmpty() && nodes++ < maxNodes) {
+            Nodo top = open.poll();
+            long at = top.key();
+            double g = cost.get(at);
+            if (top.f() > g + h(at, hacia) + 1e-6) {
+                continue; // a better way to it was found after this entry went in
+            }
+            a.set(at);
+            if (at != start) {
+                Paso here = pasos.get(at);
+                if (here != null && meta.es(a, here) || here == null && openEnd != null && openEnd.test(a)) {
+                    return back(parent, at, start);
+                }
+            }
+            int gapHere = gap.getOrDefault(at, 0);
+            for (Direction4 d : Direction4.values()) {
+                for (int dy = 1; dy >= -DROP; dy--) {
+                    long next = BlockPos.asLong(a.getX() + d.dx, a.getY() + dy, a.getZ() + d.dz);
+                    b.set(next);
+                    if (!pasoA(world, a, b, dy)) {
+                        if (dy <= 0) {
+                            break; // something solid in the way down: no landing further below either
+                        }
+                        continue;
+                    }
+                    if (!room(world, room, b)) {
+                        continue; // up: no step there; level or down: no floor yet, the feet go on falling
+                    }
+                    // a cell with room: this is where the feet go (a step up, or the first landing going down)
+                    if (!cerrado(next, now)) {
+                        boolean walked = pasos.containsKey(next);
+                        int gapNext = walked ? 0 : gapHere + 1;
+                        if (walked || gapNext <= GAP || gapNext <= SEEN_GAP && seenFloor(vista, b)) {
+                            double step = 1.0 + (walked ? 0.0 : 0.6) + (dy > 0 ? 0.2 : dy < -1 ? 0.5 * (-dy - 1) : 0.0);
+                            double ng = g + step;
+                            Double old = cost.get(next);
+                            if (old == null || ng < old) {
+                                cost.put(next, ng);
+                                parent.put(next, at);
+                                gap.put(next, gapNext);
+                                open.add(new Nodo(next, ng + h(next, hacia)));
+                            }
+                        }
+                    }
+                    if (dy <= 0) {
+                        break;
+                    }
+                }
+            }
+        }
+        return List.of();
+    }
+
+    private record Nodo(long key, double f) {
+    }
+
+    private static double h(long cell, @Nullable BlockPos hacia) {
+        if (hacia == null) {
+            return 0;
+        }
+        int dx = Math.abs(BlockPos.unpackLongX(cell) - hacia.getX());
+        int dy = Math.abs(BlockPos.unpackLongY(cell) - hacia.getY());
+        int dz = Math.abs(BlockPos.unpackLongZ(cell) - hacia.getZ());
+        return Math.max(dx + dz, dy);
+    }
+
+    /**
+     * It can get from {@code a} to the cell beside it {@code b}, {@code dy} up or down, without touching anything: a
+     * step up needs room for the head over {@code a}; a drop needs the column over {@code b} open from the level of
+     * its head at {@code a} down to the landing.
+     */
+    private static boolean pasoA(ServerWorld world, BlockPos a, BlockPos b, int dy) {
+        if (dy > 0) {
+            return Mining.passable(world, a.up(2));
+        }
+        for (int k = 1; k <= -dy + 1; k++) {
+            if (!Mining.passable(world, b.up(k))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The four ways round on the level, for {@link #caminoA}. */
+    private enum Direction4 {
+        N(0, -1), E(1, 0), S(0, 1), W(-1, 0);
+
+        final int dx;
+        final int dz;
+
+        Direction4(int dx, int dz) {
+            this.dx = dx;
+            this.dz = dz;
+        }
+    }
+
     // ------------------------------------------------------------------ the diary and the places
 
     public void anotar(long t, String tipo, String texto, @Nullable BlockPos donde) {
@@ -576,6 +876,10 @@ public final class Recuerdos {
             sitios.forEach((name, pos) -> places.add(name + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ()));
             s.append("Places you know (exact X Y Z): ").append(String.join(", ", places)).append(". ");
         }
+        int torches = marcas(ANTORCHA);
+        if (torches > 0) {
+            s.append("You remember where you set each of your ").append(torches).append(" torches, so you can walk back torch to torch. ");
+        }
         if (!pasos.isEmpty()) {
             s.append("You remember ").append(pasos.size()).append(" spots you walked on, so you know your way back along them. ");
         }
@@ -659,6 +963,17 @@ public final class Recuerdos {
         NbtCompound places = new NbtCompound();
         sitios.forEach((name, pos) -> places.putLong(name, pos.asLong()));
         nbt.put("s", places);
+        NbtList marks = new NbtList();
+        for (Marca m : marcas) {
+            NbtCompound e = new NbtCompound();
+            e.putString("k", m.tipo());
+            e.putLong("p", m.pos().asLong());
+            e.putLong("t", m.t());
+            e.putInt("n", m.n());
+            marks.add(e);
+        }
+        nbt.put("w", marks);
+        nbt.putInt("wn", marcasN);
         nbt.putLong("tocado", tocado);
         return nbt;
     }
@@ -685,6 +1000,12 @@ public final class Recuerdos {
         for (String name : places.getKeys()) {
             r.sitios.put(name, BlockPos.fromLong(places.getLong(name)));
         }
+        NbtList marks = nbt.getList("w", NbtElement.COMPOUND_TYPE);
+        for (int i = 0; i < marks.size(); i++) {
+            NbtCompound e = marks.getCompound(i);
+            r.marcas.add(new Marca(e.getString("k"), BlockPos.fromLong(e.getLong("p")), e.getLong("t"), e.getInt("n")));
+        }
+        r.marcasN = Math.max(nbt.getInt("wn"), r.marcas.isEmpty() ? 0 : r.marcas.get(r.marcas.size() - 1).n());
         r.tocado = nbt.getLong("tocado");
         return r;
     }
