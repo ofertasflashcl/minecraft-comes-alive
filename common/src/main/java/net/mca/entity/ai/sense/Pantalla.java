@@ -134,6 +134,7 @@ public final class Pantalla {
     private static long serverTick = Long.MIN_VALUE;
     private static long serverNanos;
     private static boolean loggedSaveError;
+    private static boolean loggedAhoraError;
 
     /** One pixel: what it shows, where and how far. {@code far}: seen by the far pass (the map was told, not the memory). */
     public record Hit(byte kind, @Nullable BlockPos pos, @Nullable BlockState state, @Nullable Direction face, double distance,
@@ -243,6 +244,15 @@ public final class Pantalla {
      */
     public static void tick(ServerWorld world, VillagerEntityMCA villager) {
         long now = world.getTime();
+        // the moment it understands, once a second for a villager whose eye is working (no rays of its own)
+        try {
+            Ahora.tick(world, villager);
+        } catch (RuntimeException e) {
+            if (!loggedAhoraError) {
+                loggedAhoraError = true;
+                MCA.LOGGER.warn("[Tropeles] {} no pudo entender lo que ve: {}", villager.getName().getString(), e.toString());
+            }
+        }
         Pantalla screen = ALL.get(villager);
         if (!on(villager)) {
             if (screen != null && now - screen.lastOn > DROP_TICKS) {
@@ -862,6 +872,21 @@ public final class Pantalla {
     }
 
     /** Whole frames drawn so far. */
+    /** The share of the drawn pixels too dark to make out (sky and fog left out); 0 when nothing is drawn. */
+    public double darkShare() {
+        int n = 0;
+        int dark = 0;
+        for (byte k : kind) {
+            if (k != NADA && k != CIELO && k != NIEBLA) {
+                n++;
+                if (k == OSCURO) {
+                    dark++;
+                }
+            }
+        }
+        return n == 0 ? 0 : dark / (double) n;
+    }
+
     public int frames() {
         return frames;
     }

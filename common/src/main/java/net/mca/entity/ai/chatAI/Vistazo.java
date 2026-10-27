@@ -3,6 +3,7 @@ package net.mca.entity.ai.chatAI;
 import net.mca.Config;
 import net.mca.MCA;
 import net.mca.entity.VillagerEntityMCA;
+import net.mca.entity.ai.sense.Ahora;
 import net.mca.entity.ai.sense.Entorno;
 import net.mca.entity.ai.sense.Escena;
 import net.mca.entity.ai.sense.Foto;
@@ -26,9 +27,9 @@ public final class Vistazo {
     private static final long LOOK_MS = 5_000;
     /** The scene is made of what it saw this many ticks back at most. */
     public static final int SCENE_TICKS = 1200;
-    /** The picture's size: small enough for free minds, wide like the eye. */
-    private static final int PHOTO_W = 160;
-    private static final int PHOTO_H = 90;
+    /** The picture's size: small enough for free minds, wide like the eye, big enough that a mob or an ore shows. */
+    private static final int PHOTO_W = 256;
+    private static final int PHOTO_H = 144;
 
     private static final Map<UUID, Long> LOOKED = new ConcurrentHashMap<>();
 
@@ -66,6 +67,20 @@ public final class Vistazo {
             return Escena.of(world, villager, SCENE_TICKS);
         } catch (RuntimeException e) {
             MCA.LOGGER.warn("[Tropeles] la escena de {} no se pudo armar: {}", villager.getName().getString(), e.toString());
+            return null;
+        }
+    }
+
+    /** The moment it understands now ({@link Ahora}: light, what it hears, structures, dangers), or null. Server thread. */
+    @Nullable
+    public static Ahora ahora(VillagerEntityMCA villager) {
+        if (!(villager.getWorld() instanceof ServerWorld world)) {
+            return null;
+        }
+        try {
+            return Ahora.of(world, villager);
+        } catch (RuntimeException e) {
+            MCA.LOGGER.warn("[Tropeles] {} no pudo entender el momento: {}", villager.getName().getString(), e.toString());
             return null;
         }
     }
@@ -115,6 +130,6 @@ public final class Vistazo {
     /** Whether a question is about seeing or the surroundings: worth a picture for the minds that can look. */
     public static boolean aboutSight(MenteLocal.Intent intent) {
         String q = intent.question();
-        return !intent.order() && q != null && (q.equals("see") || q.equals("where") || q.startsWith("see:"));
+        return !intent.order() && q != null && (q.equals("see") || q.equals("where") || q.equals("light") || q.startsWith("see:"));
     }
 }

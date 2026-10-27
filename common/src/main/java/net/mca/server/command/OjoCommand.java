@@ -107,6 +107,7 @@ public final class OjoCommand {
                 screen.range(), screen.lastRange(), screen.lastFarthest(), screen.lastSkyShare() * 100.0)).formatted(Formatting.GRAY));
         say(source, Text.literal("Coste: " + screen.costLine()).formatted(Formatting.GRAY));
         say(source, Text.literal("Tacto: " + Tacto.describeOverhead(villager, true)).formatted(Formatting.GRAY));
+        say(source, Text.literal("Ahora: " + net.mca.entity.ai.sense.Ahora.of(world, villager).resumen(true)).formatted(Formatting.GRAY));
         return 1;
     }
 
@@ -149,6 +150,7 @@ public final class OjoCommand {
                 lugar.palabra(), Entorno.profundidad(world, villager), Entorno.bajoTierra(world, villager) ? " (bajo tierra para minar)" : "",
                 memory.mapa().size())).formatted(lugar == Lugar.BAJO_TIERRA ? Formatting.YELLOW : Formatting.GREEN));
         say(source, Text.literal("Dice: " + Escena.of(world, villager, 1200).describe(true)).formatted(Formatting.WHITE));
+        say(source, Text.literal("Ahora: " + net.mca.entity.ai.sense.Ahora.update(world, villager).resumen(true)).formatted(Formatting.GRAY));
 
         List<VisualMemory.SeenBlock> ores = memory.blocks(s -> Mining.isOre(s.state));
         ores.sort(Comparator.comparingDouble(s -> s.pos.getSquaredDistance(villager.getBlockPos())));

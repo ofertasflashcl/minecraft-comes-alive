@@ -9,6 +9,7 @@ import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.body.Mining;
 import net.mca.entity.ai.mente.Recuerdos;
 import net.mca.entity.ai.mente.Voluntad;
+import net.mca.entity.ai.sense.Ahora;
 import net.mca.entity.ai.sense.Escena;
 import net.mca.entity.ai.sense.Lugar;
 import net.mca.entity.ai.sense.Retina;
@@ -212,6 +213,12 @@ public final class MenteLocal {
                     + "found anything|what did you find|did you find"),
             order("doing", "que (estas haciendo|haces|andas haciendo)|en que andas|en que estas|what are you doing|what('re| are) you up to"),
             order("bag", "que (tienes|llevas|traes|cargas)|tu inventario|tu mochila|que hay en tu mochila|what do you have|what are you carrying|your inventory|your bag"),
+            // what it hears, and how light it is where it stands ({@link Ahora})
+            order("hear", "que (oyes|escuchas|estas (oyendo|escuchando))|(oyes|escuchas|oiste|escuchaste) (algo|eso|un ruido|ruidos|pasos)|"
+                    + "hay (algun )?ruido|what (do you|can you) hear|do you hear|did you hear|hear anything|any (noise|sound)s?"),
+            order("light", "(esta|es) (muy )?oscuro|hay (poca |suficiente |buena )?luz|ves bien|necesitas (una )?antorchas?|hace falta (una )?antorcha|"
+                    + "is it dark|how (dark|bright) is it|can you see well|do you need (a )?torch(es)?|is there (enough )?light"),
+            seeing(Escena.ESCALERA, "escaleras?|subidas?|escalones|stairs?|staircases?|steps"),
             // "¿hay árboles?", "¿ves agua?", "¿dónde hay hierro?", "any monsters around?"
             seeing(Escena.ARBOL, "arbol|arboles|bosques?|troncos?|madera|trees?|woods?|forests?|logs?"),
             seeing(Escena.AGUA, "agua|rios?|lagos?|mar|laguna|charcos?|water|rivers?|lakes?|sea|ocean|pond"),
@@ -502,6 +509,8 @@ public final class MenteLocal {
             case "where" -> where(villager, es);
             case "coords" -> coords(villager, es);
             case "see" -> see(villager, es);
+            case "hear" -> hear(villager, es);
+            case "light" -> light(villager, es);
             case "name" -> es ? "Me llamo " + villager.getName().getString() + "." : "I'm " + villager.getName().getString() + ".";
             case "help" -> help(es);
             case "bye" -> pick(villager, es ? new String[]{"¡Nos vemos, " + name + "!", "¡Chao! Cuídate.", "Hasta luego, " + name + "."}
@@ -899,6 +908,49 @@ public final class MenteLocal {
             }
         }
         return sightings(villager, es);
+    }
+
+    /** What it hears: the beings it hears and does not see (where, coming closer or not), or that all is quiet ({@link Ahora}). */
+    private static String hear(VillagerEntityMCA villager, boolean es) {
+        Ahora ahora = Vistazo.ahora(villager);
+        if (ahora == null) {
+            return es ? "No sabría decirte." : "I couldn't say.";
+        }
+        List<String> heard = new ArrayList<>();
+        for (Ahora.Ser s : ahora.seres()) {
+            if (s.oido()) {
+                String what = es ? (s.clase() == Ahora.Clase.JUGADOR || s.clase() == Ahora.Clase.ALDEANO && !"aldeano".equals(s.nombre())
+                        ? "a " + s.nombre() : (s.nombre().endsWith("a") ? "una " : "un ") + s.nombre())
+                        : (s.clase() == Ahora.Clase.JUGADOR || s.clase() == Ahora.Clase.ALDEANO ? s.name() : "a " + s.name());
+                heard.add(what + " " + (es ? s.direccion() : s.direction()) + (s.acercandose() ? (es ? " que se acerca" : ", coming closer") : "")
+                        + (s.visto() ? "" : (es ? " (no lo veo)" : " (I can't see it)")));
+                if (heard.size() >= 3) {
+                    break;
+                }
+            }
+        }
+        if (heard.isEmpty()) {
+            return es ? "No oigo nada raro, está tranquilo." : "I don't hear anything odd, it's quiet.";
+        }
+        return (es ? "Oigo " : "I hear ") + String.join(es ? ", " : ", ", heard) + ".";
+    }
+
+    /** How light it is where it stands, and whether it would want a torch ({@link Ahora.Luz}). */
+    private static String light(VillagerEntityMCA villager, boolean es) {
+        Ahora ahora = Vistazo.ahora(villager);
+        if (ahora == null) {
+            return es ? "No sabría decirte." : "I couldn't say.";
+        }
+        Ahora.Luz luz = ahora.luz();
+        String said = luz.palabra(es);
+        said = Character.toUpperCase(said.charAt(0)) + said.substring(1) + (es ? " (luz " + luz.nivel() + " de 15)" : " (light " + luz.nivel() + " of 15)");
+        if (luz.monstruos()) {
+            said += es ? "; tan oscuro que pueden salir monstruos" : "; dark enough for monsters to spawn";
+        }
+        if (luz.antorcha()) {
+            said += es ? ", aquí pondría una antorcha" : ", I'd put a torch here";
+        }
+        return said + ".";
     }
 
     /** "¿Hay árboles?": where the nearest one is and how many, or that it saw none ({@link Escena#describe(String, boolean)}). */

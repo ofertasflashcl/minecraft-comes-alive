@@ -192,6 +192,9 @@ public final class Motor {
     /** The way {@link #walkPath} is walking, the index of the next cell on it, and how long since that index moved on. */
     @Nullable
     private List<BlockPos> walking;
+    /** The list the caller passed ({@link #walkPath} wants the same one every tick); {@link #walking} is it with its corners filled in. */
+    @Nullable
+    private List<BlockPos> walkingSrc;
     private int walkIdx = -1;
     private int walkIdle;
     private int walkFails;
@@ -220,6 +223,7 @@ public final class Motor {
         if (!noTouch) {
             // walkPath gives a step up by itself and goes on along the same way; anyone else's reset drops the way
             walking = null;
+            walkingSrc = null;
             walkIdx = -1;
             existingGoal = null;
             existingPath = null;
@@ -619,6 +623,39 @@ public final class Motor {
         return walking == null ? -1 : walkIdx;
     }
 
+    /**
+     * The way with a cell put in at every diagonal hop (one block across on both axes): the corner the body can stand in,
+     * at the level of either end. A hop with no such corner stays as it is (the step machine tries it as it comes).
+     */
+    private static List<BlockPos> corners(World world, List<BlockPos> path) {
+        List<BlockPos> out = new ArrayList<>(path.size() + 8);
+        for (BlockPos b : path) {
+            if (!out.isEmpty()) {
+                BlockPos a = out.get(out.size() - 1);
+                if (Math.abs(b.getX() - a.getX()) == 1 && Math.abs(b.getZ() - a.getZ()) == 1) {
+                    BlockPos corner = corner(world, a, b);
+                    if (corner != null) {
+                        out.add(corner);
+                    }
+                }
+            }
+            out.add(b);
+        }
+        return out;
+    }
+
+    @Nullable
+    private static BlockPos corner(World world, BlockPos a, BlockPos b) {
+        for (int y : new int[]{a.getY(), b.getY()}) {
+            for (BlockPos c : new BlockPos[]{new BlockPos(b.getX(), y, a.getZ()), new BlockPos(a.getX(), y, b.getZ())}) {
+                if (standCell(world, c) || rung(world, c)) {
+                    return c;
+                }
+            }
+        }
+        return null;
+    }
+
     /** The cell of {@code path} nearest to {@code feet}, preferring later ones on a tie. */
     private static int nearest(List<BlockPos> path, BlockPos feet) {
         int best = 0;
@@ -645,11 +682,19 @@ public final class Motor {
         }
         BlockPos feet = villager.getBlockPos();
         boolean settled = settled(villager);
-        if (path != walking) {
+        if (path == walkingSrc && walking != null) {
+            path = walking;
+        } else {
             if (busy()) {
                 endStep();
             }
-            walking = path;
+            walkingSrc = path;
+            // a way that cuts a corner on the diagonal (a trail as the feet left it, a way over remembered cells) goes
+            // round it by the open corner cell: a step machine walks one axis at a time
+            walking = corners(world, path);
+            net.mca.MCA.LOGGER.info("[Tropeles] {} camina un camino ya hecho de {} pasos ({} esquinas rodeadas), sin romper ni poner nada",
+                    villager.getName().getString(), path.size(), walking.size() - path.size());
+            path = walking;
             int near = nearest(path, feet);
             walkIdx = path.get(near).equals(feet) ? near + 1 : near;
             walkIdle = 0;
@@ -727,6 +772,7 @@ public final class Motor {
 
     private void endWalk(ServerWorld world, VillagerEntityMCA villager) {
         walking = null;
+        walkingSrc = null;
         walkIdx = -1;
         walkIdle = 0;
         walkFails = 0;
@@ -745,7 +791,7 @@ public final class Motor {
         long now = world.getTime();
         BlockPos feet = villager.getBlockPos();
         if (existingGoal == null || !existingGoal.equals(goal) || existingPath == null && now - existingAt > 40
-                || existingPath != null && walking != existingPath && !midStep(villager)) {
+                || existingPath != null && walkingSrc != existingPath && !midStep(villager)) {
             existingGoal = goal.toImmutable();
             existingAt = now;
             existingPath = feet.getSquaredDistance(goal) <= within * within ? List.of(feet.toImmutable()) : findWalk(world, feet, goal, within, maxNodes, allowed);

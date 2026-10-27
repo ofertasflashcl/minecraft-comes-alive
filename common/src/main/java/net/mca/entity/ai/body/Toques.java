@@ -71,6 +71,23 @@ public final class Toques {
 
     private static final Map<VillagerEntityMCA, Memoria> ALL = new WeakHashMap<>();
 
+    /** Someone who wants to know every block a villager's hands break or place (the in-game checks). */
+    @FunctionalInterface
+    public interface Oido {
+        void toque(BlockPos pos, boolean placed, long now);
+    }
+
+    private static final Map<VillagerEntityMCA, Oido> OIDOS = new WeakHashMap<>();
+
+    /** Tells {@code oido} of every block {@code villager} breaks or places from now on; null stops it. */
+    public static synchronized void escuchar(VillagerEntityMCA villager, @Nullable Oido oido) {
+        if (oido == null) {
+            OIDOS.remove(villager);
+        } else {
+            OIDOS.put(villager, oido);
+        }
+    }
+
     private Toques() {
     }
 
@@ -87,6 +104,10 @@ public final class Toques {
     }
 
     private static void touch(VillagerEntityMCA villager, BlockPos pos, long now, boolean placed) {
+        Oido oido = OIDOS.get(villager);
+        if (oido != null) {
+            oido.toque(pos.toImmutable(), placed, now);
+        }
         Memoria m = of(villager);
         long key = pos.asLong();
         m.toques.addLast(new Toque(key, now, placed));

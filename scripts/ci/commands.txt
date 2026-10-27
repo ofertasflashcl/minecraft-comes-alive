@@ -41,6 +41,11 @@ mca-prueba dormir
 mca-prueba vuelta-escalera
 mca-prueba mina-guardada
 mca-prueba casa-conectado
-sleep 290
+mca-prueba vista-escalera
+mca-prueba vista-oscuro
+mca-prueba vista-oido
+mca-prueba escalera-real
+mca-prueba bajada-lado
+sleep 320
 mca-prueba resumen
 sleep 2

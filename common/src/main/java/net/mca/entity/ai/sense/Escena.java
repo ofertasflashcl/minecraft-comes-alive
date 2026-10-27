@@ -69,6 +69,16 @@ public final class Escena {
     public static final String COFRE = "cofre";
     /** High land far off: a mountain or a hill, seen by the {@link Pantalla}. */
     public static final String MONTANA = "montana";
+    /** A staircase: steps one up and one over, carved or its own ({@link Ahora}). */
+    public static final String ESCALERA = "escalera";
+    /** The tunnel it stands in ({@link Ahora}). */
+    public static final String TUNEL = "tunel";
+    /** A ravine: sunlit floors far below it ({@link Ahora}). */
+    public static final String BARRANCO = "barranco";
+    /** A dirt path ({@link Ahora}). */
+    public static final String CAMINO = "camino";
+    /** Rails, or an old mineshaft ({@link Ahora}). */
+    public static final String VIAS = "vias";
 
     /** Trees from this many on are a forest. */
     public static final int FOREST = 6;
@@ -135,9 +145,11 @@ public final class Escena {
     private final String reliefEn;
     private final Vec3d origin;
     private final float facing;
+    @Nullable
+    private final Ahora ahora;
 
     private Escena(Lugar lugar, int profundidad, List<Item> items, long timeOfDay, boolean raining, boolean thundering, int light,
-                   String biome, String groundEs, String groundEn, String reliefEs, String reliefEn, Vec3d origin, float facing) {
+                   String biome, String groundEs, String groundEn, String reliefEs, String reliefEn, Vec3d origin, float facing, @Nullable Ahora ahora) {
         this.lugar = lugar;
         this.profundidad = profundidad;
         this.items = items;
@@ -157,6 +169,7 @@ public final class Escena {
         this.reliefEn = reliefEn;
         this.origin = origin;
         this.facing = facing;
+        this.ahora = ahora;
     }
 
     /** The scene now, from what it saw in the last {@code maxAge} ticks. Server thread. */
@@ -296,6 +309,20 @@ public final class Escena {
         beings(world, b, memory, viewer, now, maxAge);
         far(b, mapa, feet, now, maxAge);
 
+        // what it understands of the moment: staircases, the tunnel it is in, paths, rails, ravines; light, sounds, dangers
+        Ahora ahora = null;
+        try {
+            ahora = Ahora.of(world, viewer);
+            for (Ahora.Estructura e : ahora.estructuras()) {
+                if (CUEVA.equals(e.tipo())) {
+                    continue; // the cave openings above already say it
+                }
+                b.add(e.tipo(), e.nombre(), 1, e.donde(), now, structureWords(e));
+            }
+        } catch (RuntimeException ignored) {
+            // the scene goes on without it
+        }
+
         // the ground under its feet and the lie of the land, felt and seen
         BlockState under = world.getBlockState(feet.down());
         BlockState at = world.getBlockState(feet);
@@ -306,7 +333,22 @@ public final class Escena {
         String biome = world.getBiome(feet).getKey().map(k -> k.getValue().getPath().replace('_', ' ')).orElse("unknown");
         b.items.sort(Comparator.comparingDouble(i -> i.score));
         return new Escena(lugar, depth, b.items, world.getTimeOfDay() % 24000L, world.isRaining(), world.isThundering(), light, biome,
-                ground[0], ground[1], relief[0], relief[1], origin, facing);
+                ground[0], ground[1], relief[0], relief[1], origin, facing, ahora);
+    }
+
+    private static Words structureWords(Ahora.Estructura e) {
+        return switch (e.tipo()) {
+            case ESCALERA -> {
+                String es = (e.propia() ? "mi escalera" : "una escalera") + " de " + e.largo() + " escalones (" + (e.sube() ? "sube" : "baja") + ")";
+                String en = (e.propia() ? "my own staircase" : "a staircase") + " of " + e.largo() + " steps (leading " + (e.sube() ? "up" : "down") + ")";
+                yield new Words(es, es, en, en, true);
+            }
+            case TUNEL -> Words.mass("un túnel", "a tunnel");
+            case BARRANCO -> Words.mass("un barranco", "a ravine");
+            case CAMINO -> Words.mass("un camino", "a path");
+            case VIAS -> "mina abandonada".equals(e.nombre()) ? Words.mass("una mina abandonada", "an old mineshaft") : Words.mass("unas vías", "some rails");
+            default -> Words.mass(e.nombre(), e.name());
+        };
     }
 
     /** Collects things with their direction and distance from the villager. */
@@ -364,6 +406,7 @@ public final class Escena {
     private static double weight(String tipo) {
         return switch (tipo) {
             case MONSTRUO -> 0.4;
+            case ESCALERA -> 0.7;
             case LAVA -> 0.6;
             case PERSONA -> 0.8;
             case ARBOL -> 0.9;
@@ -681,6 +724,12 @@ public final class Escena {
         }
     }
 
+    /** The noun of a kind of being without article, Spanish ("zombi") or English ("zombie"). */
+    static String nombreSer(EntityType<?> type, boolean es) {
+        Words w = beingWords(type);
+        return es ? w.unEs.replaceFirst("^(un|una) ", "") : w.oneEn.replaceFirst("^(a|an) ", "");
+    }
+
     private static Words beingWords(EntityType<?> type) {
         String path = Registries.ENTITY_TYPE.getId(type).getPath();
         String en = type.getName().getString().toLowerCase(Locale.ROOT);
@@ -753,7 +802,7 @@ public final class Escena {
         return state.getBlock() instanceof ChestBlock || state.getBlock() instanceof BarrelBlock || state.getBlock() instanceof EnderChestBlock;
     }
 
-    private static String oreKey(BlockState state) {
+    static String oreKey(BlockState state) {
         String path = Registries.BLOCK.getId(state.getBlock()).getPath();
         for (String metal : new String[]{"coal", "iron", "copper", "gold", "redstone", "lapis", "diamond", "emerald", "quartz", "debris"}) {
             if (path.contains(metal)) {
@@ -764,7 +813,7 @@ public final class Escena {
     }
 
     /** es, en */
-    private static String[] oreName(String key) {
+    static String[] oreName(String key) {
         return switch (key) {
             case "coal" -> new String[]{"carbón", "coal ore"};
             case "iron" -> new String[]{"mineral de hierro", "iron ore"};
@@ -1088,8 +1137,12 @@ public final class Escena {
     /** Two or three short sentences in the villager's voice, Spanish or English, for its own answers. */
     public String describe(boolean es) {
         String place = place(es);
+        String now = ahora == null ? "" : ahora.decir(es);
+        if (!now.isEmpty()) {
+            now = " " + now;
+        }
         if (items.isEmpty()) {
-            return place + (es ? " No veo gran cosa por aquí." : " I don't see much around here.");
+            return place + (es ? " No veo gran cosa por aquí." : " I don't see much around here.") + now;
         }
         List<String> first = new ArrayList<>();
         List<String> more = new ArrayList<>();
@@ -1101,7 +1154,7 @@ public final class Escena {
         if (!more.isEmpty()) {
             sb.append(es ? " También " : " Also ").append(join(more, es)).append('.');
         }
-        return sb.toString();
+        return sb.append(now).toString();
     }
 
     /** About one kind only ("¿hay árboles?"): where the nearest is and how many, or that it saw none. */
@@ -1146,6 +1199,9 @@ public final class Escena {
             case MINERAL -> es ? "No veo minerales por aquí." : "I don't see any ores around here.";
             case COFRE -> es ? "No veo cofres por aquí." : "I don't see any chests around here.";
             case MONTANA -> es ? "No veo montañas desde aquí." : "I don't see any mountains from here.";
+            case ESCALERA -> es ? "No veo ninguna escalera desde aquí." : "I don't see any staircase from here.";
+            case TUNEL -> es ? "No estoy en ningún túnel." : "I'm not in a tunnel.";
+            case CAMINO -> es ? "No veo caminos por aquí." : "I don't see any paths around here.";
             default -> es ? "No veo nada de eso." : "I don't see anything like that.";
         };
     }
@@ -1174,9 +1230,18 @@ public final class Escena {
             sb.append(" (it cannot see the sky from here)");
         }
         sb.append(".\n");
-        sb.append("Light where it stands: ").append(light).append("/15 (")
-                .append(light >= 12 ? "bright" : light >= 7 ? "dim" : light >= 3 ? "dark" : "pitch dark").append(").\n");
+        if (ahora == null) {
+            sb.append("Light where it stands: ").append(light).append("/15 (")
+                    .append(light >= 12 ? "bright" : light >= 7 ? "dim" : light >= 3 ? "dark" : "pitch dark").append(").\n");
+        }
         sb.append("Biome: ").append(biome).append(".\n");
+        if (ahora != null) {
+            // the moment: light and darkness, what it hears and does not see, the structures it recognises, the dangers
+            String now = ahora.forModel();
+            if (!now.isBlank()) {
+                sb.append(now).append('\n');
+            }
+        }
         if (items.isEmpty()) {
             sb.append("It sees nothing of note.\n");
         } else {

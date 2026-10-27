@@ -107,6 +107,11 @@ public final class Pruebas {
                 case "vuelta-escalera" -> start(new VueltaEscalera(world));
                 case "mina-guardada" -> start(new MinaGuardada(world));
                 case "casa-conectado" -> start(new CasaConectado(world));
+                case "vista-escalera" -> start(new VistaEscalera(world));
+                case "vista-oscuro" -> start(new VistaOscuro(world));
+                case "vista-oido" -> start(new VistaOido(world));
+                case "escalera-real" -> start(new EscaleraReal(world));
+                case "bajada-lado" -> start(new BajadaLado(world));
                 case "resumen" -> resumen();
                 default -> {
                     ctx.getSource().sendError(Text.literal("ojo | minar | espada | arco | progreso | nombre | obras | robo | regalo | arco-cerca | horno | hogar | cultivos | agua-tunel | agua-pozo | explorar | ia-local | ia-red | resumen"));
@@ -2985,6 +2990,628 @@ public final class Pruebas {
             world.setBlockState(chest, Blocks.AIR.getDefaultState(), 3);
             net.mca.server.world.data.TropelesMundo.get(world).removed(chest);
             v.discard();
+        }
+    }
+
+    /**
+     * Two carved one-wide staircases in the rock, lit like a miner lights them, each seen from the chamber at its
+     * foot: the first one its own (it walked it, its stair head is marked), the second one somebody else's; and a
+     * grass hillside of the same steps out under the sky. The eye must name the first "mi escalera" (steps, leading
+     * up), the second just a staircase, and the hillside none at all; the chat answers "¿ves tu escalera?" with it.
+     */
+    private static final class VistaEscalera extends Scenario {
+        private final VillagerEntityMCA own;
+        private final VillagerEntityMCA other;
+        private final VillagerEntityMCA hill;
+        private final List<BlockPos> stair = new ArrayList<>();
+        private final net.minecraft.server.network.ServerPlayerEntity p;
+
+        VistaEscalera(ServerWorld world) {
+            super("vista-escalera", world, 400);
+            BlockPos o = new BlockPos(9400, 100, 0);
+            load(world, o.add(0, 0, 6), 24);
+            fill(world, new BlockPos(9392, 92, -4), new BlockPos(9412, 108, 16), Blocks.STONE.getDefaultState());
+            for (int z0 : new int[]{0, 12}) {
+                // the chamber at the foot, four long, three wide, three high
+                fill(world, new BlockPos(9396, 95, z0 - 1), new BlockPos(9399, 97, z0 + 1), Blocks.AIR.getDefaultState());
+                // six steps up to the east, one up and one over each, three high for the jump; a landing at the top
+                for (int i = 0; i < 6; i++) {
+                    fill(world, new BlockPos(9400 + i, 95 + i, z0), new BlockPos(9400 + i, 97 + i, z0), Blocks.AIR.getDefaultState());
+                }
+                fill(world, new BlockPos(9406, 101, z0), new BlockPos(9408, 103, z0), Blocks.AIR.getDefaultState());
+                // lit the way a miner lights it
+                world.setBlockState(new BlockPos(9398, 98, z0), Blocks.GLOWSTONE.getDefaultState(), 2);
+                world.setBlockState(new BlockPos(9403, 101, z0), Blocks.GLOWSTONE.getDefaultState(), 2);
+                world.setBlockState(new BlockPos(9407, 104, z0), Blocks.GLOWSTONE.getDefaultState(), 2);
+            }
+            for (int i = 0; i < 6; i++) {
+                stair.add(new BlockPos(9400 + i, 95 + i, 0));
+            }
+            stair.add(new BlockPos(9406, 101, 0));
+            // a grass hillside of the same steps, under the open sky, high above everything
+            BlockPos h = new BlockPos(9440, 200, 0);
+            load(world, h, 16);
+            fill(world, h.add(-6, -1, -4), h.add(14, 30, 4), Blocks.AIR.getDefaultState());
+            fill(world, h.add(-6, -2, -4), h.add(14, -2, 4), Blocks.STONE.getDefaultState());
+            fill(world, h.add(-6, -1, -4), h.add(1, -1, 4), Blocks.GRASS_BLOCK.getDefaultState());
+            for (int i = 0; i < 6; i++) {
+                fill(world, h.add(2 + i, -1, -1), h.add(2 + i, -1 + i, 1), Blocks.DIRT.getDefaultState());
+                fill(world, h.add(2 + i, i, -1), h.add(2 + i, i, 1), Blocks.GRASS_BLOCK.getDefaultState());
+            }
+            own = villager(world, new BlockPos(9397, 95, 0), Direction.EAST, "Vista Escalera");
+            other = villager(world, new BlockPos(9397, 95, 12), Direction.EAST, "Vista Ajena");
+            hill = villager(world, h, Direction.EAST, "Vista Loma");
+            for (VillagerEntityMCA v : List.of(own, other, hill)) {
+                v.setAiDisabled(true);
+                face(v, -90.0F, -5.0F);
+            }
+            p = fakePlayer(world, "Prueba_Escalera", Vec3d.ofBottomCenter(new BlockPos(9396, 95, 1)));
+        }
+
+        @Override
+        Boolean step() {
+            if (ticks < 60) {
+                return null; // the light settles
+            }
+            if (ticks == 60) {
+                // it came down this staircase itself: it walked every step and marked its head
+                net.mca.entity.ai.mente.Recuerdos r = net.mca.entity.ai.mente.Recuerdos.of(world, own);
+                for (BlockPos c : stair) {
+                    r.pisado(world, own, c);
+                }
+                r.marcar(net.mca.entity.ai.mente.Recuerdos.ESCALERA, stair.get(stair.size() - 1), world.getTime());
+                return null;
+            }
+            for (VillagerEntityMCA v : List.of(own, other, hill)) {
+                Retina.lookAll(world, v);
+            }
+            if (ticks < 66) {
+                return null; // a few frames, the saccades fill the gaps
+            }
+            net.mca.entity.ai.sense.Ahora a = net.mca.entity.ai.sense.Ahora.update(world, own);
+            net.mca.entity.ai.sense.Ahora b = net.mca.entity.ai.sense.Ahora.update(world, other);
+            net.mca.entity.ai.sense.Ahora c = net.mca.entity.ai.sense.Ahora.update(world, hill);
+            net.mca.entity.ai.sense.Ahora.Estructura mine = a.escaleraPropia();
+            net.mca.entity.ai.sense.Ahora.Estructura theirs = b.escalera();
+            net.mca.entity.ai.sense.Ahora.Estructura slope = c.escalera();
+            boolean sawOwn = mine != null && mine.largo() >= 5 && mine.sube() && mine.distancia() <= 6;
+            boolean sawOther = theirs != null && !theirs.propia() && theirs.largo() >= 5;
+            boolean noHill = slope == null;
+            String scene = net.mca.entity.ai.sense.Escena.of(world, own, 1200).describe(net.mca.entity.ai.sense.Escena.ESCALERA, true);
+            boolean said = scene.contains("mi escalera");
+            if (!(sawOwn && sawOther && noHill && said) && ticks < 120) {
+                return null;
+            }
+            String chat;
+            net.mca.entity.ai.chatAI.Cerebros.OFFLINE.set(true);
+            try {
+                chat = new net.mca.entity.ai.chatAI.OpenAIChatAI().answer(p, own, "¿ves tu escalera?").orElse("");
+            } finally {
+                net.mca.entity.ai.chatAI.Cerebros.OFFLINE.set(false);
+                net.mca.entity.ai.chatAI.OpenAIChatAI.forget(own.getUuid());
+            }
+            boolean answered = chat.contains("escalera");
+            byte[] png = net.mca.entity.ai.sense.Foto.png(world, own, 256, 144);
+            String photo = "sin foto";
+            if (png != null) {
+                try {
+                    java.nio.file.Path file = net.mca.entity.ai.sense.Pantalla.path(world, own).resolveSibling("vista-escalera-foto.png");
+                    java.nio.file.Files.createDirectories(file.getParent());
+                    java.nio.file.Files.write(file, png);
+                    photo = file + " (" + png.length + " bytes)";
+                } catch (java.io.IOException e) {
+                    photo = "no se pudo escribir: " + e;
+                }
+            }
+            boolean passed = sawOwn && sawOther && noHill && said && answered && png != null;
+            check(name, passed, "la suya: " + (mine == null ? "no la ve" : mine.nombre() + " de " + mine.largo() + " escalones, "
+                            + (mine.sube() ? "sube" : "baja") + ", a " + fmt(mine.distancia()) + " " + mine.direccion())
+                    + "; la ajena: " + (theirs == null ? "no la ve" : theirs.nombre() + (theirs.propia() ? " (¡la cree suya!)" : "") + " de " + theirs.largo())
+                    + "; la loma al sol: " + (slope == null ? "no es escalera" : "¡la toma por " + slope.nombre() + "!")
+                    + "; escena: «" + scene + "»; charla: «" + chat + "»; ahora: " + a.resumen(true) + "; foto " + photo);
+            return passed;
+        }
+
+        @Override
+        String state() {
+            net.mca.entity.ai.sense.Ahora a = net.mca.entity.ai.sense.Ahora.get(own);
+            return "bloques vistos " + Retina.memory(own).blockCount() + ", ahora: " + (a == null ? "nada" : a.resumen(true));
+        }
+
+        @Override
+        void cleanup() {
+            for (VillagerEntityMCA v : List.of(own, other, hill)) {
+                net.mca.entity.ai.mente.Recuerdos.olvidar(world, v);
+                net.mca.entity.ai.sense.Ahora.olvidar(v);
+                v.discard();
+            }
+        }
+    }
+
+    /**
+     * A closed stone room with no light: it must know it is dark, that monsters can spawn there and that a player
+     * would set a torch, and say so when asked "¿está oscuro?"; with a torch set beside it, the same room is lit.
+     */
+    private static final class VistaOscuro extends Scenario {
+        private final VillagerEntityMCA v;
+        private final BlockPos torch;
+        private final net.minecraft.server.network.ServerPlayerEntity p;
+        private int stage;
+        private int lit;
+        private String dark = "";
+
+        VistaOscuro(ServerWorld world) {
+            super("vista-oscuro", world, 300);
+            BlockPos o = new BlockPos(9300, 100, 0);
+            load(world, o, 12);
+            fill(world, o.add(-6, -4, -6), o.add(6, 6, 6), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-3, 0, -3), o.add(3, 2, 3), Blocks.AIR.getDefaultState());
+            torch = o.add(1, 0, 1);
+            v = villager(world, o, Direction.EAST, "Vista Oscuro");
+            v.setAiDisabled(true);
+            face(v, -90.0F, 10.0F);
+            p = fakePlayer(world, "Prueba_Oscuro", Vec3d.ofBottomCenter(o.west(2)));
+        }
+
+        @Override
+        Boolean step() {
+            if (ticks < 40) {
+                return null;
+            }
+            Retina.lookAll(world, v);
+            net.mca.entity.ai.sense.Ahora a = net.mca.entity.ai.sense.Ahora.update(world, v);
+            net.mca.entity.ai.sense.Ahora.Luz luz = a.luz();
+            if (stage == 0) {
+                boolean knows = luz.bloque() == 0 && luz.oscuro() && luz.monstruos() && luz.antorcha()
+                        && a.peligro(net.mca.entity.ai.sense.Ahora.P_OSCURIDAD);
+                String chat;
+                net.mca.entity.ai.chatAI.Cerebros.OFFLINE.set(true);
+                try {
+                    chat = new net.mca.entity.ai.chatAI.OpenAIChatAI().answer(p, v, "¿está oscuro?").orElse("");
+                } finally {
+                    net.mca.entity.ai.chatAI.Cerebros.OFFLINE.set(false);
+                    net.mca.entity.ai.chatAI.OpenAIChatAI.forget(v.getUuid());
+                }
+                String scene = net.mca.entity.ai.sense.Escena.of(world, v, 1200).describe(true);
+                dark = "a oscuras: " + a.resumen(true) + "; charla «" + chat + "»; escena «" + scene + "»";
+                if (!knows || !chat.toLowerCase(Locale.ROOT).contains("oscuro") || !scene.contains("antorcha")) {
+                    fail(name, "no sabe que está oscuro: " + dark);
+                    return Boolean.FALSE;
+                }
+                world.setBlockState(torch, Blocks.TORCH.getDefaultState(), 3);
+                stage = 1;
+                lit = ticks;
+                return null;
+            }
+            boolean light = luz.bloque() >= 10 && !luz.oscuro() && !luz.monstruos() && !luz.antorcha() && !a.peligro(net.mca.entity.ai.sense.Ahora.P_OSCURIDAD);
+            if (!light && ticks - lit < 60) {
+                return null; // the light engine takes a few ticks
+            }
+            check(name, light, dark + "; con la antorcha: " + a.resumen(true));
+            return light;
+        }
+
+        @Override
+        String state() {
+            net.mca.entity.ai.sense.Ahora a = net.mca.entity.ai.sense.Ahora.get(v);
+            return "etapa " + stage + ", ahora: " + (a == null ? "nada" : a.resumen(true));
+        }
+
+        @Override
+        void cleanup() {
+            world.setBlockState(torch, Blocks.AIR.getDefaultState(), 2);
+            net.mca.entity.ai.sense.Ahora.olvidar(v);
+            v.discard();
+        }
+    }
+
+    /**
+     * A zombie walking up behind it on open ground, and another standing still farther off: the eye sees neither,
+     * the ears catch the one coming (footsteps, behind, closer every second), never the quiet one; it turns, and
+     * then it sees it. Asked "¿qué oyes?" it says the zombie.
+     */
+    private static final class VistaOido extends Scenario {
+        private final VillagerEntityMCA v;
+        private final ZombieEntity walker;
+        private final ZombieEntity still;
+        private final net.minecraft.server.network.ServerPlayerEntity p;
+        private int stage;
+        private String heard = "";
+
+        VistaOido(ServerWorld world) {
+            super("vista-oido", world, 300);
+            BlockPos o = new BlockPos(9505, 100, 0);
+            load(world, o, 24);
+            fill(world, o.add(-22, -1, -8), o.add(10, -1, 8), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-22, 0, -8), o.add(10, 5, 8), Blocks.AIR.getDefaultState());
+            v = villager(world, o, Direction.EAST, "Vista Oido");
+            v.setAiDisabled(true);
+            face(v, -90.0F, 0.0F);
+            walker = zombie(world, Vec3d.ofBottomCenter(o.west(12)), false);
+            still = zombie(world, Vec3d.ofBottomCenter(o.west(8).south(5)), false);
+            p = fakePlayer(world, "Prueba_Oido", Vec3d.ofBottomCenter(o.east(3)));
+        }
+
+        @Override
+        Boolean step() {
+            // it walks up behind, a little every tick, and stops four blocks off
+            if (walker.getX() < v.getX() - 4.0) {
+                walker.setPosition(walker.getX() + 0.08, walker.getY(), walker.getZ());
+            }
+            face(v, -90.0F, 0.0F);
+            Retina.look(world, v);
+            net.mca.entity.ai.sense.Ahora a = net.mca.entity.ai.sense.Ahora.of(world, v);
+            net.mca.entity.ai.sense.Ahora.Ser w = null;
+            net.mca.entity.ai.sense.Ahora.Ser s = null;
+            for (net.mca.entity.ai.sense.Ahora.Ser ser : a.seres()) {
+                if (ser.id() == walker.getId()) {
+                    w = ser;
+                } else if (ser.id() == still.getId()) {
+                    s = ser;
+                }
+            }
+            if (stage == 0) {
+                boolean unseen = Retina.memory(v).entity(walker.getId()) == null && Retina.memory(v).entity(still.getId()) == null;
+                boolean ears = w != null && w.oido() && !w.visto() && w.acercandose() && w.direccion().startsWith("detrás");
+                boolean quiet = s == null;
+                heard = "oye: " + a.resumen(true) + "; no lo vio " + unseen + "; dice «" + a.decir(true) + "»";
+                if (!unseen) {
+                    fail(name, "vio lo que tiene detrás: " + heard);
+                    return Boolean.FALSE;
+                }
+                if (!(ears && quiet && a.decir(true).contains("Oigo"))) {
+                    return ticks < 200 ? null : Boolean.valueOf(fail2(heard));
+                }
+                boolean turned = net.mca.entity.ai.sense.Ahora.voltear(world, v);
+                boolean sees = Retina.memory(v).entity(walker.getId()) != null;
+                net.mca.entity.ai.sense.Ahora after = net.mca.entity.ai.sense.Ahora.of(world, v);
+                net.mca.entity.ai.sense.Ahora.Ser now = null;
+                for (net.mca.entity.ai.sense.Ahora.Ser ser : after.seres()) {
+                    if (ser.id() == walker.getId()) {
+                        now = ser;
+                    }
+                }
+                String chat;
+                net.mca.entity.ai.chatAI.Cerebros.OFFLINE.set(true);
+                try {
+                    chat = new net.mca.entity.ai.chatAI.OpenAIChatAI().answer(p, v, "¿qué oyes?").orElse("");
+                } finally {
+                    net.mca.entity.ai.chatAI.Cerebros.OFFLINE.set(false);
+                    net.mca.entity.ai.chatAI.OpenAIChatAI.forget(v.getUuid());
+                }
+                boolean passed = turned && sees && now != null && now.visto() && chat.contains("zombi");
+                check(name, passed, heard + "; se dio vuelta " + turned + ", ahora lo ve " + sees + " (" + (now == null ? "nada" : now.direccion()) + ")"
+                        + "; charla «" + chat + "»; amenaza: " + (after.amenaza() == null ? "ninguna" : after.amenaza().nombre()));
+                stage = 1;
+                return passed;
+            }
+            return null;
+        }
+
+        private boolean fail2(String detail) {
+            fail(name, "no oyó al zombi que se acercaba por detrás (o oyó al quieto): " + detail);
+            return false;
+        }
+
+        @Override
+        String state() {
+            return heard;
+        }
+
+        @Override
+        void cleanup() {
+            walker.discard();
+            still.discard();
+            net.mca.entity.ai.sense.Ahora.olvidar(v);
+            v.discard();
+        }
+    }
+
+    /**
+     * "Crea una subida justo al lado de otra, en vez de subir o bajar por la misma parte que él hizo": the whole trip with
+     * nothing given but the land. A connected miner (its job from a player, its real brain) with a small bag cuts its own
+     * staircase down from the grass, mines until the bag is full, climbs out, stores at home, goes back down to its
+     * face, is called up again and sent back down. Every block it breaks is heard ({@link net.mca.entity.ai.body.Toques}):
+     * after the first descent not one may fall within three blocks of its own stair (outside the stair cells and the
+     * tunnel level), and every climb and descent must stand on that same stair.
+     */
+    private static final class EscaleraReal extends Scenario {
+        private final VillagerEntityMCA v;
+        private final net.minecraft.server.network.ServerPlayerEntity p;
+        private final ProspectingTask task;
+        private final BlockPos o;
+        private final BlockPos chest;
+        private final List<String> breaks = new ArrayList<>();
+        private final List<String> bad = new ArrayList<>();
+        private final java.util.Set<BlockPos> first = new java.util.HashSet<>();
+        private final List<BlockPos> stair = new ArrayList<>();
+        @Nullable
+        private BlockPos door;
+        private int footY = Integer.MIN_VALUE;
+        /** 0 first descent, 1 climb (bag full), 2 back down, 3 called up, 4 sent down again. */
+        private int stage;
+        private final java.util.Set<BlockPos>[] walked;
+        private final String[] took = new String[5];
+
+        @SuppressWarnings("unchecked")
+        EscaleraReal(ServerWorld world) {
+            super("escalera-real", world, 5400);
+            o = new BlockPos(8450, 100, 0);
+            load(world, o.add(4, 0, 0), 40);
+            fill(world, o.add(-16, -16, -10), o.add(26, -2, 10), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-16, -1, -10), o.add(26, -1, 10), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-16, 0, -10), o.add(26, 8, 10), Blocks.AIR.getDefaultState());
+            // ore past the foot of the staircase it will cut to the east (coal lies at 92 here: eight below the grass)
+            fill(world, o.add(11, -8, -1), o.add(16, -7, 1), Blocks.GOLD_ORE.getDefaultState());
+            fill(world, o.add(17, -8, -1), o.add(19, -7, 1), Blocks.COAL_ORE.getDefaultState());
+            BlockPos h = o.add(-9, 0, 0);
+            world.setBlockState(h.add(0, 0, 3), Blocks.RED_BED.getDefaultState().with(net.minecraft.block.BedBlock.FACING, Direction.EAST)
+                    .with(net.minecraft.block.BedBlock.PART, net.minecraft.block.enums.BedPart.FOOT), 2);
+            world.setBlockState(h.add(1, 0, 3), Blocks.RED_BED.getDefaultState().with(net.minecraft.block.BedBlock.FACING, Direction.EAST)
+                    .with(net.minecraft.block.BedBlock.PART, net.minecraft.block.enums.BedPart.HEAD), 2);
+            v = villager(world, o, Direction.EAST, "Nico Escalera");
+            v.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            var inv = v.getInventory();
+            inv.setStack(0, new ItemStack(Items.IRON_PICKAXE));
+            inv.setStack(1, new ItemStack(Items.IRON_PICKAXE));
+            inv.setStack(2, new ItemStack(Items.IRON_SWORD));
+            inv.setStack(3, new ItemStack(Items.TORCH, 40));
+            inv.setStack(4, new ItemStack(Items.BREAD, 16));
+            // a bag nearly full of last trip's gold: three free slots, the rock and the ore fill them below
+            for (int i = 5; i < inv.size() - 3; i++) {
+                inv.setStack(i, new ItemStack(Items.RAW_GOLD, 64));
+            }
+            chest = chestFor(world, v, h.add(0, 0, -2));
+            p = fakePlayer(world, "Prueba_Escalera", Vec3d.ofBottomCenter(h.add(0, 0, -4)));
+            ProspectingTask.want(v, "coal");
+            v.getVillagerBrain().assignJob(net.mca.entity.ai.Chore.PROSPECT, p);
+            task = ProspectingTask.of(v);
+            task.setFood(20);
+            task.setNoche(false);
+            walked = new java.util.Set[5];
+            for (int i = 0; i < 5; i++) {
+                walked[i] = new java.util.HashSet<>();
+            }
+            net.mca.entity.ai.body.Toques.escuchar(v, (pos, placed, now) -> {
+                if (!placed) {
+                    heard(pos);
+                }
+            });
+        }
+
+        private void heard(BlockPos pos) {
+            String f = task.fase();
+            String line = pos.toShortString() + " en " + f + " (etapa " + stage + ", " + Retina.memory(v).doing() + ")";
+            if (breaks.size() < 400) {
+                breaks.add(line);
+            }
+            if (door == null) {
+                return; // the first descent: all of it is new ground
+            }
+            if (ownColumn(pos) || f.equals("SEEK") && pos.getY() <= footY + 1) {
+                return; // its own stair or tunnel, or the work level down at the face
+            }
+            for (BlockPos s : stair) {
+                if (Math.abs(s.getX() - pos.getX()) <= 3 && Math.abs(s.getY() - pos.getY()) <= 3 && Math.abs(s.getZ() - pos.getZ()) <= 3) {
+                    bad.add(line + " junto al escalón " + s.toShortString());
+                    MCA.LOGGER.error("PRUEBA escalera-real: rompió " + line + " a menos de 3 de su escalera (" + s.toShortString() + ")");
+                    return;
+                }
+            }
+        }
+
+        /** A cell of its own trail (or the two of headroom over it): the stair it cut first, or the deep part it has since. */
+        private boolean ownColumn(BlockPos pos) {
+            for (int up = 0; up <= 2; up++) {
+                BlockPos c = pos.down(up);
+                if (first.contains(c)) {
+                    return true;
+                }
+            }
+            List<BlockPos> now = task.minaCeldas();
+            for (BlockPos c : now) {
+                if (c.getY() <= footY + 1 && c.getX() == pos.getX() && c.getZ() == pos.getZ() && pos.getY() - c.getY() >= 0 && pos.getY() - c.getY() <= 2) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private int onStair(int s) {
+            int n = 0;
+            for (BlockPos c : stair) {
+                if (walked[s].contains(c)) {
+                    n++;
+                }
+            }
+            return n;
+        }
+
+        private boolean atFace() {
+            return task.fase().equals("SEEK") && v.getBlockY() <= footY + 1 && Entorno.bajoTierra(world, v);
+        }
+
+        private int gold() {
+            var inv = Cofres.inventory(world, chest);
+            return inv == null ? 0 : Cofres.contents(inv).getOrDefault("minecraft:raw_gold", 0);
+        }
+
+        @Override
+        Boolean step() {
+            if (!v.isAlive()) {
+                fail(name, "el minero murió; " + state());
+                return Boolean.FALSE;
+            }
+            if (v.getVillagerBrain().getCurrentJob() != net.mca.entity.ai.Chore.PROSPECT) {
+                fail(name, "se desconectó; " + state());
+                return Boolean.FALSE;
+            }
+            if (!bad.isEmpty()) {
+                fail(name, "cavó junto a su propia escalera en vez de usarla: " + bad.size() + " bloques, el primero " + bad.get(0) + "; " + state());
+                return Boolean.FALSE;
+            }
+            String f = task.fase();
+            if (ticks % 200 == 0) {
+                MCA.LOGGER.info("PRUEBA escalera-real t=" + ticks + ": " + state());
+            }
+            BlockPos feet = v.getBlockPos().toImmutable();
+            walked[stage].add(feet);
+            String via = task.viaDe();
+            if (!via.isEmpty() && took[stage] == null) {
+                took[stage] = via;
+            }
+            switch (stage) {
+                case 0 -> {
+                    if (f.equals("HOME_UP")) {
+                        List<BlockPos> cells = task.minaCeldas();
+                        door = task.minaEntrada();
+                        for (BlockPos c : cells) {
+                            footY = footY == Integer.MIN_VALUE ? c.getY() : Math.min(footY, c.getY());
+                        }
+                        first.addAll(cells);
+                        for (BlockPos c : cells) {
+                            if (door != null && c.getY() > footY && c.getY() < door.getY()) {
+                                stair.add(c);
+                            }
+                        }
+                        MCA.LOGGER.info("PRUEBA escalera-real: bolsa llena en " + ticks + " ticks, su escalera: boca " + (door == null ? "?" : door.toShortString())
+                                + ", " + stair.size() + " escalones hasta y=" + footY + ", " + cells.size() + " pasos; " + breaks.size() + " bloques rotos al bajar");
+                        if (door == null || stair.size() < 4) {
+                            fail(name, "no cavó una escalera propia desde la hierba (boca " + door + ", " + stair.size() + " escalones); " + state());
+                            return Boolean.FALSE;
+                        }
+                        stage = 1;
+                    }
+                }
+                case 1 -> {
+                    if (f.equals("RETURN")) {
+                        stage = 2;
+                    }
+                }
+                case 2 -> {
+                    if (atFace()) {
+                        MCA.LOGGER.info("PRUEBA escalera-real: de vuelta en el frente en " + ticks + " ticks; lo llaman a casa");
+                        ProspectingTask.callHome(v, false);
+                        stage = 3;
+                    }
+                }
+                case 3 -> {
+                    if (f.equals("REST")) {
+                        ProspectingTask.backToWork(v);
+                    } else if (f.equals("RETURN") && walked[3].stream().anyMatch(c -> c.getY() >= o.getY())) {
+                        stage = 4;
+                    }
+                }
+                default -> {
+                    if (atFace()) {
+                        int need = Math.max(2, stair.size() / 2);
+                        boolean same = door.equals(task.minaEntrada());
+                        boolean reused = onStair(1) >= need && onStair(2) >= need && onStair(3) >= need && onStair(4) >= need;
+                        boolean passed = same && reused && gold() > 0;
+                        check(name, passed, "su escalera de " + stair.size() + " escalones (boca " + door.toShortString() + ", la misma: " + same
+                                + "), pisada al subir " + onStair(1) + ", al bajar " + onStair(2) + ", al subir otra vez " + onStair(3)
+                                + ", al bajar otra vez " + onStair(4) + " (mínimo " + need + "), por " + java.util.Arrays.toString(took)
+                                + ", 0 bloques junto a ella, oro en el cofre " + gold() + ", " + breaks.size() + " bloques rotos en total, en " + ticks + " ticks; " + state());
+                        return passed;
+                    }
+                }
+            }
+            return null;
+        }
+
+        @Override
+        String state() {
+            return "etapa " + stage + ", en " + v.getBlockPos().toShortString() + ", trabajo " + v.getVillagerBrain().getCurrentJob() + ", fase " + task.fase()
+                    + ", haciendo: " + Retina.memory(v).doing() + ", tarea " + task.debug() + ", libres " + ProspectingTask.espacioLibre(v)
+                    + ", rotos " + breaks.size() + (breaks.isEmpty() ? "" : " (último " + breaks.get(breaks.size() - 1) + ")");
+        }
+
+        @Override
+        void cleanup() {
+            net.mca.entity.ai.body.Toques.escuchar(v, null);
+            ProspectingTask.want(v, null);
+            v.getVillagerBrain().abandonJob();
+            net.mca.entity.ai.body.Mina.forget(world, v.getUuid());
+            net.mca.entity.ai.mente.Recuerdos.olvidar(world, v);
+            world.setBlockState(chest, Blocks.AIR.getDefaultState(), 3);
+            net.mca.server.world.data.TropelesMundo.get(world).removed(chest);
+            v.discard();
+        }
+    }
+
+    /**
+     * Back from home it stops on the grass beside the mouth of its own staircase, not on it: it must walk down that
+     * staircase to its work face, breaking nothing, not start a new one where it stands.
+     */
+    private static final class BajadaLado extends Scenario {
+        private final ProspectingTask task = new ProspectingTask();
+        private final VillagerEntityMCA miner;
+        private final BlockPos o;
+        private final BlockPos face;
+        private final BlockPos boxA;
+        private final BlockPos boxB;
+        private final boolean[] before;
+        private boolean returned;
+
+        BajadaLado(ServerWorld world) {
+            super("bajada-lado", world, 1400);
+            o = new BlockPos(8700, 100, 0);
+            load(world, o, 24);
+            fill(world, o.add(-12, -12, -8), o.add(16, -2, 8), Blocks.STONE.getDefaultState());
+            fill(world, o.add(-12, -1, -8), o.add(16, -1, 8), Blocks.GRASS_BLOCK.getDefaultState());
+            fill(world, o.add(-12, 0, -8), o.add(16, 6, 8), Blocks.AIR.getDefaultState());
+            List<BlockPos> trail = MinaGuardada.minaHecha(world, o);
+            face = trail.get(trail.size() - 1);
+            boxA = o.add(-12, -12, -8);
+            boxB = o.add(16, 6, 8);
+            before = airIn(world, boxA, boxB);
+            miner = villager(world, o.add(1, 0, 1), Direction.EAST, "Teo Bajada");
+            miner.getBrain().forget(MemoryModuleTypeMCA.STAYING.get());
+            miner.getInventory().addStack(new ItemStack(Items.STONE_PICKAXE));
+            miner.getInventory().addStack(new ItemStack(Items.COBBLESTONE, 16));
+            miner.getInventory().addStack(new ItemStack(Items.BREAD, 8));
+            miner.getInventory().addStack(new ItemStack(Items.TORCH, 8));
+            task.setHome(o.add(-10, 0, 0));
+            task.setFood(20);
+            task.setNoche(false);
+            task.setMina(VueltaEscalera.minaDe(trail, Direction.EAST.getHorizontal()));
+        }
+
+        @Override
+        Boolean step() {
+            if (!miner.isAlive()) {
+                fail(name, "el minero murió; " + state());
+                return Boolean.FALSE;
+            }
+            task.practice(world, miner);
+            returned |= task.fase().equals("RETURN");
+            if (ticks % 100 == 0) {
+                MCA.LOGGER.info("PRUEBA bajada-lado t=" + ticks + ": " + state());
+            }
+            int[] changed = changedIn(world, boxA, boxB, before);
+            if (changed[0] > 0) {
+                fail(name, "rompió " + changed[0] + " bloques en vez de bajar por su escalera de al lado; " + state());
+                return Boolean.FALSE;
+            }
+            if (miner.getPos().distanceTo(Vec3d.ofBottomCenter(face)) > 1.5) {
+                return null;
+            }
+            boolean passed = returned && o.equals(task.minaEntrada());
+            check(name, passed, "bajó por su escalera desde la hierba de al lado hasta su frente en " + ticks + " ticks, de vuelta: " + returned
+                    + ", bloques rotos " + changed[0] + "; " + state());
+            return passed;
+        }
+
+        @Override
+        String state() {
+            return "en " + miner.getBlockPos().toShortString() + ", fase " + task.fase() + ", haciendo: " + Retina.memory(miner).doing()
+                    + ", tarea " + task.debug();
+        }
+
+        @Override
+        void cleanup() {
+            net.mca.entity.ai.mente.Recuerdos.olvidar(world, miner);
+            miner.discard();
         }
     }
 

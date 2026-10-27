@@ -23,7 +23,7 @@ import org.jetbrains.annotations.Nullable;
  * and leave it alone for a while;</li>
  * <li>{@link Remedio#APARTARSE}: a step to a free cell beside it;</li>
  * <li>{@link Remedio#CAVAR}: boxed in, it digs toward the nearest open cell it remembers walking ({@link Recuerdos}),
- * or up toward the sky;</li>
+ * or a step up ahead (its task first looks for a way on foot to where it was going: digging is for a real box);</li>
  * <li>{@link Remedio#AYUDA}: it asks for help in the chat, with its exact coordinates, and starts over at the second
  * remedy.</li>
  * </ol>
@@ -184,9 +184,13 @@ public final class Atasco {
         return best;
     }
 
-    /** Where to dig to when boxed in: the nearest open cell it remembers walking (out first), or three blocks up. */
+    /**
+     * Where to dig to when boxed in: the nearest open cell it remembers walking, or a step up ahead. Never the nearest
+     * cell out on the land: that was a whole staircase of its own cut toward the sky, right beside the one it came down
+     * by (and the way out is the caller's to find without digging first).
+     */
     public static BlockPos salidaCavando(ServerWorld world, BlockPos feet, @Nullable Recuerdos recuerdos, Direction facing) {
-        BlockPos open = recuerdos == null ? null : recuerdos.abiertoCerca(world, feet, 16, true);
+        BlockPos open = recuerdos == null ? null : recuerdos.abiertoCerca(world, feet, 16, false);
         if (open != null) {
             return open;
         }

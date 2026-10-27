@@ -1,6 +1,7 @@
 package net.mca.entity.ai.sense;
 
 import net.mca.entity.VillagerEntityMCA;
+import net.mca.entity.ai.body.Mining;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.MapColor;
 import net.minecraft.entity.Entity;
@@ -39,6 +40,11 @@ import java.util.zip.Deflater;
  * above the column's highest block), and a block is taken as a whole cube: the picture is a map-coloured
  * sketch, not the exact outline view of the {@link Retina}. Blocks with no body (grass, flowers, torches) and
  * clear ones (glass) are looked through. 160x90 is 14,400 rays.
+ * <p>
+ * Drawn to be read by a vision model, the way a player reads the game: every block face carries a faint texture
+ * of its own (so the grid of blocks shows), ores keep the colour of their specks (iron tan, diamond cyan...), a lit
+ * torch or lantern is a small bright dot, the outlines where the depth jumps are drawn dark (where one thing stands
+ * in front of another), and a small crosshair marks where the eye points.
  */
 public final class Foto {
     /** Larger pictures are refused. */
@@ -91,6 +97,7 @@ public final class Foto {
         BlockPos.Mutable cell = new BlockPos.Mutable();
         BlockPos.Mutable from = new BlockPos.Mutable();
         int[] out = new int[w * h];
+        double[] depth = new double[w * h];
         for (int row = 0; row < h; row++) {
             double v = (1.0 - (row + 0.5) / h * 2.0) * tanV;
             for (int col = 0; col < w; col++) {
@@ -103,14 +110,90 @@ public final class Foto {
                 dy /= len;
                 dz /= len;
                 int i = row * w + col;
-                out[i] = ray(world, eye, dx, dy, dz, range, night, sky, bottom, top, cell, from, bodyT[i], bodyColor[i]);
+                out[i] = ray(world, eye, dx, dy, dz, range, night, sky, bottom, top, cell, from, bodyT[i], bodyColor[i], depth, i);
             }
         }
+        outline(out, depth, w, h);
+        crosshair(out, w, h);
         return out;
     }
 
+    /** Dark lines where the depth jumps: the edge of one thing in front of another, the horizon, a body's outline. */
+    static void outline(int[] rgb, double[] depth, int w, int h) {
+        boolean[] edge = new boolean[w * h];
+        for (int row = 0; row < h; row++) {
+            for (int col = 0; col < w; col++) {
+                int i = row * w + col;
+                double d = depth[i];
+                if (col + 1 < w && jump(d, depth[i + 1])) {
+                    edge[Double.isInfinite(d) || d > depth[i + 1] ? i + 1 : i] = true;
+                }
+                if (row + 1 < h && jump(d, depth[i + w])) {
+                    edge[Double.isInfinite(d) || d > depth[i + w] ? i + w : i] = true;
+                }
+            }
+        }
+        for (int i = 0; i < rgb.length; i++) {
+            if (edge[i]) {
+                rgb[i] = scale(rgb[i], 0.55);
+            }
+        }
+    }
+
+    private static boolean jump(double a, double b) {
+        if (Double.isInfinite(a) || Double.isInfinite(b)) {
+            return Double.isInfinite(a) != Double.isInfinite(b);
+        }
+        return Math.abs(a - b) > Math.max(0.75, 0.12 * Math.min(a, b));
+    }
+
+    /** A small plus in the middle, drawn inverted like the game's own. */
+    static void crosshair(int[] rgb, int w, int h) {
+        int cx = w / 2;
+        int cy = h / 2;
+        int arm = Math.max(2, Math.min(w, h) / 40);
+        for (int k = -arm; k <= arm; k++) {
+            invert(rgb, w, h, cx + k, cy);
+            if (k != 0) {
+                invert(rgb, w, h, cx, cy + k);
+            }
+        }
+    }
+
+    private static void invert(int[] rgb, int w, int h, int x, int y) {
+        if (x >= 0 && y >= 0 && x < w && y < h) {
+            rgb[y * w + x] = 0xFFFFFF - rgb[y * w + x];
+        }
+    }
+
+    /** A faint shade of its own for each block, from its position: the grid of blocks shows, like textures do. */
+    private static double texture(int x, int y, int z) {
+        int hsh = x * 73856093 ^ y * 19349663 ^ z * 83492791;
+        hsh ^= hsh >>> 13;
+        return 0.93 + (hsh & 15) / 15.0 * 0.14;
+    }
+
+    /** The colour of an ore's specks, mixed into the stone it sits in; -1 for anything else. */
+    private static int oreColor(BlockState state) {
+        if (!Mining.isOre(state)) {
+            return -1;
+        }
+        return switch (Escena.oreKey(state)) {
+            case "coal" -> 0x1A1A1A;
+            case "iron" -> 0xD8AF93;
+            case "copper" -> 0xE0734D;
+            case "gold" -> 0xFCEE4B;
+            case "redstone" -> 0xE01010;
+            case "lapis" -> 0x1F4FBF;
+            case "diamond" -> 0x5DECF5;
+            case "emerald" -> 0x17DD62;
+            case "quartz" -> 0xEDE6DC;
+            default -> 0xB050B0;
+        };
+    }
+
     private static int ray(ServerWorld world, Vec3d eye, double dx, double dy, double dz, double range, boolean night, int sky,
-                           int bottom, int top, BlockPos.Mutable cell, BlockPos.Mutable from, double bodyT, int bodyColor) {
+                           int bottom, int top, BlockPos.Mutable cell, BlockPos.Mutable from, double bodyT, int bodyColor, double[] depth, int index) {
         int x = (int) Math.floor(eye.x);
         int y = (int) Math.floor(eye.y);
         int z = (int) Math.floor(eye.z);
@@ -174,8 +257,26 @@ public final class Foto {
                         if (!stop && fluid.getBlockState().getBlock() != state.getBlock() && state.blocksMovement()) {
                             MapColor map = state.getMapColor(world, cell);
                             if (map != MapColor.CLEAR && map.color != 0) {
-                                color = map.color;
+                                color = scale(map.color, texture(x, y, z));
+                                int ore = oreColor(state);
+                                if (ore >= 0) {
+                                    color = mix(color, ore, 0.6);
+                                }
                                 stop = true;
+                            }
+                        } else if (!stop && state.getLuminance() >= 10 && !state.blocksMovement() && fluid.isEmpty()) {
+                            // a torch, a lantern: a small bright dot where the ray passes close to its flame
+                            double tx = x + 0.5 - eye.x;
+                            double ty = y + 0.45 - eye.y;
+                            double tz = z + 0.5 - eye.z;
+                            double along = tx * dx + ty * dy + tz * dz;
+                            double ox = tx - dx * along;
+                            double oy = ty - dy * along;
+                            double oz = tz - dz * along;
+                            if (along > 0 && ox * ox + oy * oy + oz * oz < 0.2 * 0.2) {
+                                hitT = along;
+                                color = 0xFFD24A;
+                                break;
                             }
                         }
                         if (stop) {
@@ -218,6 +319,7 @@ public final class Foto {
             color = bodyColor;
             hitT = bodyT;
         }
+        depth[index] = color < 0 ? Double.POSITIVE_INFINITY : hitT;
         if (color < 0) {
             if (under && water == 0 && !night) {
                 return 0x050505; // the far end of a cave: no sky down here, only the dark
