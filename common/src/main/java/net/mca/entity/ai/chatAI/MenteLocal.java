@@ -375,13 +375,33 @@ public final class MenteLocal {
         String name = Acciones.normalize(villagerName).trim().replaceAll("\\s+", " ");
         String stripped = removeFirst(text, name);
         if (stripped.equals(text)) {
+            // one word of the name ("Rosa" of "Rosa Mente") is the name only when it is said as one: never after an
+            // article, a possessive or a verb that makes it a plain word ("tu escalera", "está oscuro", "la mina")
             for (String part : name.split(" ")) {
                 if (part.length() >= 2) {
-                    stripped = removeFirst(stripped, part);
+                    stripped = removeAddressed(stripped, part);
                 }
             }
         }
         return stripped.replaceAll("\\s+", " ").trim();
+    }
+
+    /** Words after which a name's word is just a word of the sentence, not someone being called. */
+    private static final Pattern NOT_A_NAME_BEFORE = Pattern.compile("(?<![\\p{L}\\p{N}])(tu|tus|mi|mis|su|sus|el|la|los|las|un|una|unos|unas|"
+            + "esta|estas|este|es|muy|tan|que|de|del|al|en|hay|ves|the|your|my|his|her|a|an|is|it's|its|very|so|of|any|some)\\s*$");
+
+    private static String removeAddressed(String text, String word) {
+        if (word.isEmpty()) {
+            return text;
+        }
+        Matcher m = Pattern.compile("(?<![\\p{L}\\p{N}])" + Pattern.quote(word) + "(?![\\p{L}\\p{N}])").matcher(text);
+        while (m.find()) {
+            String before = text.substring(0, m.start()).replaceAll("[^\\p{L}\\p{N}' ]", " ").trim();
+            if (!NOT_A_NAME_BEFORE.matcher(before).find()) {
+                return text.substring(0, m.start()) + " " + text.substring(m.end());
+            }
+        }
+        return text;
     }
 
     private static String removeFirst(String text, String word) {

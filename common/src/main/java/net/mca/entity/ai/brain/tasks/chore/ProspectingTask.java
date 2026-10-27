@@ -372,6 +372,12 @@ public class ProspectingTask extends AbstractChoreTask {
     private int restTicks;
     /** Digging toward an enemy it cannot walk to: ticks so far, the tick it last got closer, failed steps. */
     private int digTicks;
+    /**
+     * The enemy it is digging through to. Its face to the block it breaks, the enemy can drop out of its view for a
+     * moment; a player still knows it is there behind that block, so the dig goes on.
+     */
+    @Nullable
+    private LivingEntity digTarget;
     private int digGain;
     private int digFails;
     private double digClosest;
@@ -4564,7 +4570,14 @@ public class ProspectingTask extends AbstractChoreTask {
 
     private void fight(ServerWorld world, VillagerEntityMCA villager) {
         LivingEntity target = CombatMind.pickTarget(world, villager, null, 12);
+        if (target == null && digTicks > 0 && digTarget != null && digTarget.isAlive() && !digTarget.isRemoved() && digTarget.getWorld() == world
+                && digTarget.squaredDistanceTo(villager) < 16 * 16 && !CombatMind.ignoring(villager, digTarget)) {
+            // looking at the rock it breaks it does not see the enemy behind it, but it knows where it is
+            target = digTarget;
+        }
         if (target == null) {
+            digTicks = 0;
+            digTarget = null;
             Recuerdos.anotar(villager, "pelea", "terminé la pelea, no queda nada que me ataque", villager.getBlockPos());
             // nothing left to fight: what it dropped (nobody eats rotten flesh), and back to what it was doing
             CombatMind.disengage(villager);
@@ -4625,6 +4638,7 @@ public class ProspectingTask extends AbstractChoreTask {
             MCA.LOGGER.info("[Tropeles] {} no llega a {} caminando: cava hacia él", name(), target.getName().getString());
         }
         digTicks++;
+        digTarget = target;
         if (distance < digClosest - 0.5) {
             digClosest = distance;
             digGain = digTicks;
