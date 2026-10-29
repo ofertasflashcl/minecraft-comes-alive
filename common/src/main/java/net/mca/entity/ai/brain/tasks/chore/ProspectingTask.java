@@ -2594,8 +2594,11 @@ public class ProspectingTask extends AbstractChoreTask {
         boolean noFood = foodPoints(villager.getInventory()) == 0;
         if (trip == Trip.FOOD && noFood && food < EAT_BELOW) {
             nextFoodTrip = now + 6000;
-            if (!foraged && !world.isNight() && (foodKnown(world, villager) || food <= GO_HOME_BELOW)) {
-                // starving: it looks for something out there (animals, berries) even if it saw nothing yet
+            // starving and ripe berries in sight right here: those too (never instead of a night's sleep, never a blind
+            // search that wanders back into its mine); otherwise only food it knows of, as before
+            if (!foraged && !world.isNight() && (foodKnown(world, villager)
+                    || food <= GO_HOME_BELOW && !wantsSleep(world, villager) && Mining.onSurface(world, villager.getBlockPos())
+                    && seenBerries(villager, Retina.memory(villager)) != null)) {
                 say("chore.mining.forage");
                 startForage();
                 return;
