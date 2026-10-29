@@ -32,6 +32,11 @@ public final class Toques {
     public static final int STEP = 1;
     public static final int PILLAR = 2;
     public static final int DIG = 3;
+    /**
+     * Its own crafting table or furnace set down to work at and picked up again (in a one-wide staircase that is a cell
+     * of the stair itself, dug a moment before): its gear, never a sign of a loop.
+     */
+    public static final int GEAR = 4;
     /** Touches kept at most: older ones are forgotten first. */
     private static final int KEEP = 256;
 
@@ -207,7 +212,7 @@ public final class Toques {
     private static int count(Memoria m, long key, long now) {
         int count = 0;
         for (Toque t : m.toques) {
-            if (t.pos() == key && t.kind != PILLAR && now - t.at() <= LOOP_WINDOW) {
+            if (t.pos() == key && t.kind != PILLAR && t.kind != GEAR && now - t.at() <= LOOP_WINDOW) {
                 count++;
             }
         }

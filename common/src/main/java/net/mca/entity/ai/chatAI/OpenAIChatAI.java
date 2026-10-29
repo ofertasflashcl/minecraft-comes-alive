@@ -395,7 +395,7 @@ public class OpenAIChatAI implements ChatAIStrategy {
         List<Pair<String, String>> history = history(villager.getUuid(), player.getUuid());
 
         // the language: what the words say (its own name aside); when they do not say ("ok", "sube"), the game's, else Spanish
-        boolean es = MenteLocal.speaksSpanish(msg, villagerName);
+        boolean es = MenteLocal.speaksSpanish(msg, villagerName, player.getUuid());
 
         // 1. the villager's own mind reads the message, without its name in it; a clear order is carried out right now
         MenteLocal.Intent read = MenteLocal.read(msg, villagerName);
@@ -503,8 +503,9 @@ public class OpenAIChatAI implements ChatAIStrategy {
         String context = ("\nWho you are: " + who + "\nWhere you are and what you see: " + world)
                 .replace("$player", playerName).replace("$villager", villagerName);
 
-        String speech = "\nWrite your message in " + (es ? "Spanish" : "English") + ", the language " + playerName + " writes in"
-                + (es ? " (a natural, casual Spanish like a Chilean player's is fine)" : "") + ". "
+        String speech = "\nWrite your message ONLY in " + (es ? "Spanish" : "English") + ", the language " + playerName + " writes in"
+                + (es ? " (a natural, casual Spanish like a Chilean player's is fine; slang such as \"q onda\", \"wena\", \"po\" or \"cachai\" is Spanish)" : "")
+                + ", even if earlier lines of this conversation were in another language. "
                 + "One or two short sentences, at most about 25 words, like a line in a game chat. ";
 
         StringBuilder orders = new StringBuilder("\n\n");
@@ -560,7 +561,8 @@ public class OpenAIChatAI implements ChatAIStrategy {
                 + " the way another player would in the game chat: natural, in character, with your own personality and mood; "
                 + "you can be warm, funny, sarcastic or blunt. No emojis, no lists, no narrating actions between asterisks. "
                 + "You only know what you have seen, carry and done yourself: never invent items, places or deeds, and when you "
-                + "do not know something, say so. Keep to what was said before in this conversation.";
+                + "do not know something, say so. Never invent reasons or feelings for what you did: when asked why, give the real reasons "
+                + "from your decisions and thoughts below, or say you are not sure. Keep to what was said before in this conversation.";
         List<Cerebros.Mind> minds = Cerebros.chain(playerName);
         // a question about what it sees: a picture of its view for the minds that can look at one
         String image = !offline && Vistazo.aboutSight(intent) && Cerebros.anyCanLook(minds) ? Vistazo.foto(villager) : null;

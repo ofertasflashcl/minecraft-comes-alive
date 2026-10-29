@@ -186,6 +186,8 @@ public class ProspectingTask extends AbstractChoreTask {
     /** The checks set its mine ({@link #setMina}): the first start keeps it. */
     private boolean minaDada;
     private Mina mina = new Mina();
+    /** The cells of its trail's own columns (see {@link Mina#column}), whatever trail it has now. */
+    private final java.util.function.Predicate<BlockPos> trailCells = cell -> mina.column(cell);
     @Nullable
     private BlockPos ore;
     private int oreFails;
@@ -314,6 +316,16 @@ public class ProspectingTask extends AbstractChoreTask {
     private String viaDe = "";
     /** Its own trail (the crumbs of its mine) was already tried as the way out this trip. */
     private boolean trailTried;
+    /**
+     * Up its own trail backwards, reopening only the cells of the trail's own columns where something shut them (gravel,
+     * its own table or furnace, a missing ceiling cell for the jump), before any new staircase: never one beside it.
+     */
+    private boolean trailDig;
+    /** That was started once this trip already (a second time it is its own new staircase). */
+    private boolean trailDigTried;
+    /** The crumb it last stood on while going up its trail that way, and the steps that failed since. */
+    private int trailDigIdx;
+    private int trailDigFails;
     /** It said it cannot find the way home this trip (it keeps trying, connected). */
     private boolean lostSaid;
     /** A way on foot ({@link #aPie}) looked for and not found: from where, to where and when, so it is not looked for every tick. */
@@ -365,6 +377,12 @@ public class ProspectingTask extends AbstractChoreTask {
     /** The forage it is on is for provisions before going down, not because it is hungry. */
     private boolean provisioning;
     private long lastHuntSay = -1200;
+    /** When it last asked a player for something to eat, starving with nothing in the bag. */
+    private long lastFoodAsk = -2400;
+    /** A ripe sweet berry bush it saw while looking for food, and the ticks spent getting to it. */
+    @Nullable
+    private BlockPos berries;
+    private int berryTicks;
     private long foodKnownAt = -1000;
     private boolean foodKnownCache;
 
@@ -1115,8 +1133,29 @@ public class ProspectingTask extends AbstractChoreTask {
             healTicks = 0;
         }
         if ((villager.age % 20) == 0 && phase != Phase.FIGHT && (food <= EAT_BELOW || health < max * 0.5F && food < HEAL_ABOVE)) {
-            eatBest(world, villager);
+            if (!eatBest(world, villager) && food < GO_HOME_BELOW) {
+                askForFood(world, villager);
+            }
         }
+    }
+
+    /**
+     * Starving with nothing in the bag: never quiet about it. A player within earshot is asked, every two minutes at
+     * most, like a hungry friend would.
+     */
+    private void askForFood(ServerWorld world, VillagerEntityMCA villager) {
+        long now = world.getTime();
+        if (now - lastFoodAsk < 2400) {
+            return;
+        }
+        net.minecraft.entity.player.PlayerEntity near = world.getClosestPlayer(villager, 32.0);
+        if (near == null || near.isSpectator()) {
+            return;
+        }
+        lastFoodAsk = now;
+        MCA.LOGGER.info("[Tropeles] {} tiene hambre (comida {}) y nada que comer: le pide comida a {}", name(), food, near.getName().getString());
+        Voluntad.contar(villager, "Tengo hambre, ¿me das algo de comer?", "I'm hungry, could you give me something to eat?",
+                "comida " + food + " de " + FOOD_MAX + " y nada para comer en la mochila");
     }
 
     /** Eats the most filling everyday food it carries (cooked before raw). False when it has nothing to eat. */
@@ -1527,6 +1566,9 @@ public class ProspectingTask extends AbstractChoreTask {
         viaFails = 0;
         viaUsadas.clear();
         trailTried = false;
+        trailDig = false;
+        trailDigTried = false;
+        trailDigFails = 0;
         lostSaid = false;
         intentos.clear();
         climbFromIdx = mina.nearLow(world, feet);
@@ -1641,6 +1683,10 @@ public class ProspectingTask extends AbstractChoreTask {
             surfaced(world, villager);
             return;
         }
+        if (trailDig) {
+            trailDigStep(world, villager, feet, memory, now);
+            return;
+        }
         BlockPos goal = null;
         if (viaMemoria) {
             goal = nextVia(feet);
@@ -1663,6 +1709,9 @@ public class ProspectingTask extends AbstractChoreTask {
             if (wayOut(world, villager, feet, mina.nearLow(world, feet))) {
                 goal = nextVia(feet);
             }
+        }
+        if (trailDig) {
+            return; // up its own trail from the next tick on: nothing dug toward a staircase of its own meanwhile
         }
         if (goal == null) {
             if (plan.isEmpty()) {
@@ -1788,6 +1837,7 @@ public class ProspectingTask extends AbstractChoreTask {
         via.clear();
         via.addAll(way);
         viaMemoria = true;
+        trailDig = false;
         viaDestino = to;
         viaDe = de;
         viaPaso = false;
@@ -2058,17 +2108,23 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         if (phase == Phase.HOME_UP) {
             Voluntad.contar(villager, "Por donde vine está tapado. Cavo una escalera nueva hacia arriba.",
-                    "The way I came is blocked. I'll dig a new staircase up.");
+                    "The way I came is blocked. I'll dig a new staircase up.",
+                    intentos.isEmpty() ? null : "probé: " + String.join("; ", intentos));
             startFallback(world, villager, feet, mina.nearLow(world, feet));
         }
     }
 
     private void startFallback(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, int fromIdx) {
+        if (!fallback && !trailDig && !trailDigTried && phase == Phase.HOME_UP && startTrailDig(world, villager, feet)) {
+            return; // its own trail, opened where it is shut, before a staircase of its own
+        }
+        trailDig = false;
         if (!fallback) {
             MCA.LOGGER.info("[Tropeles] {} no recuerda otra salida desde {}: cava su propia escalera (probó: {})", name(), feet.toShortString(),
                     intentos.isEmpty() ? "nada" : String.join("; ", intentos));
             Voluntad.contar(villager, "No me acuerdo de otra salida desde aquí, así que cavo una escalera hacia arriba.",
-                    "I don't remember another way out from here, so I'll dig a staircase up.");
+                    "I don't remember another way out from here, so I'll dig a staircase up.",
+                    intentos.isEmpty() ? null : "probé: " + String.join("; ", intentos));
         }
         endVia();
         fallback = true;
@@ -2080,6 +2136,85 @@ public class ProspectingTask extends AbstractChoreTask {
         // height is the measure now, not the trail; the rounds already lost still count
         bestProgress = Double.NEGATIVE_INFINITY;
         stuckTicks = 0;
+    }
+
+    /**
+     * No way out on foot, but it stands on (or by) its own trail: up that, backwards, crumb by crumb, digging only what
+     * shut the trail's own cells (the ceiling cell a jump up the next step needs, gravel that came down, its own table
+     * left on a step), like a player who clears his own staircase instead of cutting a second one beside it. True when
+     * it goes that way now.
+     */
+    private boolean startTrailDig(ServerWorld world, VillagerEntityMCA villager, BlockPos feet) {
+        trailDigTried = true;
+        if (mina.entrance() == null || mina.size() < 2) {
+            return false;
+        }
+        int at = mina.nearLowAny(feet);
+        if (at <= 0) {
+            return false;
+        }
+        BlockPos shut = null;
+        for (int k = at; k >= 0 && shut == null; k--) {
+            BlockPos c = mina.crumb(k);
+            if (!mina.open(world, k) || k > 0 && !Mining.passable(world, c.up(2)) && mina.crumb(k - 1).getY() > c.getY()) {
+                shut = c;
+            }
+        }
+        endVia();
+        plan.clear();
+        if (!motor.midStep(villager)) {
+            motor.reset(world, villager);
+        }
+        trailDig = true;
+        trailDigIdx = at;
+        trailDigFails = 0;
+        bestProgress = Double.NEGATIVE_INFINITY;
+        stuckTicks = 0;
+        String probo = intentos.isEmpty() ? "nada" : String.join("; ", intentos);
+        MCA.LOGGER.info("[Tropeles] {} sube por su propio camino desde {} ({} pasos hasta la boca {}), abriendo solo sus celdas{}: no cava otra escalera (probó: {})",
+                name(), feet.toShortString(), at, mina.entrance().toShortString(),
+                shut == null ? "" : " (cerrado en " + shut.toShortString() + ")", probo);
+        Voluntad.contar(villager, "Subo por mi propio camino; donde se tapó lo abro, no hace falta otra escalera.",
+                "I'll go up my own way; where it's blocked I'll clear it, no need for another staircase.",
+                "no había paso a pie sin cavar (" + probo + ")" + (shut == null ? "" : "; mi camino estaba tapado en " + shut.toShortString()));
+        return true;
+    }
+
+    /** One tick up its own trail that way ({@link #startTrailDig}). */
+    private void trailDigStep(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, VisualMemory memory, long now) {
+        if (!motor.midStep(villager)) {
+            int here = mina.indexOf(feet);
+            if (here >= 0 && here < trailDigIdx) {
+                trailDigIdx = here;
+            } else if (here < 0 && mina.nearLowAny(feet) < 0 && !feet.isWithinDistance(mina.crumb(Math.min(trailDigIdx, mina.size() - 1)), 2.5)) {
+                // pushed or fallen off its trail: the usual ways out from where it is now
+                MCA.LOGGER.info("[Tropeles] {} se salió de su camino en {}: busca otra forma de subir", name(), feet.toShortString());
+                trailDig = false;
+                wayOut(world, villager, feet, mina.nearLow(world, feet));
+                return;
+            }
+        }
+        int idx = Math.min(trailDigIdx, mina.size() - 1);
+        int next = feet.equals(mina.crumb(idx)) ? idx - 1 : idx;
+        if (next < 0) {
+            trailDig = false; // at the door of its mine: out
+            return;
+        }
+        BlockPos goal = mina.crumb(next);
+        memory.doing("subiendo por su propio camino, abriéndolo donde se tapó (" + next + " pasos)", now);
+        Motor.Result result = motor.stepWithin(world, villager, goal, true, trailCells);
+        if (result == Motor.Result.ARRIVED) {
+            trailDigIdx = next;
+            trailDigFails = 0;
+        } else if (result == Motor.Result.BLOCKED) {
+            motor.reset(world, villager);
+            if (++trailDigFails > 4) {
+                MCA.LOGGER.info("[Tropeles] {} no puede abrir su camino en {} (hacia {}): cava su propia escalera", name(), feet.toShortString(), goal.toShortString());
+                intentos.add("su propio camino, abriéndolo: no pasa de " + feet.toShortString());
+                trailDig = false;
+                startFallback(world, villager, feet, mina.nearLow(world, feet));
+            }
+        }
     }
 
     /** Where the next leg of the climb out aims: three up, and three toward home, to one side of it, or away. */
@@ -2459,7 +2594,8 @@ public class ProspectingTask extends AbstractChoreTask {
         boolean noFood = foodPoints(villager.getInventory()) == 0;
         if (trip == Trip.FOOD && noFood && food < EAT_BELOW) {
             nextFoodTrip = now + 6000;
-            if (!foraged && !world.isNight() && foodKnown(world, villager)) {
+            if (!foraged && !world.isNight() && (foodKnown(world, villager) || food <= GO_HOME_BELOW)) {
+                // starving: it looks for something out there (animals, berries) even if it saw nothing yet
                 say("chore.mining.forage");
                 startForage();
                 return;
@@ -3066,7 +3202,8 @@ public class ProspectingTask extends AbstractChoreTask {
             MCA.LOGGER.info("[Tropeles] {} encuentra su camino cerrado en {} y no hay paso a pie a su frente {}: abre su propio camino", name(),
                     goal.toShortString(), face.toShortString());
         }
-        Motor.Result result = motor.step(world, villager, goal, dig, dig);
+        // opening it, only its own cells: the trail's crumbs and the room over them, never a new way beside them
+        Motor.Result result = dig ? motor.stepWithin(world, villager, goal, true, trailCells) : motor.step(world, villager, goal, false, false);
         if (result == Motor.Result.ARRIVED) {
             returnFails = 0;
         } else if (result == Motor.Result.BLOCKED) {
@@ -3392,11 +3529,75 @@ public class ProspectingTask extends AbstractChoreTask {
                 return;
             }
         }
+        if (pickBerries(world, villager, memory, now)) {
+            noFoodTicks = 0;
+            return;
+        }
         if (++noFoodTicks > LOOK_FOR_FOOD) {
             finishForage(world, villager);
             return;
         }
         lookAround(world, villager, memory, now);
+    }
+
+    /**
+     * Ripe sweet berries it saw near it: walked up to and picked by hand (a player's right click: one or two berries,
+     * one more from a full bush, the bush left to grow again), then picked up. True while busy with them.
+     */
+    private boolean pickBerries(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now) {
+        if (berries == null && (villager.age % 20) == 7) {
+            berries = seenBerries(villager, memory);
+            berryTicks = 0;
+        }
+        if (berries == null) {
+            return false;
+        }
+        BlockState bush = world.getBlockState(berries);
+        if (!bush.isOf(Blocks.SWEET_BERRY_BUSH) || bush.get(net.minecraft.block.SweetBerryBushBlock.AGE) < 2 || ++berryTicks > 400) {
+            berries = null;
+            return false;
+        }
+        double reach = villager.getEyePos().distanceTo(Vec3d.ofCenter(berries));
+        if (reach > 3.0 || Retina.visibleFace(world, villager, berries, Retina.BLOCK_REACH) == null) {
+            if ((berryTicks % 20) == 1 || villager.getNavigation().isIdle()) {
+                villager.getNavigation().startMovingTo(berries.getX() + 0.5, berries.getY(), berries.getZ() + 0.5, 0.6);
+            }
+            memory.doing("yendo a unas bayas", now);
+            return true;
+        }
+        villager.getNavigation().stop();
+        villager.getLookControl().lookAt(Vec3d.ofCenter(berries));
+        int age = bush.get(net.minecraft.block.SweetBerryBushBlock.AGE);
+        int count = 1 + world.random.nextInt(2) + (age == 3 ? 1 : 0);
+        net.minecraft.block.Block.dropStack(world, berries, new ItemStack(Items.SWEET_BERRIES, count));
+        world.setBlockState(berries, bush.with(net.minecraft.block.SweetBerryBushBlock.AGE, 1), net.minecraft.block.Block.NOTIFY_LISTENERS);
+        villager.swingHand(Hand.MAIN_HAND);
+        MCA.LOGGER.info("[Tropeles] {} recoge {} bayas en {} (comida {})", name(), count, berries.toShortString(), food);
+        memory.doing("recogiendo bayas", now);
+        // they pop out toward it, as for a player: into the bag, without walking into the thorns
+        Hands.collect(world, villager, berries, 1.0);
+        berries = null;
+        return true;
+    }
+
+    /** The nearest ripe sweet berry bush its eye saw within 16 blocks, or null. */
+    @Nullable
+    private static BlockPos seenBerries(VillagerEntityMCA villager, VisualMemory memory) {
+        BlockPos feet = villager.getBlockPos();
+        BlockPos best = null;
+        double bestD = Double.MAX_VALUE;
+        for (BlockPos pos : BlockPos.iterate(feet.add(-16, -4, -16), feet.add(16, 4, 16))) {
+            BlockState seen = memory.stateAt(pos);
+            if (seen == null || !seen.isOf(Blocks.SWEET_BERRY_BUSH) || seen.get(net.minecraft.block.SweetBerryBushBlock.AGE) < 2) {
+                continue;
+            }
+            double d = pos.getSquaredDistance(feet);
+            if (d < bestD) {
+                bestD = d;
+                best = pos.toImmutable();
+            }
+        }
+        return best;
     }
 
     /**
@@ -3684,7 +3885,9 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         switch (phase) {
             case HOME_UP -> {
-                if (fallback) {
+                if (trailDig) {
+                    trailDigFails += 2;
+                } else if (fallback) {
                     climbMode = (climbMode + 1) % 5;
                 } else {
                     skip += 3;
@@ -3803,6 +4006,15 @@ public class ProspectingTask extends AbstractChoreTask {
                 // the remembered way does not get it anywhere: that cell is shut for now, another way or its own stairs
                 BlockPos next = via.peekFirst();
                 viaBlocked(world, villager, villager.getBlockPos(), next != null ? next : villager.getBlockPos(), world.getTime());
+            } else if (trailDig) {
+                if (stuckRounds >= 2) {
+                    // its own trail does not open up from here: a staircase of its own after all
+                    intentos.add("su propio camino, abriéndolo: atascado en " + villager.getBlockPos().toShortString());
+                    trailDig = false;
+                    startFallback(world, villager, villager.getBlockPos(), mina.nearLow(world, villager.getBlockPos()));
+                } else {
+                    trailDigFails++;
+                }
             } else if (!fallback && stuckRounds == 1) {
                 skip += 4;
             } else if (!fallback) {
@@ -3860,6 +4072,9 @@ public class ProspectingTask extends AbstractChoreTask {
             return -via.size();
         }
         if (phase == Phase.HOME_UP) {
+            if (trailDig) {
+                return -trailDigIdx;
+            }
             if (!fallback) {
                 int i = mina.nearLow(world, feet);
                 return i < 0 ? -Mina.MAX - 1 : -i;
@@ -3937,6 +4152,9 @@ public class ProspectingTask extends AbstractChoreTask {
 
     /** Making or upgrading its own tools comes before digging; true while that keeps it busy. */
     private boolean gearUp(ServerWorld world, VillagerEntityMCA villager) {
+        // its table and furnace off its own staircase when there is any other spot: a furnace left burning on the step
+        // behind shuts the way up (and a table set there and picked up again looked like a dig-and-fill loop)
+        progreso.keepClear(trailCells);
         boolean busy = progreso.tick(world, villager, this::say);
         if (busy && !wasGearing && !motor.midStep(villager)) {
             // two step machines must never drive one body: the task's stands down while Progreso works

@@ -197,6 +197,12 @@ public final class MenteLocal {
             order("climbed", "por donde (subiste|saliste|bajaste|viniste|entraste|llegaste|pasaste)|como (subiste|saliste|llegaste)|"
                     + "por que camino (subiste|saliste|bajaste|viniste)|how did you (get|come|climb) (up|out|here)|which way did you (come|go|climb)|"
                     + "the way you came"),
+            // its own mind ({@link net.mca.entity.ai.mente.Conciencia}): what it thinks, and why it did what it did
+            order("thinking", "en (que|q) (piensas|estas pensando|pensabas|andas pensando)|(que|q) (piensas|estas pensando|pasa por tu cabeza)|"
+                    + "what are you thinking( about)?|what('s| is) on your mind|what do you think|what were you thinking"),
+            order("why", "(por que|porque|xq|pq) (vas|fuiste|haces|hiciste|cavas|cavaste|picas|picaste|subes|subiste|bajas|bajaste|"
+                    + "estas|te fuiste|volviste|vuelves|dejaste|paraste|usas|usaste|no (usas|usaste|subes|subiste|vas|vienes|tomas|tomaste|vuelves|seguiste))|"
+                    + "why (are|did|do|didn't|don't|were|would) you"),
             order("place:cofre", "donde (esta|estan|tienes|dejaste|pusiste|queda|guardaste) (tu|tus|el|los|mi) (cofre|cofres|baul|cosas)|"
                     + "donde guardas (tus cosas|todo)|where('s| is| are) your (chest|chests|stuff)|where did you (put|leave) your (chest|stuff)"),
             order("place:casa", "donde (esta|queda|es) tu casa|donde vives|donde duermes|where('s| is) your (home|house|bed)|where do you live"),
@@ -281,7 +287,10 @@ public final class MenteLocal {
             // the short orders said to a miner carry no other Spanish word: "sube ya", "sal de ahi", "sigue bajando"
             + "algo|ya|sube|subete|sal|ahi|arriba|abajo|sigue|baja|bajando|casa|comer|comida|hambre|ahora|bien|mas|muy|pero|eso|dime|"
             // the short warnings and the "go on" after one
-            + "cuidado|detente|espera|esperame|quieto|quieta|alto|tranquilo|tranquila|dale|nada|silencio|falsa|alarma)\\b");
+            + "cuidado|detente|espera|esperame|quieto|quieta|alto|tranquilo|tranquila|dale|nada|silencio|falsa|alarma|"
+            // the chat's own Spanish, Chilean above all: "q onda", "wena", "po", "weon", "cachai", "xd"
+            + "q|ke|k|onda|wena|wenas|weno|wenaa|po|pue|pos|weon|weona|wn|hueon|huevon|cachai|cachay|cachaste|xd|xdd|oe|bacan|bkn|"
+            + "cuatico|wea|weas|altiro|harto|pucha|chuta|fome|filete|sipo|nopo|ya po|hermano|compa)\\b");
     private static final Pattern ENGLISH = Pattern.compile("\\b(the|you|your|me|my|please|follow|stay|give|what|where|how|are|is|do|have|"
             + "hello|hi|thanks|thank|here|go|come|stop|mine|find|get|can|let'?s|i|keep|mining|it|to|of|and|up|out|back|now|"
             + "careful|wait|watch|hold|freeze|fine|carry|on)\\b");
@@ -343,6 +352,32 @@ public final class MenteLocal {
             }
         }
         return out;
+    }
+
+    /** Per player, the language they last wrote clearly in: true for Spanish. Kept while the server runs. */
+    private static final Map<java.util.UUID, Boolean> PLAYER_SPANISH = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * As {@link #speaksSpanish(String, String)}, remembering per player the last language their words clearly said:
+     * a message that does not say ("ok", "sube", "jeggor") is answered in that one, before the game's.
+     */
+    public static boolean speaksSpanish(String text, @Nullable String villagerName, @Nullable java.util.UUID player) {
+        String language = language(withoutRawName(text, villagerName));
+        if (language != null) {
+            boolean es = language.equals("Spanish");
+            if (player != null) {
+                PLAYER_SPANISH.put(player, es);
+            }
+            return es;
+        }
+        Boolean known = player == null ? null : PLAYER_SPANISH.get(player);
+        return known != null ? known : !(MCA.language != null && MCA.language.startsWith("en"));
+    }
+
+    /** The language this player last wrote clearly in (true: Spanish), or null when not known yet. */
+    @Nullable
+    public static Boolean playerSpanish(java.util.UUID player) {
+        return PLAYER_SPANISH.get(player);
     }
 
     /** Whether an answer is clearly in the other language than the one the player wrote in. */
@@ -519,6 +554,8 @@ public final class MenteLocal {
             return placeOf(villager, q.substring(6), es);
         }
         return switch (q) {
+            case "thinking" -> thinking(villager, es);
+            case "why" -> why(villager, es);
             case "doing" -> doing(villager, es);
             case "did" -> did(villager, es);
             case "overhead" -> overhead(villager, es);
@@ -668,6 +705,40 @@ public final class MenteLocal {
     }
 
     // ------------------------------------------------------------------ what it remembers
+
+    /** "¿En qué piensas?": its last thought, else what its will is set on, else what it is doing. */
+    private static String thinking(VillagerEntityMCA villager, boolean es) {
+        String thought = net.mca.entity.ai.mente.Conciencia.ultimoPensamiento(villager, 24000);
+        if (thought != null) {
+            return es ? "Pensaba: " + thought : "I was thinking (in my words): " + thought;
+        }
+        if (Voluntad.conectado(villager)) {
+            String now = Voluntad.of(villager).pensando();
+            if (now != null && !now.isBlank()) {
+                return es ? "Ahora mismo: " + now + "." : "Right now (in my words): " + now + ".";
+            }
+        }
+        return doing(villager, es);
+    }
+
+    /** "¿Por qué haces eso?": its real last decisions and their reasons, never one made up. */
+    private static String why(VillagerEntityMCA villager, boolean es) {
+        Recuerdos r = Recuerdos.of(villager);
+        List<Recuerdos.Hecho> last = r == null ? List.of() : r.hechos("plan|camino|atasco", 2);
+        if (last.isEmpty()) {
+            String thought = net.mca.entity.ai.mente.Conciencia.ultimoPensamiento(villager, 6000);
+            if (thought != null) {
+                return es ? "Lo que pensaba: " + thought : "What I was thinking (in my words): " + thought;
+            }
+            return es ? "La verdad, no sé bien por qué; no recuerdo haberlo decidido por algo." : "Honestly, I'm not sure why; I don't remember deciding it for a reason.";
+        }
+        long now = villager.getWorld().getTime();
+        List<String> parts = new ArrayList<>();
+        for (Recuerdos.Hecho h : last) {
+            parts.add(Recuerdos.hace(now, h.t(), es) + " " + lower(h.texto()));
+        }
+        return (es ? "Por lo que recuerdo: " : "From what I remember (in my words): ") + String.join("; ", parts) + ".";
+    }
 
     /** "¿Qué hiciste?": the last few things that happened to it, from its diary ({@link Recuerdos}). */
     private static String did(VillagerEntityMCA villager, boolean es) {

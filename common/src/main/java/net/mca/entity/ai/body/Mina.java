@@ -66,6 +66,36 @@ public final class Mina {
         return index.containsKey(pos.asLong());
     }
 
+    /**
+     * A cell of the trail's own columns: a crumb, its head, or the one over the head (the room a jump up the next step
+     * needs). What it may open again on its own way, and keep its gear off.
+     */
+    public boolean column(BlockPos pos) {
+        return has(pos) || has(pos.down()) || has(pos.down(2));
+    }
+
+    /** The index of that crumb, -1 when it is not one. */
+    public int indexOf(BlockPos pos) {
+        Integer at = index.get(pos.asLong());
+        return at == null ? -1 : at;
+    }
+
+    /** The lowest-numbered crumb at or touching the feet (the 27 cells around them), open or shut; -1 when none. */
+    public int nearLowAny(BlockPos feet) {
+        int best = -1;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    Integer at = index.get(BlockPos.asLong(feet.getX() + dx, feet.getY() + dy, feet.getZ() + dz));
+                    if (at != null && (best < 0 || at < best)) {
+                        best = at;
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
     /** A trail it can walk in from the surface and back out: it knows the door and at least one step inside. */
     public boolean known() {
         return door && size >= 2;

@@ -76,7 +76,7 @@ public final class Interrupcion {
             }
             return false;
         }
-        boolean es = MenteLocal.speaksSpanish(msg, name);
+        boolean es = MenteLocal.speaksSpanish(msg, name, player.getUuid());
         detener(player, villager, es);
         String line = Voluntad.pregunta(villager, es);
         net.mca.entity.ai.chatAI.OpenAIChatAI.remember(id, player.getUuid(), msg, line);

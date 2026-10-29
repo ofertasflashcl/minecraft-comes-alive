@@ -186,6 +186,9 @@ public final class Motor {
     private boolean straightUp;
     /** This call walks a way that is already there ({@link #walkPath}): nothing is broken or placed, no other way is tried. */
     private boolean noTouch;
+    /** While set ({@link #stepWithin}), the only cells a step may dig: the columns of its own trail, nothing beside them. */
+    @Nullable
+    private Predicate<BlockPos> digOnly;
     /** The cell of a break/place loop ({@link Toques#forbidden}) that made the last step give up, or null. */
     @Nullable
     private BlockPos loopCell;
@@ -485,6 +488,24 @@ public final class Motor {
      * One tick of going straight up one block on a block of its own under its feet (a pillar), as at a tall trunk:
      * never a stair to the side, never another way round. BLOCKED when it cannot.
      */
+    /**
+     * {@link #step} that digs only cells {@code only} allows (its own trail, reopened where something shut it: a
+     * ceiling cell, its table, gravel), never a new way beside it. BLOCKED when the step would have to dig anything else.
+     */
+    public Result stepWithin(ServerWorld world, VillagerEntityMCA villager, BlockPos goal, boolean build, Predicate<BlockPos> only) {
+        digOnly = only;
+        try {
+            return step(world, villager, goal, true, build);
+        } finally {
+            digOnly = null;
+        }
+    }
+
+    /** A cell this step may dig: any, or with {@link #stepWithin} only one of the cells it was given. */
+    private boolean mayOpen(BlockPos cell) {
+        return digOnly == null || digOnly.test(cell);
+    }
+
     public Result pillarStep(ServerWorld world, VillagerEntityMCA villager, BlockPos goal) {
         straightUp = true;
         try {
@@ -941,7 +962,7 @@ public final class Motor {
         int stairDetour = horizontal == 0 ? COST_OFF_AXIS + 1 : 0;
         int pillarDetour = horizontal > 1 ? COST_OFF_AXIS : 0;
         int best = Integer.MAX_VALUE;
-        int ahead = stairCost(world, villager, feet, facing, dig, blocks, memory, noTouch);
+        int ahead = stairCost(world, villager, feet, facing, dig, blocks, memory, noTouch, digOnly);
         if (ahead >= 0) {
             best = ahead + stairDetour;
             kind = Kind.UP;
@@ -961,7 +982,7 @@ public final class Motor {
         int[] penalty = {COST_SIDE, COST_SIDE, COST_BACK};
         for (int i = 0; i < (noTouch ? 0 : others.length); i++) {
             // walking a way that is there: the step it leads up, never one beside it
-            int cost = stairCost(world, villager, feet, others[i], dig, blocks, memory, noTouch);
+            int cost = stairCost(world, villager, feet, others[i], dig, blocks, memory, noTouch, digOnly);
             if (cost >= 0 && cost + stairDetour + penalty[i] < best) {
                 best = cost + stairDetour + penalty[i];
                 kind = Kind.UP;
@@ -1030,7 +1051,7 @@ public final class Motor {
      * cannot be done (a build in the way, lava seen there, nothing to stand on and nothing to set a block on).
      */
     private static int stairCost(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, Direction d, boolean dig, boolean blocks, VisualMemory memory,
-                                 boolean noTouch) {
+                                 boolean noTouch, @Nullable Predicate<BlockPos> only) {
         BlockPos step = feet.offset(d);
         BlockPos stair = step.up();
         long now = world.getTime();
@@ -1039,7 +1060,7 @@ public final class Motor {
             if (open(world, cell)) {
                 continue;
             }
-            if (noTouch || Toques.forbidden(villager, cell, now) || Toques.lately(villager, cell, now, true, Toques.STEP)) {
+            if (noTouch || only != null && !only.test(cell) || Toques.forbidden(villager, cell, now) || Toques.lately(villager, cell, now, true, Toques.STEP)) {
                 return -1; // nothing to break on this walk; never a step it set just now, never a cell it keeps digging and filling
             }
             if (Hands.naturalLeaf(world, villager, cell) && !Mining.lavaSeen(memory, cell)) {
@@ -1144,7 +1165,7 @@ public final class Motor {
             // natural leaves across the way, over its head on a pillar or a climb: clicked away by hand like a player,
             // also on a step that may not dig (a persistent leaf, a player's, is a build like any other)
             boolean leaf = Hands.naturalLeaf(world, villager, cell);
-            if (noTouch || !dig && !leaf) {
+            if (noTouch || !dig && !leaf || !mayOpen(cell)) {
                 return blocked(world, villager);
             }
             long now = world.getTime();
@@ -1274,7 +1295,7 @@ public final class Motor {
             if (++tries > MAX_JUMPS) {
                 return blocked(world, villager);
             }
-            if (tries >= 2 && !headroom && !noTouch && worthDigging(world, villager, from.up(3), dig)) {
+            if (tries >= 2 && !headroom && !noTouch && mayOpen(from.up(3)) && worthDigging(world, villager, from.up(3), dig)) {
                 // its head may be what stops it: one more block of room, dug standing still
                 headroom = true;
                 phase = Phase.PREPARE;

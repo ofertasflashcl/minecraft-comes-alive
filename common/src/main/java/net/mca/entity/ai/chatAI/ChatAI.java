@@ -136,7 +136,7 @@ public class ChatAI {
             this.msg = msg;
             this.received = received;
             this.hardMs = hardMs;
-            this.es = MenteLocal.speaksSpanish(msg, villagerName);
+            this.es = MenteLocal.speaksSpanish(msg, villagerName, speaker.getUuid());
         }
     }
 

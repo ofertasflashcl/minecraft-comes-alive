@@ -123,6 +123,8 @@ public final class Voluntad {
     private final FollowTask follow = new FollowTask();
     private final Mirada mirada = new Mirada();
     final Iniciativa iniciativa = new Iniciativa();
+    /** Its inner voice: a thought now and then, lessons, its own changes of plans ({@link Conciencia}). */
+    private final Conciencia conciencia = new Conciencia();
     private final Atasco atasco = new Atasco();
 
     private Voluntad() {
@@ -197,6 +199,28 @@ public final class Voluntad {
             String line = w.spanish() ? es : en;
             Recuerdos.anotar(villager, "plan", es, villager.getBlockPos());
             w.iniciativa.contar(world, villager, w, line, world.getTime());
+        } catch (RuntimeException e) {
+            MCA.LOGGER.warn("[Tropeles] {} no pudo contar lo que hace: {}", villager.getName().getString(), e.toString());
+        }
+    }
+
+    /**
+     * As {@link #contar(VillagerEntityMCA, String, String)}, with the real reason behind the change ({@code porque}, in
+     * Spanish: what it tried, what it found), kept in its memory of the decision so it can tell the truth when asked
+     * "¿por qué...?". Server thread; never throws.
+     */
+    public static void contar(VillagerEntityMCA villager, String es, String en, @Nullable String porque) {
+        if (porque == null || porque.isBlank()) {
+            contar(villager, es, en);
+            return;
+        }
+        try {
+            if (!(villager.getWorld() instanceof ServerWorld world)) {
+                return;
+            }
+            Voluntad w = of(villager);
+            Recuerdos.anotar(villager, "plan", es + " (porque " + porque.trim() + ")", villager.getBlockPos());
+            w.iniciativa.contar(world, villager, w, w.spanish() ? es : en, world.getTime());
         } catch (RuntimeException e) {
             MCA.LOGGER.warn("[Tropeles] {} no pudo contar lo que hace: {}", villager.getName().getString(), e.toString());
         }
@@ -369,6 +393,7 @@ public final class Voluntad {
                 think(villager);
             }
             iniciativa.tick(world, villager, this, task);
+            conciencia.tick(world, villager, this, task);
         } catch (RuntimeException e) {
             // the will must never stop the task's own life
             if (!loggedError) {

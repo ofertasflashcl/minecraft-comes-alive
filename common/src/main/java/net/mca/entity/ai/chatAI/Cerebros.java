@@ -86,8 +86,15 @@ public final class Cerebros {
     /** Minds that turned down a picture this session: they get the words alone from now on. */
     private static final Set<String> BLIND = ConcurrentHashMap.newKeySet();
     private static volatile String ollamaModel = "";
+    /** Requests being asked right now, the chat's and the villagers' own thoughts alike. */
+    private static final java.util.concurrent.atomic.AtomicInteger IN_FLIGHT = new java.util.concurrent.atomic.AtomicInteger();
 
     private Cerebros() {
+    }
+
+    /** Whether a mind is being asked right now: a villager's own thoughts then wait, the chat comes first. */
+    public static boolean ocupado() {
+        return IN_FLIGHT.get() > 0;
     }
 
     /** The mind that last answered for this villager, or "mente local". */
@@ -179,6 +186,17 @@ public final class Cerebros {
         if (OFFLINE.get()) {
             return null;
         }
+        IN_FLIGHT.incrementAndGet();
+        try {
+            return askNow(minds, system, history, msg, playerName, villagerName, villager, deadline, image);
+        } finally {
+            IN_FLIGHT.decrementAndGet();
+        }
+    }
+
+    @Nullable
+    private static Reply askNow(List<Mind> minds, Function<Mind, String> system, List<Pair<String, String>> history, String msg,
+                                String playerName, String villagerName, @Nullable UUID villager, long deadline, @Nullable String image) {
         long start = System.currentTimeMillis();
         long localEnd = Math.max(deadline, start + Math.max(0L, Config.getInstance().tropelesChatLocalBudgetMs));
         for (int i = 0; i < minds.size(); i++) {

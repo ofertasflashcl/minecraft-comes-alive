@@ -123,6 +123,16 @@ public class PerceptionModule {
             net.mca.MCA.LOGGER.warn("[Tropeles] los recuerdos de {} no se pudieron contar: {}", villager.getName().getString(), e.toString());
         }
 
+        // its own mind: its last thoughts, its lessons, its real decisions and why ({@link net.mca.entity.ai.mente.Conciencia})
+        try {
+            String mind = net.mca.entity.ai.mente.Conciencia.forModel(villager);
+            if (!mind.isBlank()) {
+                input.add(shorten(mind) + " ");
+            }
+        } catch (RuntimeException e) {
+            net.mca.MCA.LOGGER.warn("[Tropeles] los pensamientos de {} no se pudieron contar: {}", villager.getName().getString(), e.toString());
+        }
+
         // hands and bag
         ItemStack hand = villager.getMainHandStack();
         if (!hand.isEmpty()) {

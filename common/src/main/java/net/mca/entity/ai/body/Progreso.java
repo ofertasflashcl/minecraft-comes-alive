@@ -221,6 +221,18 @@ public final class Progreso {
     /** Where it stood when it lit the furnace: the way back to it. */
     private BlockPos furnaceStand;
     private final Motor motor = new Motor();
+    /**
+     * Cells its table and furnace go into only when there is no other spot in reach (the walk of its own staircase, its
+     * trail out): a player in a one-wide stair sets the table on the step behind and picks it up again, but a furnace
+     * left burning there while it digs on shuts its way back up. Null: anywhere.
+     */
+    @Nullable
+    private Predicate<BlockPos> keepClear;
+
+    /** The cells its table and furnace keep off when they can (its own trail), or null for none. */
+    public void keepClear(@Nullable Predicate<BlockPos> cells) {
+        keepClear = cells;
+    }
     /** Looking for trees: where it looked already and which way it was going. */
     private final Explorar explorar = new Explorar();
     private int craftDelay;
@@ -1989,7 +2001,15 @@ public final class Progreso {
     }
 
     @Nullable
-    private static BlockPos placeBeside(ServerWorld world, VillagerEntityMCA villager, Mat what) {
+    private BlockPos placeBeside(ServerWorld world, VillagerEntityMCA villager, Mat what) {
+        Predicate<BlockPos> keep = keepClear;
+        if (keep != null) {
+            // off its own trail first; on it (the step behind, a one-wide stair) only when there is nowhere else
+            BlockPos cell = placeBeside(world, villager, what.match, keep);
+            if (cell != null) {
+                return cell;
+            }
+        }
         return placeBeside(world, villager, what.match);
     }
 
@@ -2041,6 +2061,8 @@ public final class Progreso {
                 continue;
             }
             if (Hands.place(world, villager, cell, stack)) {
+                // set down to work at and picked up again: its gear, not a block it keeps breaking and filling
+                Toques.mark(villager, cell, Toques.GEAR);
                 return cell;
             }
         }
@@ -2076,6 +2098,7 @@ public final class Progreso {
         Retina.memory(villager).doing("recogiendo " + world.getBlockState(target).getBlock().getName().getString(), world.getTime());
         int r = breaker.tick(world, villager, target);
         if (r == Hands.Breaker.DONE) {
+            Toques.mark(villager, target, Toques.GEAR);
             Hands.collect(world, villager, target, 2.5);
             if (world.getBlockState(target).isAir()) {
                 return;

@@ -189,6 +189,8 @@ public final class Pantalla {
 
     private long lastOn = Long.MIN_VALUE / 2;
     private long lastSave = Long.MIN_VALUE / 2;
+    /** A write of this screen still under way on the IO thread: the next one waits, never two on the same file. */
+    private final java.util.concurrent.atomic.AtomicBoolean writing = new java.util.concurrent.atomic.AtomicBoolean();
     @Nullable
     private Path file;
 
@@ -1048,6 +1050,9 @@ public final class Pantalla {
         lastSave = world.getTime();
         Path target = path(world, viewer);
         file = target;
+        if (!writing.compareAndSet(false, true)) {
+            return; // the last frame is still being written: two writers on one .tmp lose it (NoSuchFileException)
+        }
         int[] pixels = rgb.clone();
         Util.getIoWorkerExecutor().execute(() -> {
             try {
@@ -1061,19 +1066,40 @@ public final class Pantalla {
                     }
                 }
                 byte[] png = Foto.encode(big, w, h);
-                Files.createDirectories(target.getParent());
-                Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
-                Files.write(tmp, png);
+                Path dir = target.getParent();
+                if (dir != null) {
+                    Files.createDirectories(dir);
+                }
+                // a temporary file of its own for every write (two viewers with the same name, a write from before a
+                // reload): never someone else's .tmp moved away under it
+                Path tmp = target.resolveSibling(target.getFileName() + "." + Long.toHexString(System.nanoTime()) + ".tmp");
+                try {
+                    Files.write(tmp, png);
+                } catch (java.nio.file.NoSuchFileException gone) {
+                    // the folder went away in between (a world copied or cleaned while running): made again, once
+                    if (dir != null) {
+                        Files.createDirectories(dir);
+                    }
+                    Files.write(tmp, png);
+                }
                 try {
                     Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
                 } catch (IOException atomic) {
-                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                    try {
+                        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                    } catch (IOException locked) {
+                        // the PNG is open in a viewer on Windows: written straight over it instead
+                        Files.write(target, png);
+                        Files.deleteIfExists(tmp);
+                    }
                 }
             } catch (IOException | RuntimeException e) {
                 if (!loggedSaveError) {
                     loggedSaveError = true;
                     MCA.LOGGER.warn("[Tropeles] no pude escribir la pantalla en {}: {}", target, e.toString());
                 }
+            } finally {
+                writing.set(false);
             }
         });
     }
