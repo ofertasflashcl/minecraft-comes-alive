@@ -787,6 +787,11 @@ public class ProspectingTask extends AbstractChoreTask {
      * phase is about. Never in the middle of a jump: the step lands first.
      */
     private void work(ServerWorld world, VillagerEntityMCA villager, boolean look) {
+        if (!Voluntad.conectado(villager) && net.mca.entity.ai.mente.Interrupcion.pausado(villager) && !motor.midStep(villager)) {
+            // stopped with "¡para!": the hands and legs wait with it, the mine and the plan stay as they were
+            Motor.standStill(villager);
+            return;
+        }
         long now = world.getTime();
         // every step it takes is remembered, whoever drives the body
         remember(world, villager);

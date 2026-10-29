@@ -231,12 +231,11 @@ public class TriggerCommandInfos {
      */
     private static String alert(ServerPlayerEntity player, VillagerEntityMCA villager, String ignored) {
         if (Voluntad.conectado(villager)) {
-            return Voluntad.alerta(villager, player, spanish(villager));
+            return net.mca.entity.ai.mente.Interrupcion.detener(player, villager, spanish(villager));
         }
-        villager.getNavigation().stop();
-        villager.getBrain().forget(net.minecraft.entity.ai.brain.MemoryModuleType.WALK_TARGET);
-        net.mca.entity.ai.body.Hands.aim(villager, player.getEyePos());
-        return "You stopped where you are and turned to " + player.getName().getString() + ". Ask them what is going on, in a short question.";
+        net.mca.entity.ai.mente.Interrupcion.detener(player, villager, spanish(villager));
+        return "You stopped dead where you are, crouched, and turned to " + player.getName().getString()
+                + ". Ask them what is going on, in a short question.";
     }
 
     private static TriggerCommandInfo job(String command, String description, Chore chore) {

@@ -857,6 +857,8 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
             // the screen of a connected villager: its own player-like view, a few rows every tick
             if (getWorld() instanceof net.minecraft.server.world.ServerWorld serverWorld) {
                 net.mca.entity.ai.sense.Pantalla.tick(serverWorld, this);
+                // "¡para un momento!": still, crouched and looking at who said it, until it hears why
+                net.mca.entity.ai.mente.Interrupcion.tick(serverWorld, this);
             }
 
             // panic screams

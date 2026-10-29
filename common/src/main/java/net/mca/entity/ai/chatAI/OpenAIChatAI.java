@@ -242,6 +242,11 @@ public class OpenAIChatAI implements ChatAIStrategy {
             return message;
         }
         String chosen = command;
+        if (net.mca.entity.ai.mente.Interrupcion.despues(villager.getUuid(), 0)) {
+            // told to stop while this was being thought: the model's order comes from before "¡para!"
+            MCA.LOGGER.info("[Tropeles] {} se detuvo mientras pensaba; no hace '{}'", prep.villagerName(), chosen);
+            return message;
+        }
         Acted acted = onServer(server, () -> act(player, villager, chosen, said.argument(), es));
         if (acted == null) {
             return message;
