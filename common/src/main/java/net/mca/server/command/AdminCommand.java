@@ -41,6 +41,9 @@ public class AdminCommand {
     private static final List<NbtCompound> storedVillagers = new ArrayList<>();
 
     public static void register(CommandDispatcher<ServerCommandSource> dispatcher) {
+        OjoCommand.register(dispatcher);
+        Pruebas.register(dispatcher);
+        VelocidadCommand.register(dispatcher);
         dispatcher.register(CommandManager.literal("mca-admin")
                 .then(register("help", AdminCommand::displayHelp))
                 .then(register("clearLoadedVillagers", AdminCommand::clearLoadedVillagers))
@@ -353,6 +356,9 @@ public class AdminCommand {
 
         sendMessage(player, WHITE + " /mca-admin listVillages " + GOLD + " - List all known villages.");
         sendMessage(player, WHITE + " /mca-admin removeVillage " + GOLD + " - Remove a given village.");
+
+        sendMessage(player, WHITE + " /mca-velocidad [0.1..20 | normal | max] " + GOLD + " - Run the whole game faster or slower (also the single player host).");
+        sendMessage(player, WHITE + " /tp <name> | /tp <name> @s " + GOLD + " - Go to, or bring, a prospecting villager by its name in Tab.");
 
         sendMessage(player, DARK_RED + "--- " + GOLD + "GLOBAL COMMANDS" + DARK_RED + " ---");
         sendMessage(player, WHITE + " /mca-admin help " + GOLD + " - Shows this list of commands.");

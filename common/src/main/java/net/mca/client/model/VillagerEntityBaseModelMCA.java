@@ -55,6 +55,8 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
     public void animateModel(T entity, float limbAngle, float limbDistance, float tickDelta) {
         super.animateModel(entity, limbDistance, limbAngle, tickDelta);
         riding |= entity.getAgeState() == AgeState.BABY;
+        // a crouching villager (Postura) is drawn crouched like a sneaking player; vanilla only sets this for players
+        sneaking = entity.isInSneakingPose();
     }
 
     @Override

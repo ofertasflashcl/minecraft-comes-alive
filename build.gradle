@@ -10,6 +10,10 @@ architectury {
 }
 
 def getAppVersion = { ->
+    // CI builds pass an explicit version: the nearest tag may not be a version Forge accepts
+    if (project.hasProperty('mod_version')) {
+        return project.property('mod_version')
+    }
     try {
         def version = providers.exec {
             commandLine 'git', 'describe', '--tags', '--abbrev=0'

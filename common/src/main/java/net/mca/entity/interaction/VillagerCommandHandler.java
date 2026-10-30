@@ -45,17 +45,37 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
     public boolean handle(ServerPlayerEntity player, String command) {
         Memories memory = entity.getVillagerBrain().getMemoriesForPlayer(player);
 
+        boolean connected = net.mca.entity.ai.mente.Voluntad.conectado(entity);
         if (MoveState.byCommand(command).filter(state -> {
+            if (connected) {
+                // a connected villager follows and waits by its will: MCA's FOLLOW would end the connection, and STAY
+                // would give it a brain without its own life
+                net.mca.entity.ai.mente.Voluntad.menu(entity, player, state);
+                return true;
+            }
             entity.getVillagerBrain().setMoveState(state, player);
             return true;
         }).isPresent()) {
             return true;
         }
 
+        if (connected && Chore.byCommand(command).filter(chore -> chore != Chore.PROSPECT && chore != Chore.NONE).isPresent()) {
+            // chopping, fishing, harvesting, hunting asked of a connected villager: it does it itself and comes back
+            Chore chore = Chore.byCommand(command).get();
+            net.mca.entity.ai.mente.Voluntad.menu(entity, player, chore);
+            CriterionMCA.GENERIC_EVENT_CRITERION.trigger(player, "chores");
+            return true;
+        }
+
         if (Chore.byCommand(command).filter(chore -> {
             entity.getVillagerBrain().assignJob(chore, player);
             CriterionMCA.GENERIC_EVENT_CRITERION.trigger(player, "chores");
-            entity.sendChatMessage(Text.translatable("chore.success"), player);
+            if (chore == Chore.PROSPECT) {
+                // "Conectar": no "Alright!"; it turns to the one who connected it and meets them first
+                net.mca.entity.ai.mente.Voluntad.conectar(entity, player);
+            } else {
+                entity.sendChatMessage(Text.translatable("chore.success"), player);
+            }
             return true;
         }).isPresent()) {
             return true;
@@ -102,6 +122,16 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
                 return true;
             }
             case "gohome" -> {
+                if (connected) {
+                    // its own legs take it home (out of the mine if it is in one); the move state would not, and stays as it is
+                    if (net.mca.entity.ai.mente.Voluntad.of(entity).modo() != net.mca.entity.ai.mente.Voluntad.Modo.LIBRE) {
+                        net.mca.entity.ai.mente.Voluntad.libre(entity, player, net.mca.entity.ai.mente.Voluntad.of(entity).spanish());
+                    }
+                    net.mca.entity.ai.brain.tasks.chore.ProspectingTask.callHome(entity, false);
+                    entity.sendChatMessage(player, "interaction.gohome.success");
+                    stopInteracting();
+                    return false;
+                }
                 entity.getResidency().goHome(player);
                 stopInteracting();
                 return false;

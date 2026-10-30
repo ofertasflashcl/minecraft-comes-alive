@@ -107,15 +107,48 @@ public final class Config extends CommonConfig {
     //AI
     @SuppressWarnings("unused")
     public String _read_this_before_using_villager_ai = "https://github.com/Luke100000/minecraft-comes-alive/wiki/GPT3-based-conversations";
-    public boolean enableVillagerChatAI = false;
+    public boolean enableVillagerChatAI = true;
     public String villagerChatAIEndpoint = "https://api.conczin.net/v1/mca/chat";
-    public boolean villagerChatAIUseTools = false;
+    public boolean villagerChatAIUseTools = true;
+    /** Bumped when this fork turns chat AI and its commands on for configs written before it. */
+    public int tropelesChatDefaults = 0;
     public String villagerChatAIToken = "";
     public String villagerChatAIModel = "default";
     public String villagerChatAISystemPrompt = "";
     public boolean villagerChatAIUseLongTermMemory = false;
     public boolean villagerChatAIUseSharedLongTermMemory = false;
     public boolean villagerChatAIIncludeSessionInformation = false;
+    /**
+     * Tropeles: the free minds asked in turn until one answers. "custom" is villagerChatAIEndpoint when it is not
+     * the default one; "player2" and "ollama" run on your own computer (skipped quietly when not running);
+     * "conczin" is MCA's own service; "llm7", "chat" (ch.at) and "pollinations" are free public ones that need no
+     * key. When none answers, the villager's own offline mind does, so it always talks and always obeys.
+     */
+    public List<String> tropelesMinds = List.of("custom", "player2", "ollama", "conczin", "llm7", "chat", "pollinations");
+    public String tropelesOllamaUrl = "http://127.0.0.1:11434/";
+    /** Empty: the first model Ollama has installed. */
+    public String tropelesOllamaModel = "";
+    /** Other players this close to a villager also read its chat answers; -1 is the whole server. */
+    public int tropelesChatHearRange = 24;
+    /** The longest the online minds may think about one message before the villager's own mind answers. */
+    public long tropelesChatBudgetMs = 12000;
+    /** A mind on your own computer (Ollama, Player2) may take this long, so a model that is still loading gets used. */
+    public long tropelesChatLocalBudgetMs = 30000;
+    /** After this long without an answer, "Inas está pensando…" shows above the hotbar of the one who asked. */
+    public int tropelesChatThinkingMs = 1500;
+    /** Talking without saying the name: the villager you look at, the one you talk with, the only one near you or your own worker. */
+    public boolean tropelesChatImplicit = true;
+    /**
+     * Asked what it sees or what is around, a villager also shows the minds that can look at pictures a small image
+     * of its own view (beside the words); a mind that cannot is asked again with the words alone.
+     */
+    public boolean tropelesChatVision = true;
+    /** Villagers speak in chat like players, "<Inas> hola"; off gives MCA's own "Inas (Prospecting): hola". */
+    public boolean tropelesPlayerChatFormat = true;
+    /** A prospecting villager shows in the Tab list like an online player, and /tp works with its name. */
+    public boolean prospectorListedAsPlayer = true;
+    /** A prospecting villager keeps the chunks around it loaded, like a player, so it keeps working when nobody is near. */
+    public boolean prospectorLoadsChunks = true;
 
     //InworldAI
     public String inworldAIToken = "";
@@ -317,6 +350,13 @@ public final class Config extends CommonConfig {
                 Config config = gson.fromJson(reader, Config.class);
                 if (config == null || config.version != VERSION) {
                     config = new Config();
+                }
+                if (config.tropelesChatDefaults < 2) {
+                    // villagers talk and take orders by chat from the start, also in worlds made before, and again
+                    // after an old "/mca chatAI disable" (step 2: chat answers come straight, like a player's)
+                    config.enableVillagerChatAI = true;
+                    config.villagerChatAIUseTools = true;
+                    config.tropelesChatDefaults = 2;
                 }
                 config.save();
                 return config;

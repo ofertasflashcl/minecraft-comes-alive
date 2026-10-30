@@ -16,6 +16,7 @@ import net.mca.network.c2s.InteractionVillagerMessage;
 import net.mca.resources.Names;
 import net.mca.resources.Rank;
 import net.mca.resources.Tasks;
+import net.mca.server.ProspectorPresence;
 import net.mca.server.world.data.FamilyTree;
 import net.mca.server.world.data.FamilyTreeNode;
 import net.mca.server.world.data.Village;
@@ -110,6 +111,8 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
 
     public final ConversationManager conversationManager = new ConversationManager(this);
     private final VillagerBrain<VillagerEntityMCA> mcaBrain = new VillagerBrain<>(this);
+    /** While set, getDisplayName() is the bare name, as a player's would be (no " (Prospecting)", no colour). */
+    private boolean plainDisplayName;
     private final LongTermMemory longTermMemory = new LongTermMemory(this);
     private final Genetics genetics = new Genetics(this);
     private final Traits traits = new Traits(this);
@@ -117,6 +120,7 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
     private final BreedableRelationship relations = new BreedableRelationship(this);
     private final VillagerCommandHandler interactions = new VillagerCommandHandler(this);
     private final UpdatableInventory inventory = new UpdatableInventory(27);
+    private final net.mca.entity.ai.sense.VisualMemory visualMemory = new net.mca.entity.ai.sense.VisualMemory();
     private final VillagerDimensions.Mutable dimensions = new VillagerDimensions.Mutable(AgeState.UNASSIGNED);
 
     private GameProfile gameProfile;
@@ -228,6 +232,11 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
     @Override
     public BreedableRelationship getRelationships() {
         return relations;
+    }
+
+    /** What this villager's eyes have seen, see {@link net.mca.entity.ai.sense.Retina}. */
+    public net.mca.entity.ai.sense.VisualMemory getVisualMemory() {
+        return visualMemory;
     }
 
     @Override
@@ -561,6 +570,11 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
 
     @Override
     public final boolean damage(DamageSource source, float damageAmount) {
+        // a hit gets a sleeper up, as it does a player: whatever held it in bed lets go
+        if (!getWorld().isClient && isSleeping() && !isInvulnerableTo(source)) {
+            net.mca.entity.ai.sense.Dormir.herido(this);
+        }
+
         // no baby squishes
         if (getVehicle() instanceof PlayerEntity) {
             return super.damage(source, 0.0f);
@@ -735,6 +749,9 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
 
             residency.tick();
 
+            // someone emptied its chest? it finds out once it is by the chest or sees them
+            net.mca.entity.ai.body.Cofres.tick((ServerWorld) getWorld(), this);
+
             relations.tick(age);
 
             inventory.update(this);
@@ -774,6 +791,19 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
         return false;
     }
 
+    /**
+     * Lying in a bed by its own will ({@link net.mca.entity.ai.sense.Dormir#acostar}), a connected villager is not got up
+     * by its brain (the WakeUpTask wakes any villager outside the REST activity): only by a hit, the bed going, the
+     * morning, the night being skipped or getting up on purpose.
+     */
+    @Override
+    public void wakeUp() {
+        if (!getWorld().isClient && net.mca.entity.ai.sense.Dormir.retenido(this)) {
+            return;
+        }
+        super.wakeUp();
+    }
+
     @Override
     public void tick() {
         super.tick();
@@ -811,6 +841,26 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
                     convertTo(EntityType.ZOMBIE_VILLAGER, false);
                     discard();
                 }
+            }
+
+            // the crouch: reasons nobody renewed run out, the body and the pose follow the rest
+            net.mca.entity.ai.body.Postura.tick(this);
+
+            // the idle eye: with someone near, it keeps looking at where it is, unless a task already drives the eye
+            if (this.age % 10 == 0 && !isSleeping()) {
+                long now = getWorld().getTime();
+                if (now - visualMemory.lastLook() > 5 && getWorld().getClosestPlayer(this, 48.0) != null) {
+                    net.mca.entity.ai.sense.Retina.look(getWorld(), this);
+                }
+            }
+
+            // the screen of a connected villager: its own player-like view, a few rows every tick
+            if (getWorld() instanceof net.minecraft.server.world.ServerWorld serverWorld) {
+                net.mca.entity.ai.sense.Pantalla.tick(serverWorld, this);
+                // "¡para un momento!": still, crouched and looking at who said it, until it hears why
+                net.mca.entity.ai.mente.Interrupcion.tick(serverWorld, this);
+                // doors: opened by hand on the way, shut behind it once through
+                net.mca.entity.ai.body.Puertas.tick(serverWorld, this);
             }
 
             // panic screams
@@ -914,6 +964,18 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
         return -0.35;
     }
 
+    /** Crouched it walks like a sneaking player: 0.3 of the speed (see {@link net.mca.entity.ai.body.Postura}). */
+    @Override
+    public void travel(Vec3d movementInput) {
+        super.travel(net.mca.entity.ai.body.Postura.slowed(this, movementInput));
+    }
+
+    /** Crouched, its feet never walk off an edge, like a sneaking player's (see {@link net.mca.entity.ai.body.Postura#edge}). */
+    @Override
+    protected Vec3d adjustMovementForSneaking(Vec3d movement, net.minecraft.entity.MovementType type) {
+        return net.mca.entity.ai.body.Postura.edge(this, super.adjustMovementForSneaking(movement, type), type);
+    }
+
     @Override
     public EntityDimensions getDimensions(EntityPose pose) {
 
@@ -939,15 +1001,32 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
             this.equipStack(slot, ItemStack.EMPTY);
         }
 
-        //death message
+        //death message, read before super.onDeath clears the damage record
+        Text playerLikeDeath = null;
         if (!getWorld().isClient) {
-            getResidency().getHomeVillage().flatMap(Village::getCivilRegistry).ifPresent(r -> r.addText(getDamageTracker().getDeathMessage()));
+            Text registryLine = getDamageTracker().getDeathMessage();
+            getResidency().getHomeVillage().flatMap(Village::getCivilRegistry).ifPresent(r -> r.addText(registryLine));
+            if (ProspectorPresence.isListed(this)) {
+                // shown like a player's death: "Inés Prueba was slain by Zombie", without " (Prospecting)"
+                plainDisplayName = true;
+                try {
+                    playerLikeDeath = getDamageTracker().getDeathMessage();
+                } finally {
+                    plainDisplayName = false;
+                }
+            }
         }
 
         super.onDeath(cause);
 
         if (getWorld().isClient) {
             return;
+        }
+
+        net.mca.entity.ai.body.Postura.erguir(this);
+
+        if (playerLikeDeath != null && isDead()) {
+            ProspectorPresence.onDeath(this, playerLikeDeath);
         }
 
         //drop stuff
@@ -1151,6 +1230,9 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
     @Override
     public final Text getDisplayName() {
         Text name = super.getDisplayName();
+        if (plainDisplayName) {
+            return name;
+        }
 
         if (getVillagerBrain() != null) {
             MoveState state = getVillagerBrain().getMoveState();
@@ -1448,6 +1530,10 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
 
         if (isHolding(Items.CROSSBOW)) {
             this.shoot(this, 1.75F);
+        } else if (isHolding(Items.BOW) && getWorld() instanceof ServerWorld serverWorld && getMainHandStack().isOf(Items.BOW)
+                && net.mca.entity.ai.body.Archery.shootAt(serverWorld, this, target, Math.max(pullProgress, 1.0F))) {
+            // solved against the real arrow physics, see Archery
+            return;
         } else if (isHolding(Items.BOW)) {
             ItemStack itemStack = this.getProjectileType(this.getStackInHand(ProjectileUtil.getHandPossiblyHolding(this, Items.BOW)));
             PersistentProjectileEntity persistentProjectileEntity = this.createArrowProjectile(itemStack, pullProgress);
