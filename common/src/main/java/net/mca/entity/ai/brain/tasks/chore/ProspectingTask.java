@@ -1375,11 +1375,12 @@ public class ProspectingTask extends AbstractChoreTask {
         if (Mining.outdoors(world, feet) || Entorno.lugar(world, villager) == Lugar.BAJO_TIERRA) {
             return false;
         }
+        if (Entorno.profundidad(world, villager) > Recuerdos.LAND_DEPTH) {
+            // ten blocks down a shaft with sky at the top is still the mine, whatever roofs it can see
+            return false;
+        }
         if (Entorno.refugio(world, villager)) {
             return true; // a built roof with the open sky a few steps to the side at its head: an eave, a porch
-        }
-        if (Entorno.profundidad(world, villager) > Recuerdos.LAND_DEPTH) {
-            return false;
         }
         BlockPos.Mutable cell = feet.up(2).mutableCopy();
         for (int k = 0; k < 8; k++, cell.move(Direction.UP)) {
