@@ -331,6 +331,12 @@ public class ProspectingTask extends AbstractChoreTask {
     /** A way on foot ({@link #aPie}) looked for and not found: from where, to where and when, so it is not looked for every tick. */
     @Nullable
     private BlockPos pieNadaDe;
+    /** It could not get into its house this trip: its chest may go right by the house, outside. */
+    private boolean homeOutside;
+    /** The ripe crop it is going to harvest, and for how long it has been at it. */
+    @Nullable
+    private BlockPos crop;
+    private int cropTicks;
     @Nullable
     private BlockPos pieNadaA;
     private long pieNadaAt = Long.MIN_VALUE / 2;
@@ -1375,12 +1381,15 @@ public class ProspectingTask extends AbstractChoreTask {
         if (Mining.outdoors(world, feet) || Entorno.lugar(world, villager) == Lugar.BAJO_TIERRA) {
             return false;
         }
+        if (Entorno.casa(world, villager)) {
+            return true; // inside a house of its village or its own, on the floor of its bed: home, never the mine
+        }
+        if (Entorno.refugio(world, villager) && Entorno.profundidad(world, villager) <= Entorno.DEEP) {
+            return true; // a built roof with the open sky a few steps to the side at its head: an eave, a porch
+        }
         if (Entorno.profundidad(world, villager) > Recuerdos.LAND_DEPTH) {
             // ten blocks down a shaft with sky at the top is still the mine, whatever roofs it can see
             return false;
-        }
-        if (Entorno.refugio(world, villager)) {
-            return true; // a built roof with the open sky a few steps to the side at its head: an eave, a porch
         }
         BlockPos.Mutable cell = feet.up(2).mutableCopy();
         for (int k = 0; k < 8; k++, cell.move(Direction.UP)) {
@@ -1745,9 +1754,17 @@ public class ProspectingTask extends AbstractChoreTask {
                 // in the open top of its staircase the land is a step or two further on the way it is going: turning
                 // back toward home there would set blocks over the steps it just cut, its way back down
                 boolean cutTop = Mining.outdoors(world, here) && !Mining.openGround(world, here);
-                if (hx * hx + hz * hz > 4 && !cutTop) {
+                if (hx * hx + hz * hz > 12 * 12 && !cutTop) {
                     // keep climbing toward home, not past it
                     homeDir = Direction.getFacing(hx, 0, hz).getHorizontal();
+                } else if (hx * hx + hz * hz <= 12 * 12 && mina.entrance() != null && !cutTop) {
+                    // close under home: up toward the mouth of its mine, open ground, never up under its own house
+                    BlockPos mouth = mina.entrance();
+                    int mx = mouth.getX() - here.getX();
+                    int mz = mouth.getZ() - here.getZ();
+                    if (mx * mx + mz * mz > 4) {
+                        homeDir = Direction.getFacing(mx, 0, mz).getHorizontal();
+                    }
                 }
                 // its new steps may have come out onto ground it walked before: from there the remembered way, when it
                 // leads higher up than where it stands (never back down its own new steps), or its staircase on foot
@@ -1992,13 +2009,13 @@ public class ProspectingTask extends AbstractChoreTask {
     @Nullable
     private List<BlockPos> aPie(ServerWorld world, VillagerEntityMCA villager, BlockPos feet, BlockPos goal, double within) {
         long now = world.getTime();
-        if (feet.equals(pieNadaDe) && goal.equals(pieNadaA) && now - pieNadaAt < 100) {
-            return null; // the same question a moment ago from the same cell: the same answer
+        if (pieNadaDe != null && feet.isWithinDistance(pieNadaDe, 4.0) && goal.equals(pieNadaA) && now - pieNadaAt < 200) {
+            return null; // the same question a moment ago from nearly the same spot: the same answer, not thought out every tick
         }
         Recuerdos r = Recuerdos.of(world, villager);
         VisualMemory vista = Retina.memory(villager);
         Map<Long, Boolean> cache = new HashMap<>();
-        Predicate<BlockPos> conocida = c -> cache.computeIfAbsent(c.asLong(), k -> conoce(r, vista, c));
+        Predicate<BlockPos> conocida = c -> cache.computeIfAbsent(c.asLong(), k -> conoce(r, vista, c) && !r.cerrado(c, now));
         int nodes = (int) Math.min(16000, 3000 + 60 * Math.sqrt(feet.getSquaredDistance(goal)));
         List<BlockPos> way;
         try {
@@ -2016,10 +2033,20 @@ public class ProspectingTask extends AbstractChoreTask {
         return way;
     }
 
-    /** A cell it knows: of its mine, walked, touching one of those, or with a floor its eye saw. */
+    /** Inside its own house: not under the open sky, a few steps from its bed, on the floor of the bed. */
+    private static boolean enCasa(ServerWorld world, VillagerEntityMCA villager, BlockPos bed) {
+        BlockPos feet = villager.getBlockPos();
+        return !Mining.outdoors(world, feet) && feet.isWithinDistance(bed, 6.0) && Math.abs(feet.getY() - bed.getY()) <= 1;
+    }
+
+    /** A cell it knows: of its mine, walked, touching one of those, with a floor its eye saw, or in its own house. */
     private boolean conoce(Recuerdos r, VisualMemory vista, BlockPos c) {
         if (mina.has(c) || r.recuerda(c)) {
             return true;
+        }
+        BlockPos house = home != null ? home : homeTarget;
+        if (house != null && !camping && c.isWithinDistance(house, 12)) {
+            return true; // its own house and the yard round it: it knows where the door and the step are
         }
         BlockState floor = vista.stateAt(c.down());
         if (floor != null && !floor.isAir()) {
@@ -2101,6 +2128,10 @@ public class ProspectingTask extends AbstractChoreTask {
         boolean shut = !Motor.standCell(world, cell);
         if (shut) {
             Recuerdos.of(world, villager).cerrar(cell, now + 6000);
+        } else {
+            // open, but its legs got nowhere into it from here (a diagonal squeeze, a step with no room for the head):
+            // left out of its ways for a minute, so the next look takes another way instead of the same one again
+            Recuerdos.of(world, villager).cerrar(cell, now + 1200);
         }
         BlockPos to = viaDestino;
         String was = viaDe;
@@ -2225,9 +2256,10 @@ public class ProspectingTask extends AbstractChoreTask {
     /** Where the next leg of the climb out aims: three up, and three toward home, to one side of it, or away. */
     private BlockPos climbGoal(VillagerEntityMCA villager, BlockPos feet) {
         VisualMemory memory = Retina.memory(villager);
+        World world = villager.getWorld();
         for (int k = 0; k < 5; k++) {
             if (climbMode == 0) {
-                if (!Mining.lavaSeen(memory, feet.up(3)) && !Mining.lavaSeen(memory, feet.up(4))) {
+                if (!Mining.lavaSeen(memory, feet.up(3)) && !Mining.lavaSeen(memory, feet.up(4)) && !underBuilt(world, feet.up(3))) {
                     return feet.up(3);
                 }
             } else {
@@ -2244,13 +2276,30 @@ public class ProspectingTask extends AbstractChoreTask {
                 }
                 BlockPos first = feet.offset(way).up();
                 // the eye saw lava or water that way: the next way round
-                if (!Mining.lavaSeen(memory, first) && !Mining.lavaSeen(memory, first.up()) && !Agua.seenNear(memory, first.up())) {
+                if (!Mining.lavaSeen(memory, first) && !Mining.lavaSeen(memory, first.up()) && !Agua.seenNear(memory, first.up())
+                        && !underBuilt(world, feet.offset(way, 3).up(3))) {
                     return feet.offset(way, 3).up(3);
                 }
             }
             climbMode = (climbMode + 1) % 5;
         }
         return feet.up(3);
+    }
+
+    /**
+     * Something built right over that cell (the floor of a house, a road, a wall): a staircase of its own never comes
+     * up under it, it would only end against blocks it may not break.
+     */
+    private static boolean underBuilt(World world, BlockPos cell) {
+        BlockPos.Mutable c = cell.mutableCopy();
+        for (int k = 0; k < 6; k++) {
+            c.move(Direction.UP);
+            BlockState state = world.getBlockState(c);
+            if (!state.isAir() && Obras.made(state)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -2308,6 +2357,7 @@ public class ProspectingTask extends AbstractChoreTask {
         saveMine(world, villager);
         homeTicks = 0;
         lostTicks = 0;
+        homeOutside = false;
         resetWatch();
         BlockPos target = homePos(world, villager);
         Recuerdos.anotar(villager, "viaje", "salí a la superficie en " + feet.getX() + " " + feet.getY() + " " + feet.getZ() + " ("
@@ -2368,9 +2418,15 @@ public class ProspectingTask extends AbstractChoreTask {
         int dy = target.getY() - feet.getY();
         // a dig-out leg under way is finished before the path finder gets the legs back
         boolean digging = motor.busy() || !plan.isEmpty();
-        // home is at most a hop up: still down in a hole or a cut under it is not there yet (the ledge climb below)
-        if (!digging && dx * dx + dz * dz <= 16 && dy <= 1 && dy >= -3 && villager.isOnGround()) {
+        double d2 = dx * dx + dz * dz;
+        // its bed under a roof: home is inside, past the door, on the floor of the bed; the wall outside it, the porch
+        // or the ground under the house are not home yet. A bed in the open (a camp): a hop up from it is there
+        boolean indoors = !camping && !Mining.outdoors(world, target);
+        boolean there = indoors ? enCasa(world, villager, target) || homeOutside && d2 <= 36 && dy <= 2 && dy >= -3
+                : d2 <= 16 && dy <= 1 && dy >= -3;
+        if (!digging && there && villager.isOnGround()) {
             villager.getNavigation().stop();
+            endVia();
             enterHomeStore();
             return;
         }
@@ -2392,8 +2448,15 @@ public class ProspectingTask extends AbstractChoreTask {
                 return;
             }
         }
+        if (!digging && d2 <= 32 * 32 && (homeTicks % 40) == 1 && !viaMemoria
+                && pieA(world, villager, feet, target, 1.5, target, "un camino a pie hasta su cama")) {
+            // close to home: the way its legs can take over what is there (through its door, up the step of its floor),
+            // walked like a player who knows his own house, before the path finder's guess
+            villager.getNavigation().stop();
+            return;
+        }
         if (!digging) {
-            if (ledgeFails < 3 && dy >= 1 && dy <= 3 && dx * dx + dz * dz < 64) {
+            if (ledgeFails < 3 && dy >= 1 && dy <= 3 && dx * dx + dz * dz < 64 && !indoors) {
                 // home is up a ledge it cannot walk: a way up it knows on foot first, else climb to it the way it climbs
                 // out of a mine
                 villager.getNavigation().stop();
@@ -2454,7 +2517,15 @@ public class ProspectingTask extends AbstractChoreTask {
             }
             if (homeChest == null || !(world.getBlockState(homeChest).getBlock() instanceof ChestBlock)) {
                 homeChest = null;
-                for (BlockPos pos : Cofres.own(world, villager, target)) {
+                List<BlockPos> own = Cofres.own(world, villager, target);
+                // the chests inside its house first, then any of its own around home
+                for (BlockPos pos : own) {
+                    if (pos.isWithinDistance(target, 8) && !Mining.outdoors(world, pos) && Cofres.roomFor(world, pos, first)) {
+                        homeChest = pos;
+                        break;
+                    }
+                }
+                for (BlockPos pos : homeChest != null ? List.<BlockPos>of() : own) {
                     if (pos.isWithinDistance(target, Cofres.HOME_RANGE) && Cofres.roomFor(world, pos, first)) {
                         homeChest = pos;
                         break;
@@ -2468,6 +2539,15 @@ public class ProspectingTask extends AbstractChoreTask {
                     placeTicks++;
                     double hx = target.getX() + 0.5 - villager.getX();
                     double hz = target.getZ() + 0.5 - villager.getZ();
+                    if (!camping && !homeOutside && !Mining.outdoors(world, target) && !enCasa(world, villager, target) && placeTicks <= 600) {
+                        // the chest of its things goes inside its house, by its bed: not by the tree it cut the wood
+                        // from, not on the porch. In through the door first
+                        if (placeTicks == 1) {
+                            MCA.LOGGER.info("[Tropeles] {} lleva su cofre adentro de su casa, junto a su cama en {}", name(), target.toShortString());
+                        }
+                        enterHomeWalk();
+                        return;
+                    }
                     if (hx * hx + hz * hz > 64 && placeTicks <= 400) {
                         // it went off for the wood to make it: the chest goes down at home, not by the tree
                         if ((placeTicks % 20) == 1 || villager.getNavigation().isIdle()) {
@@ -2601,9 +2681,8 @@ public class ProspectingTask extends AbstractChoreTask {
             nextFoodTrip = now + 6000;
             // starving and ripe berries in sight right here: those too (never instead of a night's sleep, never a blind
             // search that wanders back into its mine); otherwise only food it knows of, as before
-            if (!foraged && !world.isNight() && (foodKnown(world, villager)
-                    || food <= GO_HOME_BELOW && !wantsSleep(world, villager) && Mining.onSurface(world, villager.getBlockPos())
-                    && seenBerries(villager, Retina.memory(villager)) != null)) {
+            if ((!foraged || food <= GO_HOME_BELOW) && !world.isNight() && (foodKnown(world, villager)
+                    || food <= GO_HOME_BELOW && !wantsSleep(world, villager))) {
                 say("chore.mining.forage");
                 startForage();
                 return;
@@ -2645,7 +2724,8 @@ public class ProspectingTask extends AbstractChoreTask {
                 || stack.isOf(Items.TORCH) || edible(stack) || Progreso.rawFood(stack) || stack.isOf(Items.CRAFTING_TABLE) || stack.isOf(Items.FURNACE)
                 || stack.isOf(Items.CHEST) || stack.isOf(Items.STICK) || stack.isIn(net.minecraft.registry.tag.ItemTags.PLANKS)
                 || stack.isIn(net.minecraft.registry.tag.ItemTags.LOGS) || stack.isOf(Items.COAL) || stack.isOf(Items.CHARCOAL)
-                || stack.isOf(Items.RAW_IRON) || stack.isOf(Items.IRON_INGOT) || stack.isOf(Items.DIAMOND)) {
+                || stack.isOf(Items.RAW_IRON) || stack.isOf(Items.IRON_INGOT) || stack.isOf(Items.DIAMOND) || stack.isOf(Items.WHEAT)
+                || stack.isOf(Items.WHEAT_SEEDS) || stack.isOf(Items.BEETROOT_SEEDS)) {
             return true;
         }
         if (Hands.isBuildingBlock(stack) && buildingStacks[0] < 2) {
@@ -3423,6 +3503,12 @@ public class ProspectingTask extends AbstractChoreTask {
             resetWatch();
             return;
         }
+        if (food < EAT_BELOW && foodPoints(villager.getInventory()) == 0 && !world.isNight()) {
+            // a hungry morning: breakfast first (the crops of the village, an animal, berries), the mine after
+            say("chore.mining.forage");
+            startForage();
+            return;
+        }
         beginReturn(world, villager);
     }
 
@@ -3537,6 +3623,10 @@ public class ProspectingTask extends AbstractChoreTask {
                 return;
             }
         }
+        if (pickCrops(world, villager, memory, now)) {
+            noFoodTicks = 0;
+            return;
+        }
         if (pickBerries(world, villager, memory, now)) {
             noFoodTicks = 0;
             return;
@@ -3586,6 +3676,78 @@ public class ProspectingTask extends AbstractChoreTask {
         Hands.collect(world, villager, berries, 1.0);
         berries = null;
         return true;
+    }
+
+    /**
+     * Ripe crops its eye saw (wheat, carrots, potatoes, beetroots): walked up to, harvested by hand and sown again like
+     * a farmer does, the seed back into the same farmland, the harvest picked up. Wheat becomes bread at a table
+     * ({@link Progreso}), potatoes go in the furnace. True while busy with them.
+     */
+    private boolean pickCrops(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now) {
+        if (crop == null && (villager.age % 40) == 9) {
+            crop = seenCrop(world, villager, memory);
+            cropTicks = 0;
+        }
+        if (crop == null) {
+            return false;
+        }
+        BlockState state = world.getBlockState(crop);
+        if (!(state.getBlock() instanceof net.minecraft.block.CropBlock plant) || !plant.isMature(state) || ++cropTicks > 400) {
+            crop = null;
+            return false;
+        }
+        double reach = villager.getEyePos().distanceTo(Vec3d.ofCenter(crop));
+        if (reach > 3.5 || Retina.visibleFace(world, villager, crop, Retina.BLOCK_REACH) == null) {
+            if ((cropTicks % 20) == 1 || villager.getNavigation().isIdle()) {
+                villager.getNavigation().startMovingTo(crop.getX() + 0.5, crop.getY(), crop.getZ() + 0.5, 0.6);
+            }
+            memory.doing("yendo a cosechar " + state.getBlock().getName().getString(), now);
+            return true;
+        }
+        villager.getNavigation().stop();
+        villager.getLookControl().lookAt(Vec3d.ofCenter(crop));
+        villager.swingHand(Hand.MAIN_HAND);
+        ItemStack seed = state.getBlock().getPickStack(world, crop, state);
+        world.breakBlock(crop, true, villager);
+        Hands.collect(world, villager, crop, 2.0);
+        // sown again, the way a farmer leaves a field: the same plant in the same soil
+        SimpleInventory inv = villager.getInventory();
+        if (!seed.isEmpty() && world.getBlockState(crop).isAir() && world.getBlockState(crop.down()).isOf(Blocks.FARMLAND)) {
+            for (int i = 0; i < inv.size(); i++) {
+                ItemStack stack = inv.getStack(i);
+                if (stack.isOf(seed.getItem())) {
+                    stack.decrement(1);
+                    inv.markDirty();
+                    world.setBlockState(crop, plant.getDefaultState(), net.minecraft.block.Block.NOTIFY_ALL);
+                    break;
+                }
+            }
+        }
+        MCA.LOGGER.info("[Tropeles] {} cosecha {} en {} y vuelve a sembrar (comida {})", name(), state.getBlock().getName().getString(), crop.toShortString(), food);
+        memory.doing("cosechando", now);
+        Recuerdos.sitio(villager, "cultivos", crop);
+        crop = null;
+        return true;
+    }
+
+    /** The nearest ripe crop its eye saw within 20 blocks (still ripe there now), or null. */
+    @Nullable
+    private static BlockPos seenCrop(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory) {
+        BlockPos feet = villager.getBlockPos();
+        BlockPos best = null;
+        double bestD = Double.MAX_VALUE;
+        for (BlockPos pos : BlockPos.iterate(feet.add(-20, -4, -20), feet.add(20, 4, 20))) {
+            BlockState seen = memory.stateAt(pos);
+            if (seen == null || !(seen.getBlock() instanceof net.minecraft.block.CropBlock plant) || !plant.isMature(seen)) {
+                continue;
+            }
+            double d = pos.getSquaredDistance(feet);
+            if (d < bestD && world.getBlockState(pos).getBlock() instanceof net.minecraft.block.CropBlock real && real.isMature(world.getBlockState(pos))) {
+                bestD = d;
+                best = pos.toImmutable();
+            }
+        }
+        return best;
     }
 
     /** The nearest ripe sweet berry bush its eye saw within 16 blocks, or null. */
@@ -3668,7 +3830,7 @@ public class ProspectingTask extends AbstractChoreTask {
                     same++;
                 }
             }
-            if (same < 2 || penned(world, animal.getBlockPos()) || VillageManager.get(world).findNearestVillage(animal.getBlockPos(), 16).isPresent()) {
+            if (same < 2 || penned(world, animal.getBlockPos()) || Obras.inVillageBuilding(world, animal.getBlockPos())) {
                 continue;
             }
             double distance = animal.squaredDistanceTo(villager);
@@ -3707,7 +3869,8 @@ public class ProspectingTask extends AbstractChoreTask {
             return foodKnownCache;
         }
         foodKnownAt = now;
-        foodKnownCache = rawCount(villager.getInventory()) >= 2
+        foodKnownCache = rawCount(villager.getInventory()) >= 2 || villager.getInventory().count(Items.WHEAT) >= 3
+                || seenCrop(world, villager, Retina.memory(villager)) != null
                 || findPrey(world, villager, Retina.memory(villager), now) != null
                 || Cofres.withFood(world, villager, villager.getBlockPos(), HOME_REACH, ProspectingTask::edible) != null;
         return foodKnownCache;
@@ -4052,8 +4215,27 @@ public class ProspectingTask extends AbstractChoreTask {
             }
         } else {
             villager.getNavigation().stop();
-            if (stuckRounds >= 6) {
-                // a minute without getting closer: no way home from here, this is the camp now
+            BlockPos house = homePos(world, villager);
+            boolean byHouse = !camping && horizontalSq(house, villager) <= 24 * 24;
+            if (stuckRounds >= 6 && byHouse) {
+                // a minute at its own house without getting in: its things go by the house all the same (never a camp
+                // out by the trees), and it says where it is stuck
+                if (!homeOutside) {
+                    homeOutside = true;
+                    MCA.LOGGER.info("[Tropeles] {} no logra entrar a su casa desde {}: guarda sus cosas junto a la casa", name(),
+                            villager.getBlockPos().toShortString());
+                    Voluntad.contar(villager, "No logro entrar a mi casa. Dejo mis cosas aquí al lado y lo intento después.",
+                            "I can't get into my house. I'll leave my things right by it and try again later.");
+                    callOutStuck(world);
+                }
+                if (horizontalSq(house, villager) <= 8 * 8) {
+                    enterHomeStore();
+                } else {
+                    stuckRounds = 3; // closer first: the chest goes by the house, not out here
+                    villager.getNavigation().startMovingTo(house.getX() + 0.5, house.getY(), house.getZ() + 0.5, 0.7);
+                }
+            } else if (stuckRounds >= 6) {
+                // a minute without getting closer, far from any house: no way home from here, this is the camp now
                 camping = true;
                 homeTarget = villager.getBlockPos().toImmutable();
                 enterHomeStore();

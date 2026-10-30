@@ -859,6 +859,8 @@ public class VillagerEntityMCA extends VillagerEntity implements VillagerLike<Vi
                 net.mca.entity.ai.sense.Pantalla.tick(serverWorld, this);
                 // "¡para un momento!": still, crouched and looking at who said it, until it hears why
                 net.mca.entity.ai.mente.Interrupcion.tick(serverWorld, this);
+                // doors: opened by hand on the way, shut behind it once through
+                net.mca.entity.ai.body.Puertas.tick(serverWorld, this);
             }
 
             // panic screams

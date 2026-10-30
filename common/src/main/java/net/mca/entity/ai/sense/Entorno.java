@@ -85,7 +85,7 @@ public final class Entorno {
             return sky >= LEAF_SKY ? Lugar.AFUERA : Lugar.BAJO_TECHO;
         }
         if (Obras.made(roof) || roof.isIn(BlockTags.LOGS)) {
-            if (sky >= HOUSE_SKY || profundidad(world, viewer) <= HOUSE_DEPTH) {
+            if (sky >= HOUSE_SKY || profundidad(world, viewer) <= HOUSE_DEPTH || casa(world, viewer)) {
                 return Lugar.BAJO_TECHO;
             }
             // a made roof with the open sky a few steps to the side at this same level: an eave, a porch, a house
@@ -190,6 +190,43 @@ public final class Entorno {
         memory.shelter = shelter;
         memory.shelterTick = tick;
         return shelter;
+    }
+
+    /**
+     * Inside a house, whatever the land around says: a made roof over the head and either one of its village's
+     * buildings round the feet, or its own bed a few steps away on the same floor. A closed house in a valley, its
+     * door shut and the hills around higher than its roof, is still home, never a mine. Under the floor of a house (dug
+     * in below it) is not: the bed is not on its floor and the first thing over the head is the earth or the floor.
+     * Cheap: once a tick.
+     */
+    public static boolean casa(ServerWorld world, LivingEntity viewer) {
+        VisualMemory memory = Retina.memory(viewer);
+        long tick = world.getTime();
+        if (memory.casaTick == tick) {
+            return memory.casa;
+        }
+        memory.casaTick = tick;
+        memory.casa = false;
+        BlockPos feet = viewer.getBlockPos();
+        BlockState roof = roof(world, BlockPos.ofFloored(viewer.getEyePos()));
+        if (roof == null || !Obras.made(roof) && !roof.isIn(BlockTags.LOGS) || Mining.outdoors(world, feet)) {
+            return false;
+        }
+        boolean home = false;
+        if (viewer instanceof net.mca.entity.VillagerEntityMCA villager) {
+            var bed = villager.getResidency().getHome();
+            if (bed.isPresent() && bed.get().getDimension() == world.getRegistryKey()) {
+                BlockPos at = bed.get().getPos();
+                home = feet.isWithinDistance(at, 8.0) && Math.abs(feet.getY() - at.getY()) <= 1;
+            }
+        }
+        if (!home) {
+            // the floor of one of its village's buildings: the made blocks right under the feet too
+            BlockState floor = world.getBlockState(feet.down());
+            home = Obras.inVillageBuilding(world, feet) && (Obras.made(floor) || floor.isIn(BlockTags.LOGS) || floor.isIn(BlockTags.PLANKS));
+        }
+        memory.casa = home;
+        return home;
     }
 
     /** The open sky is a few steps away: outside, or under a roof at the level of the land. */

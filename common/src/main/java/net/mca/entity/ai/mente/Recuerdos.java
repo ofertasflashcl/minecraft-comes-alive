@@ -4,6 +4,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.mca.MCA;
 import net.mca.entity.ai.body.Mining;
+import net.mca.entity.ai.body.Motor;
+import net.mca.entity.ai.body.Puertas;
 import net.mca.entity.ai.sense.Entorno;
 import net.mca.entity.ai.sense.Lugar;
 import net.mca.entity.ai.sense.VisualMemory;
@@ -249,6 +251,11 @@ public final class Recuerdos {
         }
     }
 
+    /** That cell is shut for its ways right now (it found it blocked, or its legs got nowhere through it). */
+    public boolean cerrado(BlockPos pos, long now) {
+        return cerrado(pos.asLong(), now);
+    }
+
     private boolean cerrado(long key, long now) {
         Long until = cerrados.get(key);
         if (until == null) {
@@ -400,23 +407,23 @@ public final class Recuerdos {
 
     /** Room for the body in that cell and something under it, by touch (cached for one search). */
     private static boolean room(ServerWorld world, Map<Long, Boolean> cache, BlockPos cell) {
-        return cache.computeIfAbsent(cell.asLong(), k -> Mining.passable(world, cell) && Mining.passable(world, cell.up())
-                && Mining.standable(world, cell.down()) && !Mining.heat(world, cell));
+        // a wooden door or a gate is room too: the hand opens it on the way; a door is never the floor
+        return cache.computeIfAbsent(cell.asLong(), k -> Puertas.libre(world, cell) && Puertas.libre(world, cell.up())
+                && Puertas.suelo(world, cell.down()) && !Mining.heat(world, cell));
     }
 
     /** It can get from {@code a} to the touching cell {@code b}: head room for a step up or down, a corner open on a diagonal. */
     private static boolean transit(ServerWorld world, BlockPos a, BlockPos b, int dx, int dy, int dz) {
-        if (dy > 0 && !Mining.passable(world, a.up(2))) {
+        if (dy > 0 && !Puertas.libre(world, a.up(2))) {
             return false;
         }
-        if (dy < 0 && !Mining.passable(world, b.up(2))) {
+        if (dy < 0 && !Puertas.libre(world, b.up(2))) {
             return false;
         }
         if (dx != 0 && dz != 0) {
-            int y = Math.max(a.getY(), b.getY());
-            BlockPos c1 = new BlockPos(a.getX() + dx, y, a.getZ());
-            BlockPos c2 = new BlockPos(a.getX(), y, a.getZ() + dz);
-            return Mining.passable(world, c1) && Mining.passable(world, c1.up()) || Mining.passable(world, c2) && Mining.passable(world, c2.up());
+            // a corner the legs can really stand in on the way round, the same one the walker steps through: two
+            // blocks touching on the diagonal are a wall, nobody squeezes between them
+            return Motor.esquina(world, a, b) != null;
         }
         return true;
     }
@@ -723,10 +730,10 @@ public final class Recuerdos {
      */
     private static boolean pasoA(ServerWorld world, BlockPos a, BlockPos b, int dy) {
         if (dy > 0) {
-            return Mining.passable(world, a.up(2));
+            return Puertas.libre(world, a.up(2));
         }
         for (int k = 1; k <= -dy + 1; k++) {
-            if (!Mining.passable(world, b.up(k))) {
+            if (!Puertas.libre(world, b.up(k))) {
                 return false;
             }
         }

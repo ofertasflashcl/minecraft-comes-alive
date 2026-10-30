@@ -388,6 +388,12 @@ public final class Motor {
                 return Result.RUNNING;
             }
         }
+        if (!rising && settled && Puertas.abrirHacia(world, villager, goal)) {
+            // a shut door or gate on the way: the hand opens it first, like a player's right click, and the legs wait for it
+            standStill(villager);
+            doing = "abre la puerta";
+            return Result.RUNNING;
+        }
         if (feet.equals(goal) && !rising && onCell(world, villager, feet)) {
             // never mid-jump, never from the lip with its centre over the gap it is bridging
             endStep();
@@ -525,7 +531,7 @@ public final class Motor {
 
     /** A cell the feet can be in without touching anything: something to stand on, room for the feet and the head, no heat. */
     public static boolean standCell(World world, BlockPos feet) {
-        return open(world, feet) && open(world, feet.up()) && Mining.standable(world, feet.down()) && !Mining.heat(world, feet)
+        return open(world, feet) && open(world, feet.up()) && Puertas.suelo(world, feet.down()) && !Mining.heat(world, feet)
                 && !Mining.heat(world, feet.up());
     }
 
@@ -582,7 +588,7 @@ public final class Motor {
                     continue;
                 }
                 // a step up: the step is solid with room over it, and room over its own head for the jump
-                if (Mining.standable(world, side) && standCell(world, side.up()) && open(world, cell.up(2))) {
+                if (Puertas.suelo(world, side) && standCell(world, side.up()) && open(world, cell.up(2))) {
                     next.add(side.up());
                     price.add(2.0);
                     continue;
@@ -663,6 +669,12 @@ public final class Motor {
             out.add(b);
         }
         return out;
+    }
+
+    /** The corner cell the body can stand in on a diagonal hop from {@code a} to {@code b}, or null: no way round. */
+    @Nullable
+    public static BlockPos esquina(World world, BlockPos a, BlockPos b) {
+        return corner(world, a, b);
     }
 
     @Nullable
@@ -1544,7 +1556,8 @@ public final class Motor {
 
     /** The body fits through here (a ladder counts: it is climbed, never dug). */
     private static boolean open(World world, BlockPos pos) {
-        return Mining.passable(world, pos) || world.getBlockState(pos).getBlock() instanceof LadderBlock;
+        // a wooden door or a gate is a way through: the hand opens it on the way (Puertas)
+        return Mining.passable(world, pos) || world.getBlockState(pos).getBlock() instanceof LadderBlock || Puertas.puerta(world.getBlockState(pos));
     }
 
     /** Sand or gravel falling right over it or the way. */

@@ -111,6 +111,7 @@ public final class Progreso {
         COAL(s -> s.isOf(Items.COAL) || s.isOf(Items.CHARCOAL)),
         TABLE(s -> s.isOf(Items.CRAFTING_TABLE)),
         FURNACE(s -> s.isOf(Items.FURNACE)),
+        WHEAT(s -> s.isOf(Items.WHEAT)),
         RAW(Progreso::rawFood);
 
         final Predicate<ItemStack> match;
@@ -141,6 +142,18 @@ public final class Progreso {
     private static final Recipe IRON_SWORD = new Recipe(Items.IRON_SWORD, 1, true, Map.of(Mat.IRON, 2, Mat.STICK, 1));
     private static final Recipe DIAMOND_SWORD = new Recipe(Items.DIAMOND_SWORD, 1, true, Map.of(Mat.DIAMOND, 2, Mat.STICK, 1));
     private static final Recipe CHEST = new Recipe(Items.CHEST, 1, true, Map.of(Mat.PLANKS, 8));
+    private static final Recipe BREAD = new Recipe(Items.BREAD, 1, true, Map.of(Mat.WHEAT, 3));
+    /** Armour as vanilla makes it, best protection first: the chestplate, the leggings, the helmet, the boots. */
+    private static final List<Recipe> IRON_ARMOR = List.of(
+            new Recipe(Items.IRON_CHESTPLATE, 1, true, Map.of(Mat.IRON, 8)),
+            new Recipe(Items.IRON_LEGGINGS, 1, true, Map.of(Mat.IRON, 7)),
+            new Recipe(Items.IRON_HELMET, 1, true, Map.of(Mat.IRON, 5)),
+            new Recipe(Items.IRON_BOOTS, 1, true, Map.of(Mat.IRON, 4)));
+    private static final List<Recipe> DIAMOND_ARMOR = List.of(
+            new Recipe(Items.DIAMOND_CHESTPLATE, 1, true, Map.of(Mat.DIAMOND, 8)),
+            new Recipe(Items.DIAMOND_LEGGINGS, 1, true, Map.of(Mat.DIAMOND, 7)),
+            new Recipe(Items.DIAMOND_HELMET, 1, true, Map.of(Mat.DIAMOND, 5)),
+            new Recipe(Items.DIAMOND_BOOTS, 1, true, Map.of(Mat.DIAMOND, 4)));
     /** How far it may wander off while its iron cooks before it goes back for it. */
     private static final int FURNACE_LEASH = 20;
 
@@ -362,6 +375,47 @@ public final class Progreso {
         ItemStack leftover = villager.getInventory().addStack(stack);
         if (!leftover.isEmpty()) {
             villager.dropStack(leftover);
+        }
+    }
+
+    /** Whether that piece would protect more than the best one of its kind it wears or carries. */
+    private static boolean betterArmor(VillagerEntityMCA villager, Item piece) {
+        if (!(piece instanceof net.minecraft.item.ArmorItem armor)) {
+            return false;
+        }
+        net.minecraft.entity.EquipmentSlot slot = armor.getSlotType();
+        int best = villager.getEquippedStack(slot).getItem() instanceof net.minecraft.item.ArmorItem worn && worn.getSlotType() == slot ? worn.getProtection() : 0;
+        SimpleInventory inv = villager.getInventory();
+        for (int i = 0; i < inv.size(); i++) {
+            if (inv.getStack(i).getItem() instanceof net.minecraft.item.ArmorItem own && own.getSlotType() == slot) {
+                best = Math.max(best, own.getProtection());
+            }
+        }
+        return armor.getProtection() > best;
+    }
+
+    /**
+     * Puts on the best armour it carries, piece by piece, like a player right after crafting it, and keeps wearing
+     * armour from now on (the villager's own "wear armour" setting).
+     */
+    public static void wear(VillagerEntityMCA villager) {
+        villager.getVillagerBrain().setArmorWear(true);
+        SimpleInventory inv = villager.getInventory();
+        for (net.minecraft.entity.EquipmentSlot slot : new net.minecraft.entity.EquipmentSlot[]{net.minecraft.entity.EquipmentSlot.HEAD,
+                net.minecraft.entity.EquipmentSlot.CHEST, net.minecraft.entity.EquipmentSlot.LEGS, net.minecraft.entity.EquipmentSlot.FEET}) {
+            ItemStack best = ItemStack.EMPTY;
+            int prot = -1;
+            for (int i = 0; i < inv.size(); i++) {
+                ItemStack stack = inv.getStack(i);
+                if (stack.getItem() instanceof net.minecraft.item.ArmorItem armor && armor.getSlotType() == slot && armor.getProtection() > prot) {
+                    prot = armor.getProtection();
+                    best = stack;
+                }
+            }
+            if (!best.isEmpty() && villager.getEquippedStack(slot) != best) {
+                villager.equipStack(slot, best);
+                net.mca.MCA.LOGGER.info("[Tropeles] {} se pone {}", villager.getName().getString(), best.getName().getString());
+            }
         }
     }
 
@@ -621,6 +675,28 @@ public final class Progreso {
         }
         if (pick >= 1 && sword < 1 && count(inv, Mat.PLANKS) + 4 * count(inv, Mat.LOG) >= 2 + 2 + 4) {
             wanted.add(WOODEN_SWORD);
+        }
+        // armour from its own iron and diamonds, once the pickaxe and the sword of that metal are there: the piece
+        // that protects most among those it can pay for, never one no better than what it wears
+        if (pick >= 4 && sword >= 4) {
+            for (Recipe piece : DIAMOND_ARMOR) {
+                if (count(inv, Mat.DIAMOND) >= piece.cost().get(Mat.DIAMOND) && betterArmor(villager, piece.output())) {
+                    wanted.add(piece);
+                    break;
+                }
+            }
+        }
+        if (pick >= 3 && sword >= 3) {
+            for (Recipe piece : IRON_ARMOR) {
+                if (count(inv, Mat.IRON) >= piece.cost().get(Mat.IRON) && betterArmor(villager, piece.output())) {
+                    wanted.add(piece);
+                    break;
+                }
+            }
+        }
+        // bread from the wheat of a harvest: three in a row on a table
+        if (count(inv, Mat.WHEAT) >= 3 && count(inv, Items.BREAD) < 16) {
+            wanted.add(BREAD);
         }
         // coal for the furnace comes first: one lump smelts eight raw iron
         int coalForIron = (int) Math.ceil(count(inv, Items.RAW_IRON) / 8.0);
@@ -1885,6 +1961,9 @@ public final class Progreso {
         ItemStack made = new ItemStack(recipe.output(), recipe.count());
         give(villager, made.copy());
         villager.swingHand(Hand.MAIN_HAND);
+        if (made.getItem() instanceof net.minecraft.item.ArmorItem) {
+            wear(villager);
+        }
         Retina.memory(villager).doing("fabricó " + made.getName().getString(), world.getTime());
         if (recipe == TORCHES) {
             say.accept("chore.mining.torches", new Object[]{made.getCount()});

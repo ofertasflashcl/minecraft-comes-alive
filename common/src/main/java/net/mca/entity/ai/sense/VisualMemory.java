@@ -70,6 +70,8 @@ public final class VisualMemory {
     long depthTick = Long.MIN_VALUE;
     int depth;
     long shelterTick = Long.MIN_VALUE;
+    boolean casa;
+    long casaTick = Long.MIN_VALUE;
     boolean shelter;
 
     public static final class SeenBlock {
