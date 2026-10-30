@@ -122,6 +122,16 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
                 return true;
             }
             case "gohome" -> {
+                if (connected) {
+                    // its own legs take it home (out of the mine if it is in one); the move state would not, and stays as it is
+                    if (net.mca.entity.ai.mente.Voluntad.of(entity).modo() != net.mca.entity.ai.mente.Voluntad.Modo.LIBRE) {
+                        net.mca.entity.ai.mente.Voluntad.libre(entity, player, net.mca.entity.ai.mente.Voluntad.of(entity).spanish());
+                    }
+                    net.mca.entity.ai.brain.tasks.chore.ProspectingTask.callHome(entity, false);
+                    entity.sendChatMessage(player, "interaction.gohome.success");
+                    stopInteracting();
+                    return false;
+                }
                 entity.getResidency().goHome(player);
                 stopInteracting();
                 return false;
