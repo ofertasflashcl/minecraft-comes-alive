@@ -396,6 +396,10 @@ public class ProspectingTask extends AbstractChoreTask {
      */
     @Nullable
     private LivingEntity digTarget;
+    /** The enemy of this fight and when it last had it (seen or not): knocked back out of sight, it is still there. */
+    @Nullable
+    private LivingEntity fightTarget;
+    private long fightTargetTick;
     private int digGain;
     private int digFails;
     private double digClosest;
@@ -4806,7 +4810,17 @@ public class ProspectingTask extends AbstractChoreTask {
             // looking at the rock it breaks it does not see the enemy behind it, but it knows where it is
             target = digTarget;
         }
+        if (target == null && fightTarget != null && fightTarget.isAlive() && !fightTarget.isRemoved() && fightTarget.getWorld() == world
+                && world.getTime() - fightTargetTick < 200 && fightTarget.squaredDistanceTo(villager) < 16 * 16
+                && !CombatMind.ignoring(villager, fightTarget)) {
+            // knocked back behind the rock or round a corner: a player knows it is still there and goes after it
+            target = fightTarget;
+        } else if (target != null) {
+            fightTarget = target;
+            fightTargetTick = world.getTime();
+        }
         if (target == null) {
+            fightTarget = null;
             digTicks = 0;
             digTarget = null;
             Recuerdos.anotar(villager, "pelea", "terminé la pelea, no queda nada que me ataque", villager.getBlockPos());
