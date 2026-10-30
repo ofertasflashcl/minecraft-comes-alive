@@ -137,14 +137,14 @@ public final class Companero {
     private static final Pattern QUE_PASA = Pattern.compile("que (?:te )?(?:pasa|paso|sucede|ocurre)|estas bien|por que (?:te )?(?:paras|paraste|detienes|detuviste|esperas)|what'?s (?:wrong|up|going on)|are you (?:ok|okay|alright)|what happened");
     private static final Pattern NO_TENGO = Pattern.compile("^(?:no|nop|nope|nada)\\b|no tengo|no traigo|no me queda|no hay|i don'?t have|no food|sorry,? no");
     /** Words after "soy", "dime", "I'm"... that are never a name. */
-    private static final Set<String> NO_NOMBRE = Set.of("un", "una", "el", "la", "los", "las", "tu", "su", "mi", "de", "del", "muy", "bien", "mal",
+    private static final Set<String> NO_NOMBRE = Set.copyOf(List.of("un", "una", "el", "la", "los", "las", "tu", "su", "mi", "de", "del", "muy", "bien", "mal",
             "nuevo", "nueva", "hombre", "mujer", "chico", "chica", "nino", "nina", "varon", "yo", "no", "si", "que", "como", "donde", "cuando", "tan",
             "mas", "amigo", "amiga", "compadre", "comadre", "pareja", "novio", "novia", "pololo", "polola", "gay", "lesbiana", "trans", "bi", "hetero",
             "feliz", "alguien", "quien", "tuyo", "tuya", "ella", "el", "a", "an", "the", "not", "fine", "good", "ok", "okay", "here", "back", "sorry",
             "going", "hungry", "tired", "your", "so", "just", "male", "female", "man", "woman", "boy", "girl", "guy", "humano", "jugador", "player",
             "aqui", "aca", "listo", "lista", "chileno", "chilena", "hola", "holi", "wena", "buenas", "hey", "hi", "hello", "ola", "gracias", "thanks",
             "vale", "dale", "ya", "sigueme", "ven", "para", "espera", "vamos", "oye", "mira", "algo", "eso", "esto", "nada", "todo", "otra", "otro",
-            "ahora", "lo", "le", "te", "me", "se", "es", "porfa", "por", "cabro", "cabra", "dude", "lady", "enby", "elle", "minero", "minera", "hambre");
+            "ahora", "lo", "le", "te", "me", "se", "es", "porfa", "por", "cabro", "cabra", "dude", "lady", "enby", "elle", "minero", "minera", "hambre"));
 
     private Companero() {
     }
