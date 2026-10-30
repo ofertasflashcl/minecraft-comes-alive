@@ -712,7 +712,7 @@ public final class Voluntad {
     private void change(VillagerEntityMCA villager, Modo to, @Nullable PlayerEntity player, @Nullable BlockPos spot, String why) {
         Modo from = modo;
         if (to == Modo.ALERTA && from != Modo.ALERTA) {
-            debajo = from;
+            debajo = from == Modo.CONOCIENDO ? Modo.SIGUIENDO : from; // a meeting cut short goes on at their side
             debajoQuien = quien;
             debajoEspera = espera;
         }

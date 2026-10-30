@@ -2316,6 +2316,16 @@ public class ProspectingTask extends AbstractChoreTask {
             }
             climbMode = (climbMode + 1) % 5;
         }
+        // a house or a village over every way up: a level tunnel out from under it first, away from the village
+        // (its home is in it) before anything else, then on up where nothing built is overhead
+        Direction toward = Direction.fromHorizontal(homeDir);
+        for (Direction way : new Direction[]{toward.getOpposite(), toward.rotateYClockwise(), toward.rotateYCounterclockwise(), toward}) {
+            BlockPos flat = feet.offset(way, 3);
+            if (!Mining.lavaSeen(memory, flat) && !Mining.lavaSeen(memory, flat.up()) && !Agua.seenNear(memory, flat.up())
+                    && !underBuilt(world, flat.offset(way, 3).up(3))) {
+                return flat;
+            }
+        }
         return feet.up(3);
     }
 
@@ -2328,7 +2338,9 @@ public class ProspectingTask extends AbstractChoreTask {
         for (int k = 0; k < 6; k++) {
             c.move(Direction.UP);
             BlockState state = world.getBlockState(c);
-            if (!state.isAir() && Obras.made(state)) {
+            // a village path or a field is ground it comes out beside, not a roof over its staircase
+            if (!state.isAir() && Obras.made(state) && !state.isOf(Blocks.DIRT_PATH) && !state.isOf(Blocks.FARMLAND)
+                    && !state.isIn(BlockTags.CROPS) && !state.isIn(BlockTags.FLOWERS)) {
                 return true;
             }
         }

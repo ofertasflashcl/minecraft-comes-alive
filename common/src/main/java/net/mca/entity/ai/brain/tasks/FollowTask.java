@@ -237,7 +237,7 @@ public class FollowTask extends MultiTickTask<VillagerEntityMCA> {
             villager.getLookControl().lookAt(ward, 20.0F, 20.0F);
             return;
         }
-        boolean run = !sneak && want > WALK + 0.015;
+        boolean run = !sneak && (want > WALK + 0.04 || villager.isSprinting() && want > WALK + 0.005);
         if (run != villager.isSprinting()) {
             villager.setSprinting(run); // the game's own sprint: +30% to the legs, and a jump carries it forward
         }

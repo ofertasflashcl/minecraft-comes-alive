@@ -584,6 +584,13 @@ public final class Companero {
         }
         char gender = HOMBRE.matcher(low).find() ? 'm' : MUJER.matcher(low).find() ? 'f' : NEUTRO.matcher(low).find() ? 'n' : 0;
 
+        boolean order;
+        try {
+            MenteLocal.Intent read = MenteLocal.read(msg, villagerName);
+            order = read.command() != null && !read.command().isBlank();
+        } catch (RuntimeException ex) {
+            order = false;
+        }
         StringBuilder answer = new StringBuilder();
         String why = null;
         if (told != null) {
@@ -609,6 +616,10 @@ public final class Companero {
                 answer.append(es ? "Entendido, " + nombre(villager, player) + ". " : "Got it, " + nombre(villager, player) + ". ");
             }
             why = (why == null ? "" : why + "; ") + "me dijo cómo se identifica (" + gender + ")";
+        }
+        if (order && !answer.isEmpty()) {
+            // "soy Benja, sígueme": the name is kept, and the order is answered the usual way
+            return false;
         }
         if (answer.isEmpty()) {
             String reply = bondQuestion(player, villager, low, es);
