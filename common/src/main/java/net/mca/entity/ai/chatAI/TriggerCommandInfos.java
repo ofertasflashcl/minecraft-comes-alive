@@ -6,6 +6,7 @@ import net.mca.entity.ai.Chore;
 import net.mca.entity.ai.MoveState;
 import net.mca.entity.ai.body.Cofres;
 import net.mca.entity.ai.brain.tasks.chore.ProspectingTask;
+import net.mca.entity.ai.mente.Encargo;
 import net.mca.entity.ai.mente.Voluntad;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.util.math.GlobalPos;
@@ -119,14 +120,38 @@ public class TriggerCommandInfos {
                         return (already ? "You keep mining" : "You went mining") + looking + ".";
                     },
                     (p, v) -> true),
-            job("start-chopping", "Start chopping trees", Chore.CHOP),
-            job("start-fishing", "Start fishing", Chore.FISH),
-            job("start-harvesting", "Start harvesting crops", Chore.HARVEST),
-            job("start-hunting", "Start hunting animals", Chore.HUNT),
-            job("start-escort", "Start escorting", Chore.ESCORT),
-            new TriggerCommandInfo("stop-working", "Stop the work you are doing for good (a connected villager disconnects); not for a quick "
-                    + "\"stop!\" or \"careful!\", that is alert",
-                    (p, v) -> v.getVillagerBrain().abandonJob(),
+            // a connected villager does these itself and comes back (never MCA's chore: that would end its connection)
+            job("start-chopping", "Chop trees (some wood, logs, a few trees)", Chore.CHOP, Encargo.Tipo.TALAR),
+            job("start-fishing", "Go fishing", Chore.FISH, Encargo.Tipo.PESCAR),
+            job("start-harvesting", "Harvest the ripe crops (and sow them again)", Chore.HARVEST, Encargo.Tipo.COSECHAR),
+            job("start-hunting", "Hunt animals for meat (never the village's or a pen's)", Chore.HUNT, Encargo.Tipo.CAZAR),
+            new TriggerCommandInfo("start-escort", "Start escorting",
+                    null,
+                    (p, v, ignored) -> {
+                        if (Voluntad.conectado(v)) {
+                            return Voluntad.seguir(v, p, spanish(v));
+                        }
+                        v.getVillagerBrain().assignJob(Chore.ESCORT, p);
+                        return null;
+                    },
+                    (p, v) -> Voluntad.conectado(v) || v.getVillagerBrain().getCurrentJob() != Chore.ESCORT),
+            new TriggerCommandInfo("craft-item", "Make something with your own hands at a crafting table (you set one down and pick it up again, "
+                    + "and chop the wood it needs yourself): planks, sticks, a crafting table, a chest, torches, a furnace, bread, a ladder, a fishing "
+                    + "rod, a bow, a shield, a wooden, stone, iron or diamond pickaxe, sword, axe, shovel or hoe, or iron or diamond armour",
+                    "what to make and how many, in the player's words, for example \"cofre\", \"2 antorchas\", \"espada de piedra\"; "
+                            + "add \"para ti\" when it is for yourself",
+                    (p, v, what) -> Voluntad.encargar(v, p, Encargo.Tipo.HACER, what, spanish(v)),
+                    (p, v) -> Voluntad.conectado(v)),
+            new TriggerCommandInfo("stop-working", "Stop the work or the errand you are doing; not for a quick \"stop!\" or \"careful!\", that is "
+                    + "alert. A connected villager never disconnects: it drops the errand (or its digging) and stays with the player",
+                    null,
+                    (p, v, ignored) -> {
+                        if (Voluntad.conectado(v)) {
+                            return Voluntad.parar(v, p, spanish(v));
+                        }
+                        v.getVillagerBrain().abandonJob();
+                        return null;
+                    },
                     (p, v) -> v.getVillagerBrain().getCurrentJob() != Chore.NONE),
             new TriggerCommandInfo("give-item", "Hand the player something you are carrying, when they ask for it and you are willing",
                     "the item and how many, as in your bag, for example \"iron_ingot 3\" or \"bread\"",
@@ -238,10 +263,21 @@ public class TriggerCommandInfos {
                 + ". Ask them what is going on, in a short question.";
     }
 
-    private static TriggerCommandInfo job(String command, String description, Chore chore) {
+    /**
+     * One of MCA's chores: a villager with no connection takes the chore; a connected one does it itself as an errand
+     * ({@link Voluntad#encargar}) and comes back, because the chore would take the place of its connection.
+     */
+    private static TriggerCommandInfo job(String command, String description, Chore chore, Encargo.Tipo errand) {
         return new TriggerCommandInfo(command, description,
-                (p, v) -> v.getVillagerBrain().assignJob(chore, p),
-                (p, v) -> v.getVillagerBrain().getCurrentJob() != chore);
+                "how many and whether to bring it, in the player's words, for example \"10 troncos\", \"un poco\", \"traeme 5\", \"una vaca\"",
+                (p, v, how) -> {
+                    if (Voluntad.conectado(v)) {
+                        return Voluntad.encargar(v, p, errand, how, spanish(v));
+                    }
+                    v.getVillagerBrain().assignJob(chore, p);
+                    return null;
+                },
+                (p, v) -> Voluntad.conectado(v) || v.getVillagerBrain().getCurrentJob() != chore);
     }
 
     public static Optional<TriggerCommandInfo> findCommand(String command, ServerPlayerEntity player, VillagerEntityMCA villagerEntityMCA) {

@@ -59,7 +59,10 @@ public class OpenAIChatAI implements ChatAIStrategy {
             Map.entry("consider-going-home", "consider-return"), Map.entry("weigh-return", "consider-return"), Map.entry("think-about-it", "consider-return"),
             Map.entry("careful", "alert"), Map.entry("be-careful", "alert"), Map.entry("halt", "alert"), Map.entry("freeze", "alert"),
             Map.entry("stop-and-look", "alert"), Map.entry("continue", "carry-on"), Map.entry("resume", "carry-on"), Map.entry("go-on", "carry-on"),
-            Map.entry("carry", "carry-on"), Map.entry("own-life", "free"), Map.entry("free-will", "free"), Map.entry("do-your-thing", "free")
+            Map.entry("carry", "carry-on"), Map.entry("own-life", "free"), Map.entry("free-will", "free"), Map.entry("do-your-thing", "free"),
+            Map.entry("craft", "craft-item"), Map.entry("make", "craft-item"), Map.entry("make-item", "craft-item"), Map.entry("build-item", "craft-item"),
+            Map.entry("chop-trees", "start-chopping"), Map.entry("get-wood", "start-chopping"), Map.entry("go-fishing", "start-fishing"),
+            Map.entry("go-hunting", "start-hunting")
     );
 
     public static String translate(String phrase) {

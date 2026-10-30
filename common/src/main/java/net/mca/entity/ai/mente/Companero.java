@@ -645,6 +645,11 @@ public final class Companero {
         String n = nombre(villager, player);
         char g = genero(villager, player);
         Etapa st = etapa(m);
+        // "sí, pásamelos" to what it just offered (an errand's haul): handed over, or kept
+        String offer = Voluntad.respuestaOferta(villager, player, low, es);
+        if (offer != null) {
+            return offer;
+        }
         Hambre h = HAMBRE.get(villager.getUuid());
         if (h != null && h.asked && NO_TENGO.matcher(low).find()) {
             h.leave = true;

@@ -960,6 +960,432 @@ public class ProspectingTask extends AbstractChoreTask {
         return freeSlots(villager.getInventory());
     }
 
+    // ------------------------------------------------------------------ errands ({@link Encargo}): asked by a player, done by its own hands
+
+    /** Crops it harvested, animals it hunted, catches it reeled in, ever: an errand counts from where they stood. */
+    private int cosechas;
+    private int cazas;
+    private int pescas;
+    /** Ticks of an errand with nothing to do (nothing ripe, nothing to hunt in sight). */
+    private int encargoQuieto;
+    /** Fishing: the water it fishes in, the bank it stands on, how long it walked there, the line in the water. */
+    @Nullable
+    private BlockPos agua;
+    @Nullable
+    private BlockPos orilla;
+    private int orillaTicks;
+    private boolean lanzado;
+    private int pescaTicks;
+    private int picada;
+
+    /** Whether it can take this errand on right now: null when it can, otherwise why not, in its own words (Spanish, English). */
+    @Nullable
+    public String[] noPuede(ServerWorld world, VillagerEntityMCA villager, net.mca.entity.ai.mente.Encargo e) {
+        boolean below = Entorno.bajoTierra(world, villager);
+        switch (e.tipo) {
+            case TALAR -> {
+                if (below) {
+                    return new String[]{"Aquí abajo no hay árboles. Cuando salgamos, talo lo que quieras.", "There are no trees down here. Once we're out, I'll chop all you want."};
+                }
+            }
+            case COSECHAR -> {
+                if (below) {
+                    return new String[]{"Aquí abajo no crece nada. Arriba cosecho lo que quieras.", "Nothing grows down here. Up top I'll harvest whatever you want."};
+                }
+            }
+            case CAZAR -> {
+                if (below) {
+                    return new String[]{"Aquí abajo no hay animales. Arriba salgo a cazar.", "There are no animals down here. Up top I'll go hunting."};
+                }
+                if (night(world)) {
+                    return new String[]{"Ya está oscuro, a esta hora no cazo: de noche salen los monstruos. Mañana temprano, si quieres.",
+                            "It's dark already, I won't hunt now: the monsters come out at night. First thing tomorrow, if you like."};
+                }
+            }
+            case PESCAR -> {
+                if (!tieneCana(villager) && Progreso.tiene(villager, Items.STRING) < 2) {
+                    return new String[]{"No tengo caña de pescar, ni hilo para hacerme una. Si me pasas una, pesco.",
+                            "I don't have a fishing rod, nor string to make one. Hand me one and I'll fish."};
+                }
+            }
+            case HACER -> {
+                String[] falta = progreso.falta(world, villager, e.cosa, e.cuanto);
+                if (falta != null) {
+                    return falta;
+                }
+            }
+        }
+        if (bagFull(villager) && e.tipo != net.mca.entity.ai.mente.Encargo.Tipo.HACER) {
+            return new String[]{"Tengo la mochila llena. Déjame guardar mis cosas primero.", "My bag is full. Let me store my things first."};
+        }
+        return null;
+    }
+
+    private static boolean tieneCana(VillagerEntityMCA villager) {
+        return villager.getMainHandStack().getItem() instanceof net.minecraft.item.FishingRodItem
+                || InventoryUtils.getFirstSlotContainingItem(villager.getInventory(), s -> s.getItem() instanceof net.minecraft.item.FishingRodItem) >= 0;
+    }
+
+    /** The errand starts: what it has now is where its count starts; its own life waits ({@link Voluntad} has the body). */
+    public void empezarEncargo(ServerWorld world, VillagerEntityMCA villager, net.mca.entity.ai.mente.Encargo e) {
+        this.villager = villager;
+        motor.reset(world, villager);
+        plan.clear();
+        villager.getNavigation().stop();
+        explorar.reset();
+        encargoQuieto = 0;
+        switch (e.tipo) {
+            case TALAR -> {
+                e.base = Progreso.troncos(villager);
+                progreso.pedirTroncos(e.base + e.cuanto);
+            }
+            case COSECHAR -> {
+                e.base = cosechas;
+                crop = null;
+            }
+            case CAZAR -> {
+                e.base = cazas;
+                prey = null;
+                lootTicks = 0;
+                lootAt = null;
+            }
+            case PESCAR -> {
+                e.base = pescas;
+                agua = null;
+                orilla = null;
+                lanzado = false;
+            }
+            case HACER -> {
+                e.base = Progreso.tiene(villager, e.cosa);
+                Progreso.paraOtro(villager, e.traer ? e.cosa : null);
+                progreso.pedir(e.cosa, e.base + e.cuanto);
+            }
+        }
+        MCA.LOGGER.info("[Tropeles] {} empieza un encargo de {}: {} (traer {})", name(), e.paraNombre, e.tipo.palabra, e.traer);
+    }
+
+    /** The errand is over or called off: what it asked of the hands is let go of (a hunt, the line, a table it put down). */
+    public void dejarEncargo(ServerWorld world, VillagerEntityMCA villager) {
+        progreso.olvidarPedidos(world, villager);
+        Progreso.paraOtro(villager, null);
+        if (prey != null) {
+            CombatMind.disengage(villager);
+            prey = null;
+        }
+        lootTicks = 0;
+        lootAt = null;
+        crop = null;
+        agua = null;
+        orilla = null;
+        lanzado = false;
+        motor.reset(world, villager);
+        villager.getNavigation().stop();
+    }
+
+    /** One tick of the errand: how it goes. */
+    public net.mca.entity.ai.mente.Encargo.Fin encargo(ServerWorld world, VillagerEntityMCA villager, net.mca.entity.ai.mente.Encargo e) {
+        this.villager = villager;
+        VisualMemory memory = Retina.memory(villager);
+        long now = world.getTime();
+        return switch (e.tipo) {
+            case TALAR -> talar(world, villager, e);
+            case COSECHAR -> cosechar(world, villager, memory, now, e);
+            case CAZAR -> cazar(world, villager, memory, now, e);
+            case PESCAR -> pescar(world, villager, memory, now, e);
+            case HACER -> hacer(world, villager, e);
+        };
+    }
+
+    private net.mca.entity.ai.mente.Encargo.Fin talar(ServerWorld world, VillagerEntityMCA villager, net.mca.entity.ai.mente.Encargo e) {
+        boolean busy = progreso.tick(world, villager, this::say);
+        e.hecho = Math.max(0, Progreso.troncos(villager) - e.base);
+        if (busy) {
+            encargoQuieto = 0;
+            return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+        }
+        if (e.hecho >= e.cuanto) {
+            return net.mca.entity.ai.mente.Encargo.Fin.LISTO;
+        }
+        if (progreso.sinArboles()) {
+            return net.mca.entity.ai.mente.Encargo.Fin.NADA;
+        }
+        if (bagFull(villager)) {
+            return net.mca.entity.ai.mente.Encargo.Fin.LLENO;
+        }
+        if (!progreso.pidiendo()) {
+            progreso.pedirTroncos(e.base + e.cuanto); // logs went (taken from it, or used): it chops on
+        }
+        return ++encargoQuieto > 1200 ? (e.hecho > 0 ? net.mca.entity.ai.mente.Encargo.Fin.LISTO : net.mca.entity.ai.mente.Encargo.Fin.NADA)
+                : net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+    }
+
+    private net.mca.entity.ai.mente.Encargo.Fin hacer(ServerWorld world, VillagerEntityMCA villager, net.mca.entity.ai.mente.Encargo e) {
+        boolean busy = progreso.tick(world, villager, this::say);
+        e.hecho = Math.max(0, Progreso.tiene(villager, e.cosa) - e.base);
+        if (busy) {
+            encargoQuieto = 0;
+            return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+        }
+        if (e.hecho >= e.cuanto) {
+            return net.mca.entity.ai.mente.Encargo.Fin.LISTO;
+        }
+        if (progreso.faltaPedido()) {
+            return net.mca.entity.ai.mente.Encargo.Fin.FALTA;
+        }
+        if (progreso.sinArboles()) {
+            return net.mca.entity.ai.mente.Encargo.Fin.NADA;
+        }
+        if (!progreso.pidiendo()) {
+            progreso.pedir(e.cosa, e.base + e.cuanto);
+        }
+        return ++encargoQuieto > 1200 ? (e.hecho > 0 ? net.mca.entity.ai.mente.Encargo.Fin.LISTO : net.mca.entity.ai.mente.Encargo.Fin.FALTA)
+                : net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+    }
+
+    private net.mca.entity.ai.mente.Encargo.Fin cosechar(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now,
+                                                       net.mca.entity.ai.mente.Encargo e) {
+        if (bagFull(villager)) {
+            return net.mca.entity.ai.mente.Encargo.Fin.LLENO;
+        }
+        if (crop == null && encargoQuieto == 0) {
+            crop = seenCrop(world, villager, memory); // at once, not on the next half-minute look
+            cropTicks = 0;
+        }
+        boolean busy = pickCrops(world, villager, memory, now);
+        e.hecho = cosechas - e.base;
+        if (e.hecho >= e.cuanto) {
+            return net.mca.entity.ai.mente.Encargo.Fin.LISTO;
+        }
+        if (busy) {
+            encargoQuieto = 1;
+            return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+        }
+        if (++encargoQuieto > 240) {
+            return e.hecho > 0 ? net.mca.entity.ai.mente.Encargo.Fin.LISTO : net.mca.entity.ai.mente.Encargo.Fin.NADA;
+        }
+        // nothing ripe in mind: a look around the fields (its eye notes what it sees)
+        memory.doing(e.hecho > 0 ? "buscando más cultivos maduros" : "buscando cultivos maduros", now);
+        if (!explorar.tick(world, villager, Explorar.Busca.COMIDA)) {
+            return e.hecho > 0 ? net.mca.entity.ai.mente.Encargo.Fin.LISTO : net.mca.entity.ai.mente.Encargo.Fin.NADA;
+        }
+        return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+    }
+
+    private net.mca.entity.ai.mente.Encargo.Fin cazar(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now,
+                                                    net.mca.entity.ai.mente.Encargo e) {
+        if (lootTicks > 0) {
+            // what the animal dropped: picked up before anything else
+            lootTicks--;
+            if (lootAt != null) {
+                if (Mining.pies(villager).isWithinDistance(lootAt, 2.0)) {
+                    Hands.collect(world, villager, Mining.pies(villager), 2.0);
+                    lootTicks = Math.min(lootTicks, 5);
+                } else if ((lootTicks % 20) == 19 || villager.getNavigation().isIdle()) {
+                    villager.getNavigation().startMovingTo(lootAt.getX() + 0.5, lootAt.getY(), lootAt.getZ() + 0.5, 0.7);
+                }
+            }
+            return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+        }
+        if (prey != null) {
+            if (prey.isDead()) {
+                lootAt = prey.getBlockPos().toImmutable();
+                lootTicks = 80;
+                cazas++;
+                MCA.LOGGER.info("[Tropeles] {} cazó {} para {}", name(), prey.getName().getString(), e.paraNombre);
+                CombatMind.disengage(villager);
+                prey = null;
+                return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+            }
+            if (prey.isRemoved() || ++preyTicks > PREY_TICKS || prey.squaredDistanceTo(villager) > 32 * 32) {
+                spared.put(prey.getId(), now + 2400);
+                CombatMind.disengage(villager);
+                prey = null;
+                return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+            }
+            memory.doing("cazando " + prey.getName().getString(), now);
+            CombatMind.fight(world, villager, null, prey);
+            return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+        }
+        e.hecho = cazas - e.base;
+        if (e.hecho >= e.cuanto) {
+            return net.mca.entity.ai.mente.Encargo.Fin.LISTO;
+        }
+        if (bagFull(villager)) {
+            return net.mca.entity.ai.mente.Encargo.Fin.LLENO;
+        }
+        if (night(world)) {
+            return net.mca.entity.ai.mente.Encargo.Fin.NOCHE;
+        }
+        if ((villager.age % 10) == 0) {
+            prey = findPrey(world, villager, memory, now, e.presa);
+            preyTicks = 0;
+            if (prey != null) {
+                encargoQuieto = 0;
+                return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+            }
+        }
+        if (++encargoQuieto > 1600) {
+            return e.hecho > 0 ? net.mca.entity.ai.mente.Encargo.Fin.LISTO : net.mca.entity.ai.mente.Encargo.Fin.NADA;
+        }
+        memory.doing(explorar.sweeping() ? "mirando alrededor buscando algo que cazar" : "buscando algo que cazar", now);
+        if (!explorar.tick(world, villager, Explorar.Busca.COMIDA)) {
+            return e.hecho > 0 ? net.mca.entity.ai.mente.Encargo.Fin.LISTO : net.mca.entity.ai.mente.Encargo.Fin.NADA;
+        }
+        return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+    }
+
+    /**
+     * Fishing like a player: a rod in the hand (made at a table from sticks and string when it has none), the nearest
+     * open water its eye saw, the bank beside it; the line goes out with a swing, the float waits from five to thirty
+     * seconds, the bite splashes and it reels in what the game's own fishing gives, the rod wearing a little each time.
+     */
+    private net.mca.entity.ai.mente.Encargo.Fin pescar(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now,
+                                                     net.mca.entity.ai.mente.Encargo e) {
+        e.hecho = pescas - e.base;
+        if (e.hecho >= e.cuanto && progreso.sinPaso()) {
+            return net.mca.entity.ai.mente.Encargo.Fin.LISTO;
+        }
+        if (bagFull(villager)) {
+            return net.mca.entity.ai.mente.Encargo.Fin.LLENO;
+        }
+        if (!progreso.sinPaso() || !tieneCana(villager)) {
+            // no rod (or the table it made one at still to pick up): a rod first, the way a player makes one
+            if (!tieneCana(villager) && !progreso.pidiendo() && (progreso.faltaPedido() || !progreso.pedir(Items.FISHING_ROD, 1))) {
+                return net.mca.entity.ai.mente.Encargo.Fin.FALTA;
+            }
+            boolean busy = progreso.tick(world, villager, this::say);
+            if (!busy && !tieneCana(villager) && progreso.faltaPedido()) {
+                return net.mca.entity.ai.mente.Encargo.Fin.FALTA;
+            }
+            if (progreso.sinArboles()) {
+                return net.mca.entity.ai.mente.Encargo.Fin.NADA;
+            }
+            return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+        }
+        InventoryUtils.holdMain(villager, s -> s.getItem() instanceof net.minecraft.item.FishingRodItem);
+        if (agua != null && !world.getBlockState(agua).isOf(Blocks.WATER)) {
+            agua = null;
+            orilla = null;
+            lanzado = false;
+        }
+        if (agua == null) {
+            if ((villager.age % 20) == 0) {
+                BlockPos[] found = orillaVista(world, villager, memory);
+                if (found != null) {
+                    agua = found[0];
+                    orilla = found[1];
+                    orillaTicks = 0;
+                    lanzado = false;
+                    MCA.LOGGER.info("[Tropeles] {} va a pescar en {} desde {}", name(), agua.toShortString(), orilla.toShortString());
+                }
+            }
+            if (agua == null) {
+                memory.doing("buscando agua para pescar", now);
+                if (++encargoQuieto > 900 || !explorar.tick(world, villager, Explorar.Busca.COMIDA)) {
+                    return e.hecho > 0 ? net.mca.entity.ai.mente.Encargo.Fin.LISTO : net.mca.entity.ai.mente.Encargo.Fin.NADA;
+                }
+                return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+            }
+        }
+        encargoQuieto = 0;
+        Vec3d water = Vec3d.ofCenter(agua).add(0, 0.4, 0);
+        if (villager.getEyePos().distanceTo(water) > 4.0 || !villager.isOnGround()) {
+            if (++orillaTicks > 600) {
+                // no way to that bank: another stretch of water
+                agua = null;
+                orilla = null;
+                return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+            }
+            if ((orillaTicks % 20) == 1 || villager.getNavigation().isIdle()) {
+                villager.getNavigation().startMovingTo(orilla.getX() + 0.5, orilla.getY(), orilla.getZ() + 0.5, 0.6);
+            }
+            memory.doing("yendo a la orilla a pescar", now);
+            lanzado = false;
+            return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+        }
+        villager.getNavigation().stop();
+        Hands.aim(villager, water);
+        if (!lanzado) {
+            villager.swingHand(Hand.MAIN_HAND);
+            world.playSound(null, villager.getBlockPos(), net.minecraft.sound.SoundEvents.ENTITY_FISHING_BOBBER_THROW, net.minecraft.sound.SoundCategory.NEUTRAL,
+                    0.5F, 0.4F / (world.random.nextFloat() * 0.4F + 0.8F));
+            lanzado = true;
+            pescaTicks = 0;
+            picada = 100 + world.random.nextInt(500);
+            memory.doing("pescando", now);
+            return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+        }
+        if ((++pescaTicks % 25) == 0) {
+            world.spawnParticles(net.minecraft.particle.ParticleTypes.FISHING, water.x, water.y, water.z, 1, 0.05, 0.0, 0.05, 0.0);
+        }
+        if (pescaTicks < picada) {
+            return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+        }
+        // a bite: it reels in
+        world.spawnParticles(net.minecraft.particle.ParticleTypes.SPLASH, water.x, water.y, water.z, 14, 0.2, 0.05, 0.2, 0.1);
+        world.playSound(null, agua, net.minecraft.sound.SoundEvents.ENTITY_FISHING_BOBBER_SPLASH, net.minecraft.sound.SoundCategory.NEUTRAL,
+                0.25F, 1.0F + (world.random.nextFloat() - world.random.nextFloat()) * 0.4F);
+        world.playSound(null, villager.getBlockPos(), net.minecraft.sound.SoundEvents.ENTITY_FISHING_BOBBER_RETRIEVE, net.minecraft.sound.SoundCategory.NEUTRAL,
+                1.0F, 0.4F / (world.random.nextFloat() * 0.4F + 0.8F));
+        villager.swingHand(Hand.MAIN_HAND);
+        ItemStack rod = villager.getMainHandStack();
+        net.minecraft.loot.LootTable table = world.getServer().getLootManager().getLootTable(net.minecraft.loot.LootTables.FISHING_GAMEPLAY);
+        net.minecraft.loot.context.LootContextParameterSet params = new net.minecraft.loot.context.LootContextParameterSet.Builder(world)
+                .add(net.minecraft.loot.context.LootContextParameters.ORIGIN, Vec3d.ofCenter(agua))
+                .add(net.minecraft.loot.context.LootContextParameters.TOOL, rod)
+                .add(net.minecraft.loot.context.LootContextParameters.THIS_ENTITY, villager)
+                .luck(0F)
+                .build(net.minecraft.loot.context.LootContextTypes.FISHING);
+        for (ItemStack got : table.generateLoot(params)) {
+            MCA.LOGGER.info("[Tropeles] {} pesca {} en {}", name(), got, agua.toShortString());
+            ItemStack rest = villager.getInventory().addStack(got);
+            if (!rest.isEmpty()) {
+                villager.dropStack(rest);
+            }
+        }
+        if (rod.getItem() instanceof net.minecraft.item.FishingRodItem) {
+            rod.damage(1, villager, v -> v.sendEquipmentBreakStatus(net.minecraft.entity.EquipmentSlot.MAINHAND));
+        }
+        pescas++;
+        lanzado = false;
+        memory.doing("sacó un pescado", now);
+        Recuerdos.sitio(villager, "agua para pescar", agua);
+        return net.mca.entity.ai.mente.Encargo.Fin.SIGUE;
+    }
+
+    /** The nearest still water its eye saw with open air over it, and a dry bank beside it to stand on: {water, stand}, or null. */
+    @Nullable
+    private static BlockPos[] orillaVista(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory) {
+        BlockPos feet = Mining.pies(villager);
+        BlockPos bestWater = null;
+        BlockPos bestStand = null;
+        double bestD = Double.MAX_VALUE;
+        for (BlockPos pos : BlockPos.iterate(feet.add(-20, -5, -20), feet.add(20, 3, 20))) {
+            BlockState seen = memory.stateAt(pos);
+            if (seen == null || !seen.isOf(Blocks.WATER)) {
+                continue;
+            }
+            BlockState real = world.getBlockState(pos);
+            if (!real.isOf(Blocks.WATER) || !real.getFluidState().isStill() || !world.getBlockState(pos.up()).isAir()) {
+                continue;
+            }
+            for (Direction d : Direction.Type.HORIZONTAL) {
+                BlockPos bank = pos.offset(d);
+                BlockPos stand = bank.up();
+                if (!Mining.standable(world, bank) || !Mining.passable(world, stand) || !Mining.passable(world, stand.up())) {
+                    continue;
+                }
+                double dd = stand.getSquaredDistance(feet);
+                if (dd < bestD) {
+                    bestD = dd;
+                    bestWater = pos.toImmutable();
+                    bestStand = stand.toImmutable();
+                }
+            }
+        }
+        return bestWater == null ? null : new BlockPos[]{bestWater, bestStand};
+    }
+
     /** For the in-game checks: how full its food bar is, and where home is. */
     public void setFood(int points) {
         food = points;
@@ -3786,6 +4212,7 @@ public class ProspectingTask extends AbstractChoreTask {
                 }
             }
         }
+        cosechas++;
         MCA.LOGGER.info("[Tropeles] {} cosecha {} en {} y vuelve a sembrar (comida {})", name(), state.getBlock().getName().getString(), crop.toShortString(), food);
         memory.doing("cosechando", now);
         Recuerdos.sitio(villager, "cultivos", crop);
@@ -3879,11 +4306,17 @@ public class ProspectingTask extends AbstractChoreTask {
     /** The nearest animal in sight it may hunt, or null. */
     @Nullable
     private AnimalEntity findPrey(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now) {
+        return findPrey(world, villager, memory, now, null);
+    }
+
+    /** As {@link #findPrey(ServerWorld, VillagerEntityMCA, VisualMemory, long)}, only animals of that kind when one is given. */
+    @Nullable
+    private AnimalEntity findPrey(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now, @Nullable Class<?> kind) {
         if (spared.size() > 64) {
             spared.values().removeIf(until -> until < now);
         }
         List<AnimalEntity> near = world.getEntitiesByClass(AnimalEntity.class, villager.getBoundingBox().expand(24, 8, 24),
-                a -> a.isAlive() && huntable(a));
+                a -> a.isAlive() && huntable(a) && (kind == null || kind.isInstance(a)));
         AnimalEntity best = null;
         double bestDistance = Double.MAX_VALUE;
         for (AnimalEntity animal : near) {

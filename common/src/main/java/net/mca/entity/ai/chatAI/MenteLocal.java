@@ -59,6 +59,16 @@ public final class MenteLocal {
             + "stop(?! (following|working|mining|chopping|fishing|harvesting|hunting|talking))|wait(?! (here|there|for))|"
             + "careful|watch out|look out|hold on|hold up|hang on|freeze|halt";
 
+    /** The orders a connected villager does itself as an errand, and what each is about ({@link Voluntad#dicho}). */
+    /** Things it can make, as said in a "hazme ..." order. */
+    private static final String COSAS = "mesas?|palos?|palitos|tablas?|tablones?|cofres?|baul|baules|antorchas?|hornos?|pan|panes|picos?|picota|"
+            + "espadas?|hachas?|palas?|azadas?|azadon|canas?|escudos?|arcos?|escaleras?|petos?|pecheras?|armadura|cascos?|pantalones|grebas|botas|"
+            + "crafting table|workbench|sticks?|planks?|chests?|torch(es)?|furnaces?|bread|pickaxes?|swords?|axes?|shovels?|hoes?|fishing rod|"
+            + "shields?|bows?|ladders?|chestplates?|helmets?|leggings|boots";
+
+    private static final Map<String, String> ERRANDS = Map.of("start-chopping", "TALAR", "start-fishing", "PESCAR", "start-harvesting", "COSECHAR",
+            "start-hunting", "CAZAR", "craft-item", "HACER", "stop-working", "PARAR", "stop", "PARAR");
+
     /**
      * Orders, most specific first: "no me sigas" must win over "sigueme", and "sal de la mina" or "deja de minar
      * y sube" (climb out and go home) over "deja de minar" (stop right where it is).
@@ -85,6 +95,9 @@ public final class MenteLocal {
             order("wear-armor", "ponte (la |tu )?armadura|equipate|vistete (con )?(la |tu )?armadura|wear (your |the )?armou?r|put on (your |the )?armou?r"),
             order("give-item", "dame|pasame|regalame|entregame|tirame|lanzame|prestame|me das|me pasas|me regalas|me prestas|"
                     + "give me|hand me|can i have|toss me|throw me|pass me"),
+            // "hazme un cofre", "hazte una espada de piedra", "make me a pickaxe": made by its own hands at a table
+            order("craft-item", "(haz|hazme|hazte|haceme|hacete|hacer|fabrica|fabricame|fabricate|fabricar|craftea|crafteame|crafteate|craftear|"
+                    + "construye|construyeme|construyete|prepara|preparame|preparate|make|craft)(?![a-z]).{0,40}(?<![a-z])(" + COSAS + ")"),
             order("store-items", "guarda (tus|las|todas tus|todo|lo que)|guardalo|guardalas|guardalos|deja tus cosas|ve a guardar|anda a guardar|"
                     + "store (your|it|everything|the)|put (your|it|everything|the) .*chest|deposit"),
             order("follow-player", "sigueme|seguime|siguenos|seguirme|ven conmigo|vente conmigo|vienes conmigo|venir conmigo|vamos juntos|vamonos|"
@@ -102,10 +115,17 @@ public final class MenteLocal {
                     + "sigue (minando|bajando|cavando|picando)|baja mas|vuelve a (la mina|minar)|"
                     + "go mine|go mining|start mining|mine for|dig for|keep (mining|digging)|go back (down|to the mine|to mining)|"
                     + "(busca|buscame|consigue|consigueme|encuentra|encuentrame|traeme|trae|saca|sacame|find|get me|look for|search for|go get) .*(" + ORES + ")"),
-            order("start-chopping", "tala|talar|ve a talar|corta (arboles|madera|troncos|lena)|consigue madera|trae madera|chop|cut (down )?trees|get (some )?wood"),
-            order("start-fishing", "pesca|pescar|ve a pescar|go fish(ing)?|start fishing|catch (some )?fish"),
-            order("start-harvesting", "cosecha|cosechar|recoge (la cosecha|los cultivos|el trigo)|harvest"),
-            order("start-hunting", "caza|cazar|ve a cazar|go hunt(ing)?|start hunting"),
+            order("start-chopping", "tala|talar|talame|ve a talar|corta (arboles|madera|troncos|lena|un arbol|unos arboles)|cortame|"
+                    + "(consigue|consigueme|trae|traeme|traigame|busca|buscame|junta|juntame|recoge|recogeme|saca|sacame|necesito|necesitamos|"
+                    + "get|bring|fetch|gather|collect)(?![a-z]).{0,24}(?<![a-z])(madera|maderas|troncos?|lena|wood|logs?)|"
+                    + "chop|cut (down )?trees|get (some )?wood"),
+            order("start-fishing", "pesca|pescar|pescame|ve a pescar|go fish(ing)?|start fishing|catch (some )?fish|"
+                    + "(consigue|consigueme|trae|traeme|saca|sacame)(?![a-z]).{0,16}(?<![a-z])(pescados?|peces|pez|fish)"),
+            order("start-harvesting", "cosecha|cosechar|cosechame|recoge (la cosecha|los cultivos|el trigo|las zanahorias|las papas|las patatas)|harvest|"
+                    + "(consigue|consigueme|trae|traeme|recoge|recogeme)(?![a-z]).{0,16}(?<![a-z])(trigo|zanahorias?|papas|patatas|remolachas?)"),
+            order("start-hunting", "caza|cazar|cazame|ve a cazar|go hunt(ing)?|start hunting|"
+                    + "mata (una|un|unas|unos|algunas|algunos|dos|tres|\\d+)? ?(vacas?|cerdos?|chanchos?|ovejas?|gallinas?|pollos?|conejos?|animales?)|"
+                    + "(consigue|consigueme|trae|traeme|busca|buscame)(?![a-z]).{0,16}(?<![a-z])(carne|cuero|plumas|lana)"),
             order("try-go-home", "ve(te)? a (tu )?casa|anda(te)? a (tu )?casa|vuelve a (tu )?casa|regresa a (tu )?casa|go home|head home"),
             order("open-trade-window", "comerciar|tradear|intercambiar|que vendes|que tienes para vender|quiero comprar|let'?s trade|trade|what do you sell")
     );
@@ -177,9 +197,11 @@ public final class MenteLocal {
             + "mejor no|shouldn'?t|should not|better not|(don'?t|do not|never) (go|head|come|return))(?![a-z])");
 
     /** A start-* order said with a "no" before it: "no vayas a la mina", "nunca mines aqui", "don't go mining". */
+    /** What a player may ask it to make ({@link net.mca.entity.ai.body.Progreso#queHacer}). */
+
     private static final Pattern NEGATED_START = Pattern.compile("(?<![a-z])(no|nunca|ni)( [a-z]+){0,2} (vayas|vaya|vayan|mines|minar|bajes|sigas|"
-            + "tales|talar|peques|pescar|caces|cazar|cosech[a-z]*|excaves|a la mina)(?![a-z])"
-            + "|(?<![a-z])(don'?t|do not|never) (go )?(mine|mining|chop|fish|hunt|harvest)");
+            + "tales|talar|peques|pescar|caces|cazar|cosech[a-z]*|excaves|a la mina|hagas|hagan|fabriques|craftees|construyas|mates)(?![a-z])"
+            + "|(?<![a-z])(don'?t|do not|never) (go )?(mine|mining|chop|fish|hunt|harvest|make|craft)");
 
     /** Asking whether it sees something, or where one is: "¿hay ...?", "¿ves ...?", "¿dónde hay ...?", "any ...?". */
     private static final String ASK = "(hay(?! que )|ves|viste|divisas|distingues|donde|any|see|spot|where|there)( [a-z']+){0,3} ";
@@ -478,7 +500,7 @@ public final class MenteLocal {
             }
             m.reset();
             if (m.find()) {
-                if (entry.getKey().startsWith("start-") && NEGATED_START.matcher(t).find()) {
+                if ((entry.getKey().startsWith("start-") || entry.getKey().equals("craft-item")) && NEGATED_START.matcher(t).find()) {
                     continue; // "no vayas a la mina" is not an order to go
                 }
                 String argument = "";
@@ -487,6 +509,8 @@ public final class MenteLocal {
                 } else if (entry.getKey().equals("start-mining")) {
                     Matcher ore = Pattern.compile("(?<![a-z])(" + ORES + ")(?![a-z])").matcher(t);
                     argument = ore.find() ? ore.group(1) : "";
+                } else if (ERRANDS.containsKey(entry.getKey())) {
+                    argument = t; // how many, of what, and whether to bring it: the errand reads it all ({@link net.mca.entity.ai.mente.Encargo})
                 }
                 return new Intent(entry.getKey(), argument, null, spanish);
             }
@@ -588,6 +612,14 @@ public final class MenteLocal {
                                 @Nullable Cofres.Store stored, boolean es, String name) {
         String command = intent.command();
         boolean mining = villager.getVillagerBrain().getCurrentJob() == Chore.PROSPECT;
+        String errand = command == null ? null : ERRANDS.get(command);
+        if (errand != null && Voluntad.conectado(villager)) {
+            // a connected villager took it on itself (or said why it cannot): those are its words
+            String own = Voluntad.dicho(villager, errand, es);
+            if (own != null) {
+                return own;
+            }
+        }
         if ("consider-return".equals(command)) {
             // what it made of the advice, with its reasons ({@link TriggerCommandInfos#considerReturn})
             TriggerCommandInfos.Vuelta vuelta = TriggerCommandInfos.lastVuelta(villager);
@@ -679,6 +711,10 @@ public final class MenteLocal {
                 case SIGUIENDO -> es ? "Te sigo y te cuido la espalda." : "I'm following you and watching your back.";
                 case ESPERANDO -> es ? "Aquí, esperándote como me pediste." : "Waiting here for you, like you asked.";
                 case CONOCIENDO -> es ? "Conociéndote. ¿Cómo te llamas?" : "Getting to know you. What's your name?";
+                case ENCARGO -> {
+                    String on = Voluntad.haciendo(villager, es);
+                    yield on != null ? on : es ? "Terminando lo que me pediste." : "Finishing what you asked.";
+                }
                 default -> es ? "Estoy quieto, esperando que me digas qué pasa." : "Standing still, waiting for you to tell me what's going on.";
             };
         }

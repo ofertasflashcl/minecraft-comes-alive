@@ -45,10 +45,25 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
     public boolean handle(ServerPlayerEntity player, String command) {
         Memories memory = entity.getVillagerBrain().getMemoriesForPlayer(player);
 
+        boolean connected = net.mca.entity.ai.mente.Voluntad.conectado(entity);
         if (MoveState.byCommand(command).filter(state -> {
+            if (connected) {
+                // a connected villager follows and waits by its will: MCA's FOLLOW would end the connection, and STAY
+                // would give it a brain without its own life
+                net.mca.entity.ai.mente.Voluntad.menu(entity, player, state);
+                return true;
+            }
             entity.getVillagerBrain().setMoveState(state, player);
             return true;
         }).isPresent()) {
+            return true;
+        }
+
+        if (connected && Chore.byCommand(command).filter(chore -> chore != Chore.PROSPECT && chore != Chore.NONE).isPresent()) {
+            // chopping, fishing, harvesting, hunting asked of a connected villager: it does it itself and comes back
+            Chore chore = Chore.byCommand(command).get();
+            net.mca.entity.ai.mente.Voluntad.menu(entity, player, chore);
+            CriterionMCA.GENERIC_EVENT_CRITERION.trigger(player, "chores");
             return true;
         }
 

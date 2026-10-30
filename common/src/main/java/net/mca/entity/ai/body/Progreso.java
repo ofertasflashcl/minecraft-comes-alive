@@ -112,6 +112,7 @@ public final class Progreso {
         TABLE(s -> s.isOf(Items.CRAFTING_TABLE)),
         FURNACE(s -> s.isOf(Items.FURNACE)),
         WHEAT(s -> s.isOf(Items.WHEAT)),
+        STRING(s -> s.isOf(Items.STRING)),
         RAW(Progreso::rawFood);
 
         final Predicate<ItemStack> match;
@@ -143,6 +144,29 @@ public final class Progreso {
     private static final Recipe DIAMOND_SWORD = new Recipe(Items.DIAMOND_SWORD, 1, true, Map.of(Mat.DIAMOND, 2, Mat.STICK, 1));
     private static final Recipe CHEST = new Recipe(Items.CHEST, 1, true, Map.of(Mat.PLANKS, 8));
     private static final Recipe BREAD = new Recipe(Items.BREAD, 1, true, Map.of(Mat.WHEAT, 3));
+    // what a player may ask it to make ("hazme un cofre"): vanilla's costs, the wood chopped by itself when short
+    /** Stands for "logs in the bag" (an errand: "tala un poco"): trees felled until it carries {@link #troncos}. */
+    private static final Recipe LENA = new Recipe(Items.OAK_LOG, 0, false, Map.of());
+    /** Planks of the kind of each log it saws (one log, four planks). */
+    private static final Recipe PLANKS = new Recipe(Items.OAK_PLANKS, 4, false, Map.of());
+    /** A furnace to hand over or keep, not one to smelt in ({@link #FURNACE} stands for smelting). */
+    private static final Recipe HORNO = new Recipe(Items.FURNACE, 1, true, Map.of(Mat.STONE, 8));
+    private static final Recipe FISHING_ROD = new Recipe(Items.FISHING_ROD, 1, true, Map.of(Mat.STICK, 3, Mat.STRING, 2));
+    private static final Recipe BOW = new Recipe(Items.BOW, 1, true, Map.of(Mat.STICK, 3, Mat.STRING, 3));
+    private static final Recipe SHIELD = new Recipe(Items.SHIELD, 1, true, Map.of(Mat.PLANKS, 6, Mat.IRON, 1));
+    private static final Recipe LADDER = new Recipe(Items.LADDER, 3, true, Map.of(Mat.STICK, 7));
+    private static final Recipe WOODEN_AXE = new Recipe(Items.WOODEN_AXE, 1, true, Map.of(Mat.PLANKS, 3, Mat.STICK, 2));
+    private static final Recipe STONE_AXE = new Recipe(Items.STONE_AXE, 1, true, Map.of(Mat.STONE, 3, Mat.STICK, 2));
+    private static final Recipe IRON_AXE = new Recipe(Items.IRON_AXE, 1, true, Map.of(Mat.IRON, 3, Mat.STICK, 2));
+    private static final Recipe DIAMOND_AXE = new Recipe(Items.DIAMOND_AXE, 1, true, Map.of(Mat.DIAMOND, 3, Mat.STICK, 2));
+    private static final Recipe WOODEN_SHOVEL = new Recipe(Items.WOODEN_SHOVEL, 1, true, Map.of(Mat.PLANKS, 1, Mat.STICK, 2));
+    private static final Recipe STONE_SHOVEL = new Recipe(Items.STONE_SHOVEL, 1, true, Map.of(Mat.STONE, 1, Mat.STICK, 2));
+    private static final Recipe IRON_SHOVEL = new Recipe(Items.IRON_SHOVEL, 1, true, Map.of(Mat.IRON, 1, Mat.STICK, 2));
+    private static final Recipe DIAMOND_SHOVEL = new Recipe(Items.DIAMOND_SHOVEL, 1, true, Map.of(Mat.DIAMOND, 1, Mat.STICK, 2));
+    private static final Recipe WOODEN_HOE = new Recipe(Items.WOODEN_HOE, 1, true, Map.of(Mat.PLANKS, 2, Mat.STICK, 2));
+    private static final Recipe STONE_HOE = new Recipe(Items.STONE_HOE, 1, true, Map.of(Mat.STONE, 2, Mat.STICK, 2));
+    private static final Recipe IRON_HOE = new Recipe(Items.IRON_HOE, 1, true, Map.of(Mat.IRON, 2, Mat.STICK, 2));
+    private static final Recipe DIAMOND_HOE = new Recipe(Items.DIAMOND_HOE, 1, true, Map.of(Mat.DIAMOND, 2, Mat.STICK, 2));
     /** Armour as vanilla makes it, best protection first: the chestplate, the leggings, the helmet, the boots. */
     private static final List<Recipe> IRON_ARMOR = List.of(
             new Recipe(Items.IRON_CHESTPLATE, 1, true, Map.of(Mat.IRON, 8)),
@@ -156,6 +180,37 @@ public final class Progreso {
             new Recipe(Items.DIAMOND_BOOTS, 1, true, Map.of(Mat.DIAMOND, 4)));
     /** How far it may wander off while its iron cooks before it goes back for it. */
     private static final int FURNACE_LEASH = 20;
+    /** Everything it can be asked to make, by what comes out. */
+    private static final Map<Item, Recipe> RECETAS = recetas();
+    /** A tool by its kind, in tiers wood, stone, iron, diamond. */
+    private static final Map<String, Recipe[]> HERRAMIENTAS = Map.of(
+            "pico", new Recipe[]{WOODEN_PICKAXE, STONE_PICKAXE, IRON_PICKAXE, DIAMOND_PICKAXE},
+            "espada", new Recipe[]{WOODEN_SWORD, STONE_SWORD, IRON_SWORD, DIAMOND_SWORD},
+            "hacha", new Recipe[]{WOODEN_AXE, STONE_AXE, IRON_AXE, DIAMOND_AXE},
+            "pala", new Recipe[]{WOODEN_SHOVEL, STONE_SHOVEL, IRON_SHOVEL, DIAMOND_SHOVEL},
+            "azada", new Recipe[]{WOODEN_HOE, STONE_HOE, IRON_HOE, DIAMOND_HOE});
+    /** The words for each thing it can make (lower case, no accents), most specific first. */
+    private static final List<Map.Entry<java.util.regex.Pattern, String>> PALABRAS = List.of(
+            palabra("mesas? de (crafteo|trabajo|crafting|crafteos)|crafting table|workbench|mesa", "crafting_table"),
+            palabra("canas? de pescar|fishing rod|cana", "fishing_rod"),
+            palabra("escaleras? de mano|ladders?|escaleras?", "ladder"),
+            palabra("picos?|picota|pickaxes?|pick", "pico"),
+            palabra("espadas?|swords?", "espada"),
+            palabra("hachas?|axes?", "hacha"),
+            palabra("palas?|shovels?", "pala"),
+            palabra("azadas?|azadones?|hoes?", "azada"),
+            palabra("palos?|palitos|sticks?", "stick"),
+            palabra("tablas?|tablones?|planks?", "oak_planks"),
+            palabra("cofres?|baul|baules|chests?", "chest"),
+            palabra("antorchas?|torch(es)?", "torch"),
+            palabra("hornos?|furnaces?", "furnace"),
+            palabra("pan|panes|bread", "bread"),
+            palabra("escudos?|shields?", "shield"),
+            palabra("arcos?|bows?", "bow"),
+            palabra("petos?|pecheras?|chestplates?|armadura", "chestplate"),
+            palabra("cascos?|helmets?", "helmet"),
+            palabra("pantalones|grebas|leggings", "leggings"),
+            palabra("botas|boots", "boots"));
 
     private enum Step {IDLE, WOOD, TABLE, SMELT, COLLECT, PACK_UP}
 
@@ -341,6 +396,277 @@ public final class Progreso {
     /** True once it has looked everywhere it could walk and found no tree for its first pickaxe. */
     public boolean gaveUp() {
         return gaveUp;
+    }
+
+    // ------------------------------------------------------------------ what someone asked it for (an errand)
+
+    /** Logs it was asked to carry ("tala un poco"): it fells trees until it has them, or 0. */
+    private int troncos;
+    /** What it was asked to make ("hazme un cofre"), and how many of it it is to carry once done, or null. */
+    @Nullable
+    private Recipe pedido;
+    private int pedidoTotal;
+    /** The errand needs what it does not have and cannot chop (iron, string, coal): it gave the errand up. */
+    private boolean faltaPedido;
+    /** The errand needed wood and there is no tree anywhere it could look. */
+    private boolean sinArboles;
+
+    /** Fell trees (the nearest it saw, or it goes looking) until it carries {@code total} logs. */
+    public void pedirTroncos(int total) {
+        troncos = total;
+        sinArboles = false;
+        nextCheck = 0;
+    }
+
+    /** Make {@code item} until it carries {@code total} of them: false when it does not know how. */
+    public boolean pedir(Item item, int total) {
+        Recipe r = RECETAS.get(item);
+        if (r == null) {
+            return false;
+        }
+        pedido = r;
+        pedidoTotal = total;
+        faltaPedido = false;
+        sinArboles = false;
+        nextCheck = 0;
+        return true;
+    }
+
+    /** Busy with something it was asked for. */
+    public boolean pidiendo() {
+        return troncos > 0 || pedido != null;
+    }
+
+    public boolean faltaPedido() {
+        return faltaPedido;
+    }
+
+    public boolean sinArboles() {
+        return sinArboles;
+    }
+
+    /** No step under way: no tree half felled, no table of its own left standing. */
+    public boolean sinPaso() {
+        return step == Step.IDLE;
+    }
+
+    /**
+     * The errand is over or called off: what it was asked for is forgotten; a half-felled tree for it is left, a table it
+     * set down for it is picked up again.
+     */
+    public void olvidarPedidos(ServerWorld world, VillagerEntityMCA villager) {
+        boolean mine = goal != null && (goal == LENA || goal == pedido);
+        troncos = 0;
+        pedido = null;
+        faltaPedido = false;
+        sinArboles = false;
+        if (!mine) {
+            return;
+        }
+        if (step == Step.WOOD) {
+            tree = null;
+            breaker.reset(world, villager);
+            motor.reset(world, villager);
+            villager.getNavigation().stop();
+            step = Step.IDLE;
+        } else if (step == Step.TABLE) {
+            finishCrafting();
+        }
+        goal = null;
+        nextCheck = 20;
+    }
+
+    /** Logs it carries. */
+    public static int troncos(VillagerEntityMCA villager) {
+        return count(villager.getInventory(), Mat.LOG);
+    }
+
+    /** How many of {@code item} it carries, in the bag, in its hands and worn (planks: of every wood). */
+    public static int tiene(VillagerEntityMCA villager, @Nullable Item item) {
+        if (item == null) {
+            return 0;
+        }
+        SimpleInventory inv = villager.getInventory();
+        int n = item == Items.OAK_PLANKS ? count(inv, Mat.PLANKS) : count(inv, item);
+        for (net.minecraft.entity.EquipmentSlot slot : net.minecraft.entity.EquipmentSlot.values()) {
+            ItemStack s = villager.getEquippedStack(slot);
+            if (!s.isEmpty() && (item == Items.OAK_PLANKS ? s.isIn(ItemTags.PLANKS) : s.isOf(item)) && !inBag(inv, s)) {
+                n += s.getCount();
+            }
+        }
+        return n;
+    }
+
+    private static boolean inBag(SimpleInventory inv, ItemStack stack) {
+        for (int i = 0; i < inv.size(); i++) {
+            if (inv.getStack(i) == stack) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * What a player asks it to make, from their words (lower case, no accents): "una mesa", "antorchas", "un pico de
+     * hierro", "una espada" (the best it can pay for), "un peto". Null when it is nothing it knows how to make.
+     */
+    @Nullable
+    public static Item queHacer(String words, VillagerEntityMCA villager) {
+        for (Map.Entry<java.util.regex.Pattern, String> e : PALABRAS) {
+            if (!e.getKey().matcher(words).find()) {
+                continue;
+            }
+            String what = e.getValue();
+            SimpleInventory inv = villager.getInventory();
+            Recipe[] tiers = HERRAMIENTAS.get(what);
+            if (tiers != null) {
+                int tier = tier(words);
+                if (tier < 0) {
+                    // no material said: the best it can pay for, wood when nothing better
+                    tier = count(inv, Mat.DIAMOND) >= tiers[3].cost().get(Mat.DIAMOND) ? 3 : count(inv, Mat.IRON) >= tiers[2].cost().get(Mat.IRON) ? 2
+                            : count(inv, Mat.STONE) >= tiers[1].cost().get(Mat.STONE) ? 1 : 0;
+                }
+                return tiers[tier].output();
+            }
+            if (what.equals("chestplate") || what.equals("helmet") || what.equals("leggings") || what.equals("boots")) {
+                int piece = what.equals("chestplate") ? 0 : what.equals("leggings") ? 1 : what.equals("helmet") ? 2 : 3;
+                int tier = tier(words);
+                Recipe iron = IRON_ARMOR.get(piece);
+                Recipe diamond = DIAMOND_ARMOR.get(piece);
+                if (tier == 3 || tier < 0 && count(inv, Mat.DIAMOND) >= diamond.cost().get(Mat.DIAMOND)) {
+                    return diamond.output();
+                }
+                return iron.output();
+            }
+            Item item = Registries.ITEM.get(new Identifier("minecraft", what));
+            return RECETAS.containsKey(item) ? item : null;
+        }
+        return null;
+    }
+
+    /** The material the words name: 0 wood, 1 stone, 2 iron, 3 diamond, -1 none. */
+    private static int tier(String words) {
+        if (words.matches(".*(?<![a-z])(diamante|diamantes|diamond)(?![a-z]).*")) {
+            return 3;
+        }
+        if (words.matches(".*(?<![a-z])(hierro|fierro|iron)(?![a-z]).*")) {
+            return 2;
+        }
+        if (words.matches(".*(?<![a-z])(piedra|roca|stone|cobblestone)(?![a-z]).*")) {
+            return 1;
+        }
+        if (words.matches(".*(?<![a-z])(madera|palo|wood|wooden)(?![a-z]).*")) {
+            return 0;
+        }
+        return -1;
+    }
+
+    /**
+     * Whether it can make {@code n} of {@code item} from what it carries and wood it can chop here: null when it can,
+     * otherwise what it lacks, in its own words (Spanish, English).
+     */
+    @Nullable
+    public String[] falta(ServerWorld world, VillagerEntityMCA villager, Item item, int n) {
+        Recipe r = RECETAS.get(item);
+        if (r == null) {
+            return new String[]{"Eso no sé hacerlo todavía.", "I don't know how to make that yet."};
+        }
+        SimpleInventory inv = villager.getInventory();
+        int crafts = r.count() <= 0 ? 1 : (int) Math.ceil(n / (double) r.count());
+        StringBuilder es = new StringBuilder();
+        StringBuilder en = new StringBuilder();
+        for (Map.Entry<Mat, Integer> e : r.cost().entrySet()) {
+            if (e.getKey() == Mat.PLANKS || e.getKey() == Mat.STICK) {
+                continue; // from logs, chopped if need be
+            }
+            int need = e.getValue() * crafts;
+            int have = count(inv, e.getKey());
+            if (have < need) {
+                if (es.length() > 0) {
+                    es.append(" y ");
+                    en.append(" and ");
+                }
+                es.append(need - have).append(" ").append(matEs(e.getKey(), need - have));
+                en.append(need - have).append(" ").append(matEn(e.getKey()));
+            }
+        }
+        if (es.length() > 0) {
+            return new String[]{"Me falta" + (es.toString().startsWith("1 ") ? " " : "n ") + es + " para eso.", "I'm short " + en + " for that."};
+        }
+        boolean wood = r.cost().containsKey(Mat.PLANKS) || r.cost().containsKey(Mat.STICK) || r == PLANKS || r.table() && count(inv, Mat.TABLE) == 0;
+        if (wood && count(inv, Mat.LOG) == 0 && count(inv, Mat.PLANKS) < 4 && !woodHere(world, villager)) {
+            return new String[]{"Aquí abajo no tengo madera para eso. Arriba sí.", "I have no wood for that down here. Up top I would."};
+        }
+        return null;
+    }
+
+    private static String matEs(Mat mat, int n) {
+        boolean one = n == 1;
+        return switch (mat) {
+            case STONE -> one ? "piedra" : "piedras";
+            case IRON -> one ? "lingote de hierro" : "lingotes de hierro";
+            case DIAMOND -> one ? "diamante" : "diamantes";
+            case COAL -> one ? "carbón" : "carbones";
+            case WHEAT -> "de trigo";
+            case STRING -> one ? "hilo" : "hilos";
+            case LOG -> one ? "tronco" : "troncos";
+            default -> "cosas";
+        };
+    }
+
+    private static String matEn(Mat mat) {
+        return switch (mat) {
+            case STONE -> "cobblestone";
+            case IRON -> "iron ingots";
+            case DIAMOND -> "diamonds";
+            case COAL -> "coal";
+            case WHEAT -> "wheat";
+            case STRING -> "string";
+            case LOG -> "logs";
+            default -> "materials";
+        };
+    }
+
+    private static Map.Entry<java.util.regex.Pattern, String> palabra(String words, String what) {
+        return Map.entry(java.util.regex.Pattern.compile("(?<![a-z])(" + words + ")(?![a-z])"), what);
+    }
+
+    private static Map<Item, Recipe> recetas() {
+        Map<Item, Recipe> m = new HashMap<>();
+        for (Recipe r : List.of(STICKS, CRAFTING_TABLE, TORCHES, HORNO, BREAD, CHEST, PLANKS, FISHING_ROD, BOW, SHIELD, LADDER,
+                WOODEN_PICKAXE, STONE_PICKAXE, IRON_PICKAXE, DIAMOND_PICKAXE, WOODEN_SWORD, STONE_SWORD, IRON_SWORD, DIAMOND_SWORD,
+                WOODEN_AXE, STONE_AXE, IRON_AXE, DIAMOND_AXE, WOODEN_SHOVEL, STONE_SHOVEL, IRON_SHOVEL, DIAMOND_SHOVEL,
+                WOODEN_HOE, STONE_HOE, IRON_HOE, DIAMOND_HOE)) {
+            m.put(r.output(), r);
+        }
+        for (Recipe r : IRON_ARMOR) {
+            m.put(r.output(), r);
+        }
+        for (Recipe r : DIAMOND_ARMOR) {
+            m.put(r.output(), r);
+        }
+        return m;
+    }
+
+    /** Something it was asked to make for a player: never put on, it is theirs ({@link #paraOtro}). */
+    private static final Map<java.util.UUID, Item> PARA_OTRO = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** What it is making now is for someone else (armour is not put on), or null when it is for itself. */
+    public static void paraOtro(VillagerEntityMCA villager, @Nullable Item item) {
+        if (item == null) {
+            PARA_OTRO.remove(villager.getUuid());
+        } else {
+            PARA_OTRO.put(villager.getUuid(), item);
+        }
+    }
+
+    private static boolean ajeno(VillagerEntityMCA villager, Item item) {
+        return PARA_OTRO.get(villager.getUuid()) == item;
+    }
+
+    /** How many of what {@code recipe} makes it carries (planks: of every wood). */
+    private static int cuantos(VillagerEntityMCA villager, Recipe recipe) {
+        return tiene(villager, recipe.output());
     }
 
     // ------------------------------------------------------------------ inventory
@@ -623,6 +949,30 @@ public final class Progreso {
         int sword = Math.max(swordTier(villager.getMainHandStack()), best(inv, Progreso::swordTier));
         needsSurface = false;
         List<Recipe> wanted = new ArrayList<>();
+        // what someone asked it for comes before its own plans
+        if (pedido != null && cuantos(villager, pedido) >= pedidoTotal) {
+            pedido = null;
+        }
+        if (pedido == PLANKS) {
+            if (count(inv, Mat.LOG) > 0) {
+                return PLANKS;
+            }
+            troncos = Math.max(troncos, (int) Math.ceil((pedidoTotal - cuantos(villager, PLANKS)) / 4.0));
+        } else if (pedido != null) {
+            if (!hasNonWood(inv, pedido)) {
+                MCA.LOGGER.info("[Tropeles] {} no tiene con qué hacer {}: deja el encargo", villager.getName().getString(), pedido.output());
+                faltaPedido = true;
+                pedido = null;
+            } else {
+                return pedido; // the wood it needs it chops itself
+            }
+        }
+        if (troncos > 0 && count(inv, Mat.LOG) >= troncos) {
+            troncos = 0;
+        }
+        if (troncos > 0) {
+            return LENA;
+        }
         if (wantChest && count(inv, Items.CHEST) > 0) {
             wantChest = false;
         }
@@ -786,9 +1136,14 @@ public final class Progreso {
             if (goal == null) {
                 return false;
             }
+            if (pidiendo()) {
+                nextCheck = 6; // asked for it: one thing after another, like a player at the table
+            }
             SimpleInventory inv = villager.getInventory();
             boolean canSmelt = count(inv, Mat.FURNACE) > 0 || count(inv, Mat.STONE) >= 8;
-            if (goal == KIT) {
+            if (goal == LENA) {
+                step = Step.WOOD;
+            } else if (goal == KIT) {
                 if (shortLogs(inv, KIT, false) > 0) {
                     step = Step.WOOD;
                 } else {
@@ -835,7 +1190,7 @@ public final class Progreso {
             tree = null;
         }
         boolean needsTable = goal.table() && !tableInReach(world, villager);
-        int missing = shortLogs(inv, goal, needsTable);
+        int missing = goal == LENA ? Math.max(0, troncos - count(inv, Mat.LOG)) : shortLogs(inv, goal, needsTable);
         // for the first pickaxe it takes a few spare logs, for the sticks and tables to come
         int spare = goal == WOODEN_PICKAXE ? LOGS_TO_START : 0;
         BlockPos log = nearestLog(world, villager, memory, now);
@@ -849,13 +1204,19 @@ public final class Progreso {
                 nextCheck = 20;
                 return;
             }
+            if (goal == LENA) {
+                troncos = 0;
+                step = Step.IDLE;
+                nextCheck = 0;
+                return;
+            }
             step = goal.table() ? Step.TABLE : Step.IDLE;
             if (!goal.table()) {
                 craft(world, villager, goal, say);
             }
             return;
         }
-        if (log == null && missing > 0 && goal != WOODEN_PICKAXE) {
+        if (log == null && missing > 0 && goal != WOODEN_PICKAXE && goal != LENA && goal != pedido) {
             // no tree in sight for an upgrade: carry on mining, look again later
             step = Step.IDLE;
             nextCheck = 600;
@@ -1880,6 +2241,11 @@ public final class Progreso {
             if (goal == WOODEN_PICKAXE) {
                 needsSurface = true;
             }
+            if (goal == LENA || goal != null && goal == pedido) {
+                sinArboles = true;
+                troncos = 0;
+                pedido = null;
+            }
             return;
         }
         if (exploreTicks++ == 0) {
@@ -1892,6 +2258,11 @@ public final class Progreso {
             explorar.reset();
             if (goal == WOODEN_PICKAXE) {
                 gaveUp = true;
+            }
+            if (goal == LENA || goal != null && goal == pedido) {
+                sinArboles = true;
+                troncos = 0;
+                pedido = null;
             }
             if (!warnedNoWood) {
                 warnedNoWood = true;
@@ -1959,11 +2330,23 @@ public final class Progreso {
     }
 
     private static boolean craft(ServerWorld world, VillagerEntityMCA villager, Recipe recipe, BiConsumer<String, Object[]> say) {
-        if (recipe == KIT || recipe == COOK) {
+        if (recipe == KIT || recipe == COOK || recipe == LENA) {
             return false; // stand-ins, nothing to craft
         }
-        prepareWood(villager, recipe, false);
         SimpleInventory inv = villager.getInventory();
+        if (recipe == PLANKS) {
+            int slot = Hands.findSlot(inv, Mat.LOG.match);
+            if (slot < 0) {
+                return false;
+            }
+            Item planks = planksFor(inv.getStack(slot).getItem());
+            inv.getStack(slot).decrement(1);
+            give(villager, new ItemStack(planks, 4));
+            villager.swingHand(Hand.MAIN_HAND);
+            Retina.memory(villager).doing("hizo tablas", world.getTime());
+            return true;
+        }
+        prepareWood(villager, recipe, false);
         if (!affordable(inv, recipe)) {
             return false;
         }
@@ -1971,7 +2354,7 @@ public final class Progreso {
         ItemStack made = new ItemStack(recipe.output(), recipe.count());
         give(villager, made.copy());
         villager.swingHand(Hand.MAIN_HAND);
-        if (made.getItem() instanceof net.minecraft.item.ArmorItem) {
+        if (made.getItem() instanceof net.minecraft.item.ArmorItem && !ajeno(villager, made.getItem())) {
             wear(villager);
         }
         Retina.memory(villager).doing("fabricó " + made.getName().getString(), world.getTime());
