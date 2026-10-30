@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -42,9 +43,15 @@ public final class Puertas {
     private static final int OPEN_MIN = 10;
     /** A door it opened and never got away from (it stays in the house) is shut after this long all the same. */
     private static final int OPEN_MAX = 600;
+    /** A door on the path is opened when the body is this close to it: one step before the doorway, not from afar. */
+    private static final double OPEN_AT = 2.6;
+    /** The body this close to the middle of a doorway is going through it. */
+    private static final double PASSED = 0.8;
 
     /** Per villager: the doors it opened itself (packed position) and the world time it opened each. */
     private static final Map<UUID, Map<Long, Long>> ABIERTAS = new ConcurrentHashMap<>();
+    /** Per villager: the doors it opened that its body went through. */
+    private static final Map<UUID, Set<Long>> PASADAS = new ConcurrentHashMap<>();
 
     private Puertas() {
     }
@@ -102,7 +109,7 @@ public final class Puertas {
      * doorway it stands in. True when a door opened this tick.
      */
     public static boolean abrirHacia(ServerWorld world, VillagerEntityMCA villager, BlockPos goal) {
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         List<BlockPos> cells = new ArrayList<>(10);
         cells.add(goal);
         cells.add(goal.up());
@@ -132,17 +139,32 @@ public final class Puertas {
      * doors it opened itself are shut once it is through and the doorway is empty.
      */
     public static void tick(ServerWorld world, VillagerEntityMCA villager) {
-        Path path = villager.getNavigation().getCurrentPath();
+        // only a connected villager's own legs: the others' doors are their brain's (it opens and shuts its own)
+        Path path = net.mca.entity.ai.mente.Voluntad.conectado(villager) ? villager.getNavigation().getCurrentPath() : null;
         if (path != null && !path.isFinished()) {
             int at = path.getCurrentNodeIndex();
             for (int i = at; i < Math.min(path.getLength(), at + 2); i++) {
                 BlockPos node = path.getNodePos(i);
-                abrir(world, villager, node);
-                abrir(world, villager, node.up());
+                if (node.isWithinDistance(villager.getPos(), OPEN_AT)) {
+                    abrir(world, villager, node);
+                    abrir(world, villager, node.up());
+                }
             }
         }
         Map<Long, Long> mine = ABIERTAS.get(villager.getUuid());
-        if (mine == null || mine.isEmpty() || (villager.age % 5) != 0) {
+        if (mine == null || mine.isEmpty()) {
+            return;
+        }
+        Set<Long> through = PASADAS.computeIfAbsent(villager.getUuid(), k -> ConcurrentHashMap.newKeySet());
+        for (Long door : mine.keySet()) {
+            Vec3d middle = Vec3d.ofBottomCenter(BlockPos.fromLong(door));
+            double dx = villager.getX() - middle.x;
+            double dz = villager.getZ() - middle.z;
+            if (dx * dx + dz * dz < PASSED * PASSED && Math.abs(villager.getY() - middle.y) < 1.5) {
+                through.add(door); // its body was in the doorway: it went through (or is going through) this door
+            }
+        }
+        if ((villager.age % 5) != 0) {
             return;
         }
         long now = world.getTime();
@@ -162,7 +184,8 @@ public final class Puertas {
             double dx = villager.getX() - middle.x;
             double dz = villager.getZ() - middle.z;
             boolean away = dx * dx + dz * dz > SHUT_AT * SHUT_AT || Math.abs(villager.getY() - pos.getY()) > 2.5;
-            if (!away && age < OPEN_MAX) {
+            if (!away && age < OPEN_MAX || away && !through.contains(e.getKey()) && age < OPEN_MAX) {
+                // never shut in front of it a door it has not gone through yet (it opened it on its way there)
                 continue;
             }
             if (!away || villager.getEyePos().distanceTo(Vec3d.ofCenter(pos)) > REACH + 2.0) {
@@ -184,11 +207,13 @@ public final class Puertas {
                 world.emitGameEvent(villager, GameEvent.BLOCK_CLOSE, pos);
             }
             it.remove();
+            through.remove(e.getKey());
         }
     }
 
     /** Forgets the doors of a villager that is gone. */
     public static void olvidar(UUID villager) {
         ABIERTAS.remove(villager);
+        PASADAS.remove(villager);
     }
 }

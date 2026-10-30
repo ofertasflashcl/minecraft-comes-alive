@@ -330,7 +330,7 @@ public final class Motor {
 
     private Result stepBody(ServerWorld world, VillagerEntityMCA villager, BlockPos goal, boolean dig, boolean build) {
         villager.getBrain().forget(MemoryModuleType.WALK_TARGET);
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         boolean settled = settled(villager);
         acted = false;
         long now = world.getTime();
@@ -713,7 +713,7 @@ public final class Motor {
         if (path.isEmpty()) {
             return Result.BLOCKED;
         }
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         boolean settled = settled(villager);
         if (path == walkingSrc && walking != null) {
             path = walking;
@@ -822,7 +822,7 @@ public final class Motor {
      */
     public Result climbExisting(ServerWorld world, VillagerEntityMCA villager, BlockPos goal, double within, int maxNodes, @Nullable Predicate<BlockPos> allowed) {
         long now = world.getTime();
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         if (existingGoal == null || !existingGoal.equals(goal) || existingPath == null && now - existingAt > 40
                 || existingPath != null && walkingSrc != existingPath && !midStep(villager)) {
             existingGoal = goal.toImmutable();
@@ -1730,7 +1730,7 @@ public final class Motor {
     private Result retreat(ServerWorld world, VillagerEntityMCA villager) {
         doing = "retrocediendo";
         reset(world, villager);
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         // its own pillar blocks, Agua's seals and fallen gravel are no way back
         while (!safeTrail.isEmpty() && (safeTrail.peekLast().equals(feet)
                 || !Mining.passable(world, safeTrail.peekLast()) || !Mining.passable(world, safeTrail.peekLast().up()))) {

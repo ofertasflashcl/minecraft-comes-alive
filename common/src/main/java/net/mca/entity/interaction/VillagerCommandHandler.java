@@ -55,7 +55,12 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
         if (Chore.byCommand(command).filter(chore -> {
             entity.getVillagerBrain().assignJob(chore, player);
             CriterionMCA.GENERIC_EVENT_CRITERION.trigger(player, "chores");
-            entity.sendChatMessage(Text.translatable("chore.success"), player);
+            if (chore == Chore.PROSPECT) {
+                // "Conectar": no "Alright!"; it turns to the one who connected it and meets them first
+                net.mca.entity.ai.mente.Voluntad.conectar(entity, player);
+            } else {
+                entity.sendChatMessage(Text.translatable("chore.success"), player);
+            }
             return true;
         }).isPresent()) {
             return true;

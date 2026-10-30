@@ -329,7 +329,7 @@ public final class Ahora {
     private static Ahora build(ServerWorld world, LivingEntity viewer, Estado estado) {
         long now = world.getTime();
         VisualMemory memory = Retina.memory(viewer);
-        BlockPos feet = viewer.getBlockPos();
+        BlockPos feet = Mining.pies(viewer);
         Vec3d origin = viewer.getPos();
         float facing = viewer.getHeadYaw();
         Lugar lugar = Entorno.lugar(world, viewer);

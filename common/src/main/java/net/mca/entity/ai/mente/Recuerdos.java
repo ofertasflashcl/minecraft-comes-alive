@@ -186,7 +186,7 @@ public final class Recuerdos {
      * under it, room for its body). Cheap when the feet did not move. True when the cell is one it never stood on before.
      */
     public boolean paso(ServerWorld world, LivingEntity villager) {
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         long key = feet.asLong();
         if (key == ultimoPie || !villager.isOnGround()) {
             return false;

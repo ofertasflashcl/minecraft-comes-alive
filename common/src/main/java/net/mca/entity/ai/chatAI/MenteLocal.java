@@ -678,6 +678,7 @@ public final class MenteLocal {
             return switch (Voluntad.of(villager).modo()) {
                 case SIGUIENDO -> es ? "Te sigo y te cuido la espalda." : "I'm following you and watching your back.";
                 case ESPERANDO -> es ? "Aquí, esperándote como me pediste." : "Waiting here for you, like you asked.";
+                case CONOCIENDO -> es ? "Conociéndote. ¿Cómo te llamas?" : "Getting to know you. What's your name?";
                 default -> es ? "Estoy quieto, esperando que me digas qué pasa." : "Standing still, waiting for you to tell me what's going on.";
             };
         }

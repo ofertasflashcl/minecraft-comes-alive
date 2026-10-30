@@ -222,6 +222,12 @@ public class ChatAI {
                         villager.getWorld() != speaker.getWorld() || villager.distanceTo(speaker) > NEAR_RANGE));
                 return;
             }
+            // its name, how they identify, the two of them, its hunger: a companion answers that at once, itself
+            if (net.mca.entity.ai.mente.Companero.oir(speaker, villager, msg)) {
+                currentConversations.put(speaker.getUuid(), new OpenConversation(villager.getUuid(), System.currentTimeMillis(),
+                        villager.getWorld() != speaker.getWorld() || villager.distanceTo(speaker) > NEAR_RANGE));
+                return;
+            }
             // fresh eyes before it answers (server thread): what it says about its surroundings is what it just saw
             Vistazo.fresh(villager);
 

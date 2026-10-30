@@ -65,7 +65,7 @@ public final class Entorno {
     }
 
     private static Lugar judge(ServerWorld world, LivingEntity viewer, VisualMemory memory, long tick) {
-        BlockPos feet = viewer.getBlockPos();
+        BlockPos feet = Mining.pies(viewer);
         BlockPos head = BlockPos.ofFloored(viewer.getEyePos());
         int sky = world.getLightLevel(LightType.SKY, head);
         if (sky >= OPEN_SKY || sawSkyHere(memory, feet, tick)) {
@@ -140,7 +140,7 @@ public final class Entorno {
         if (memory.depthTick == tick) {
             return memory.depth;
         }
-        BlockPos feet = viewer.getBlockPos();
+        BlockPos feet = Mining.pies(viewer);
         Integer land = memory.mapa().landLevel(feet.getX(), feet.getZ(), LAND_RADIUS);
         int level;
         if (land != null) {
@@ -207,7 +207,7 @@ public final class Entorno {
         }
         memory.casaTick = tick;
         memory.casa = false;
-        BlockPos feet = viewer.getBlockPos();
+        BlockPos feet = Mining.pies(viewer);
         BlockState roof = roof(world, BlockPos.ofFloored(viewer.getEyePos()));
         if (roof == null || !Obras.made(roof) && !roof.isIn(BlockTags.LOGS) || Mining.outdoors(world, feet)) {
             return false;

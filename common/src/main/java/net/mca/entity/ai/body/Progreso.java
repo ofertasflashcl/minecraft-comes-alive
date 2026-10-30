@@ -1904,6 +1904,16 @@ public final class Progreso {
 
     // ------------------------------------------------------------------ crafting
 
+    /** Bread right now from the wheat it carries, with a crafting table at hand or one in the bag: true when it made one. */
+    public boolean pan(ServerWorld world, VillagerEntityMCA villager) {
+        SimpleInventory inv = villager.getInventory();
+        if (!affordable(inv, BREAD) || !tableInReach(world, villager) && count(inv, Mat.TABLE) == 0) {
+            return false;
+        }
+        return craft(world, villager, BREAD, (key, params) -> {
+        });
+    }
+
     private boolean tableInReach(ServerWorld world, VillagerEntityMCA villager) {
         if (table != null && world.getBlockState(table).isOf(Blocks.CRAFTING_TABLE)
                 && Retina.visibleFace(world, villager, table, Retina.BLOCK_REACH) != null) {

@@ -1,5 +1,6 @@
 package net.mca.entity.ai.mente;
 
+import net.mca.entity.ai.body.Mining;
 import net.mca.MCA;
 import net.mca.entity.VillagerEntityMCA;
 import net.mca.entity.ai.Chore;
@@ -52,7 +53,9 @@ public final class Voluntad {
         LIBRE("libre", "free, living your own life (your own plans: gear, wood, mining, food, home)"),
         SIGUIENDO("siguiendo", "following $player as a companion and guarding them"),
         ALERTA("alerta", "on alert: you stopped dead and wait to hear what is going on"),
-        ESPERANDO("esperando", "waiting right here as you were asked");
+        ESPERANDO("esperando", "waiting right here as you were asked"),
+        CONOCIENDO("conociendo", "meeting $player: you just looked them over from head to toe, said hello and asked their name, and you"
+                + " take in the place while they answer");
 
         private final String palabra;
         private final String english;
@@ -126,6 +129,10 @@ public final class Voluntad {
     /** Its inner voice: a thought now and then, lessons, its own changes of plans ({@link Conciencia}). */
     private final Conciencia conciencia = new Conciencia();
     private final Atasco atasco = new Atasco();
+    /** The player it went to find food away from, to go back to once it has eaten. */
+    @Nullable
+    private UUID volver;
+    private long volverDesde;
 
     private Voluntad() {
     }
@@ -146,6 +153,16 @@ public final class Voluntad {
         }
         Voluntad w = ALL.get(villager);
         return w != null && villager.getWorld().getTime() - w.ultimoTick <= CONNECTED_GRACE;
+    }
+
+    /**
+     * Connected from its menu by {@code player}: before anything else it meets them, the way a person would
+     * ({@link Companero}): a look from head to toe, a hello and their name; then it goes along at their side.
+     */
+    public static void conectar(VillagerEntityMCA villager, PlayerEntity player) {
+        Voluntad w = of(villager);
+        Companero.empezar(villager, player);
+        w.change(villager, Modo.CONOCIENDO, player, null, player.getName().getString() + " me conectó: lo conozco");
     }
 
     /** The connection ended (the job was dropped or changed): back to nothing, standing up, nothing saved. */
@@ -197,7 +214,7 @@ public final class Voluntad {
             }
             Voluntad w = of(villager);
             String line = w.spanish() ? es : en;
-            Recuerdos.anotar(villager, "plan", es, villager.getBlockPos());
+            Recuerdos.anotar(villager, "plan", es, Mining.pies(villager));
             w.iniciativa.contar(world, villager, w, line, world.getTime());
         } catch (RuntimeException e) {
             MCA.LOGGER.warn("[Tropeles] {} no pudo contar lo que hace: {}", villager.getName().getString(), e.toString());
@@ -219,7 +236,7 @@ public final class Voluntad {
                 return;
             }
             Voluntad w = of(villager);
-            Recuerdos.anotar(villager, "plan", es + " (porque " + porque.trim() + ")", villager.getBlockPos());
+            Recuerdos.anotar(villager, "plan", es + " (porque " + porque.trim() + ")", Mining.pies(villager));
             w.iniciativa.contar(world, villager, w, w.spanish() ? es : en, world.getTime());
         } catch (RuntimeException e) {
             MCA.LOGGER.warn("[Tropeles] {} no pudo contar lo que hace: {}", villager.getName().getString(), e.toString());
@@ -280,7 +297,7 @@ public final class Voluntad {
     public static String esperar(VillagerEntityMCA villager, PlayerEntity player, boolean spanish) {
         Voluntad w = of(villager);
         oyo(villager, player, spanish);
-        w.change(villager, Modo.ESPERANDO, player, villager.getBlockPos().toImmutable(), player.getName().getString() + " me pidió que lo espere aquí");
+        w.change(villager, Modo.ESPERANDO, player, Mining.pies(villager).toImmutable(), player.getName().getString() + " me pidió que lo espere aquí");
         return "You stay right here and wait for " + player.getName().getString() + ", looking around and keeping yourself safe, until they call you "
                 + "or send you back to your own things.";
     }
@@ -291,6 +308,7 @@ public final class Voluntad {
         if (player != null) {
             oyo(villager, player, spanish);
         }
+        w.volver = null;
         w.change(villager, Modo.LIBRE, null, null, player == null ? "vuelvo a lo mío" : player.getName().getString() + " me dijo que vuelva a lo mío");
         return "You went back to your own life, right where you left it: your own plans, your gear, your mine.";
     }
@@ -381,13 +399,18 @@ public final class Voluntad {
         try {
             switch (modo) {
                 case SIGUIENDO -> {
-                    followTick(world, villager);
-                    followStuck(world, villager);
+                    Companero.Pide hunger = task == null ? Companero.Pide.NADA : hunger(world, villager, task);
+                    if (hunger == Companero.Pide.BUSCAR) {
+                        findFood(world, villager, task);
+                    } else if (hunger == Companero.Pide.NADA) {
+                        followTick(world, villager);
+                        followStuck(world, villager);
+                    }
                 }
+                case CONOCIENDO -> meetTick(world, villager);
                 case ALERTA -> alertTick(world, villager);
                 case ESPERANDO -> waitTick(world, villager);
-                default -> {
-                }
+                default -> backTick(world, villager, task);
             }
             if ((villager.age % 20) == 0) {
                 think(villager);
@@ -412,6 +435,62 @@ public final class Voluntad {
         }
         sinJugador = -1;
         follow.guard(world, villager, player);
+        if ((villager.age % 20) == 0) {
+            Companero.juntos(world, villager, player);
+        }
+    }
+
+    /** Meeting the one who connected it: a fight first if one comes, else the meeting; then it goes at their side. */
+    private void meetTick(ServerWorld world, VillagerEntityMCA villager) {
+        PlayerEntity player = player(world);
+        if (player == null || villager.squaredDistanceTo(player) > 48.0 * 48.0) {
+            // gone before they met: it gets on with its own life
+            change(villager, Modo.LIBRE, null, null, "se fue antes de que nos conociéramos");
+            return;
+        }
+        if (defend(world, villager, player, DEFEND_ALERT)) {
+            return;
+        }
+        if (Companero.conocer(world, villager, player, world.getTime() - desde)) {
+            change(villager, Modo.SIGUIENDO, player, null, "ya nos conocimos: voy con " + Companero.nombre(villager, player));
+        }
+    }
+
+    /** Hunger at the player's side ({@link Companero#hambre}). */
+    private Companero.Pide hunger(ServerWorld world, VillagerEntityMCA villager, ProspectingTask task) {
+        PlayerEntity player = player(world);
+        return player == null ? Companero.Pide.NADA : Companero.hambre(world, villager, player, task);
+    }
+
+    /** Nobody had food for it: off to find some itself, in its own life, to come back to the player after. */
+    private void findFood(ServerWorld world, VillagerEntityMCA villager, ProspectingTask task) {
+        UUID back = quien;
+        task.buscarComida();
+        change(villager, Modo.LIBRE, null, null, "voy a buscar comida y vuelvo con " + (quienNombre.isEmpty() ? "quien estaba" : quienNombre));
+        volver = back;
+        volverDesde = world.getTime();
+    }
+
+    /** In its own life after going for food: once it has eaten, back to the player it left. */
+    private void backTick(ServerWorld world, VillagerEntityMCA villager, @Nullable ProspectingTask task) {
+        if (volver == null || task == null || (villager.age % 20) != 0) {
+            return;
+        }
+        if (world.getTime() - volverDesde > 12000) {
+            volver = null; // ten minutes: it stays in its own life
+            return;
+        }
+        if (task.food() < 16 && ProspectingTask.comidaEnMochila(villager) < 6) {
+            return;
+        }
+        PlayerEntity player = world.getServer() == null ? null : world.getServer().getPlayerManager().getPlayer(volver);
+        if (player == null || player.getWorld() != world || !player.isAlive() || player.isSpectator()) {
+            return;
+        }
+        volver = null;
+        change(villager, Modo.SIGUIENDO, player, null, "ya comí: vuelvo con " + player.getName().getString());
+        contar(villager, "¡Listo, ya comí! Vuelvo contigo, " + Companero.nombre(villager, player) + ".",
+                "Done, I've eaten! Coming back to you, " + Companero.nombre(villager, player) + ".");
     }
 
     /**
@@ -426,7 +505,7 @@ public final class Voluntad {
             case NINGUNO -> {
             }
             case AYUDA -> {
-                BlockPos at = villager.getBlockPos();
+                BlockPos at = Mining.pies(villager);
                 contar(villager, "No puedo llegar hasta ti, estoy atascado en " + at.getX() + " " + at.getY() + " " + at.getZ() + ". ¿Me ayudas?",
                         "I can't get to you, I'm stuck at " + at.getX() + " " + at.getY() + " " + at.getZ() + ". Can you help me?");
             }
@@ -479,7 +558,7 @@ public final class Voluntad {
         if (defend(world, villager, player, DEFEND_WAIT)) {
             return;
         }
-        if (espera != null && villager.getBlockPos().getSquaredDistance(espera) > 2.5 * 2.5) {
+        if (espera != null && Mining.pies(villager).getSquaredDistance(espera) > 2.5 * 2.5) {
             // pushed off its spot, or it stepped off it in a fight: back to where it was asked to wait
             if ((villager.age % 20) == 0) {
                 villager.getNavigation().startMovingTo(espera.getX() + 0.5, espera.getY(), espera.getZ() + 0.5, 0.8);
@@ -675,6 +754,9 @@ public final class Voluntad {
         if (from == Modo.ESPERANDO || to == Modo.ALERTA) {
             mirada.stop();
         }
+        if (from == Modo.CONOCIENDO && to != Modo.CONOCIENDO) {
+            Companero.terminar(villager);
+        }
         if (from == Modo.ALERTA || from == Modo.ESPERANDO) {
             if (enemigo != null) {
                 CombatMind.disengage(villager);
@@ -707,7 +789,7 @@ public final class Voluntad {
         UUID who = modo == Modo.ALERTA ? debajoQuien : quien;
         BlockPos spot = modo == Modo.ALERTA ? debajoEspera : espera;
         String text = switch (kept) {
-            case SIGUIENDO -> who == null ? "" : "SIGUIENDO " + who;
+            case SIGUIENDO, CONOCIENDO -> who == null ? "" : "SIGUIENDO " + who;
             case ESPERANDO -> spot == null ? "" : "ESPERANDO " + spot.getX() + " " + spot.getY() + " " + spot.getZ() + (who == null ? "" : " " + who);
             default -> "";
         };
@@ -757,6 +839,8 @@ public final class Voluntad {
             case ALERTA -> enemigo != null ? "me defiendo de " + enemigo.getName().getString() + " mientras espero a ver qué pasa"
                     : "me detuve porque " + who + " me avisó; quieto mirándolo" + far + (agachado ? ", agachado porque " + porQue : "")
                     + ", espero a que me diga qué pasa (luego " + (debajo == Modo.LIBRE ? "vuelvo a lo mío" : debajo.palabra()) + ")";
+            case CONOCIENDO -> enemigo != null ? "me defiendo de " + enemigo.getName().getString() + " antes de terminar de conocer a " + who
+                    : "conozco a " + who + ": lo miré de pies a cabeza, lo saludé y le pregunté su nombre; miro el lugar mientras me contesta";
             case ESPERANDO -> enemigo != null ? "me defiendo de " + enemigo.getName().getString() + " mientras espero"
                     : "espero aquí a " + who + " porque me lo pidió; miro alrededor y me cuido";
         };

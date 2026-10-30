@@ -63,7 +63,7 @@ public final class Atasco {
             return Remedio.NINGUNO;
         }
         long now = world.getTime();
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         int items = items(villager.getInventory());
         int around = around(world, feet);
         boolean moved = ancla == null || ancla.getSquaredDistance(feet) > 1.0;

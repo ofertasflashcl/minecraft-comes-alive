@@ -292,7 +292,14 @@ public class ProspectingTask extends AbstractChoreTask {
     /** Legs of the climb out given up in a row. */
     private int climbFails;
     /** World time it last called out that it cannot find a way up. */
-    private long lastStuckCall = -1200;
+    private long lastStuckCall = -2400;
+    /** Calls for help since it last got free: a few, then it keeps trying in silence. */
+    private int stuckCalls;
+    /** Its will asked it to go and find food (hungry at the player's side, nobody had any). */
+    private boolean buscarComida;
+    @Nullable
+    private BlockPos stuckCallAt;
+    private static final int STUCK_CALLS = 3;
 
     // a way it remembers walking ({@link Recuerdos}): up and out, or back down to its work face, before any digging
     private final Deque<BlockPos> via = new ArrayDeque<>();
@@ -606,7 +613,7 @@ public class ProspectingTask extends AbstractChoreTask {
             }
             var home = villager.getResidency().getHome();
             if (home.isPresent() && home.get().getDimension() == villager.getWorld().getRegistryKey()
-                    && !home.get().getPos().isWithinDistance(villager.getBlockPos(), 64)) {
+                    && !home.get().getPos().isWithinDistance(Mining.pies(villager), 64)) {
                 goEs.add("estoy lejos de casa");
                 goEn.add("I'm far from home");
                 score++;
@@ -694,7 +701,7 @@ public class ProspectingTask extends AbstractChoreTask {
     /** The first start of this task: picks up the mine it was working in, when it is still close and recent. */
     private void init(ServerWorld world, VillagerEntityMCA villager) {
         tunnelDir = villager.getHorizontalFacing().getHorizontal();
-        base = villager.getBlockPos().toImmutable();
+        base = Mining.pies(villager).toImmutable();
         if (minaDada) {
             return; // the checks gave it its mine
         }
@@ -914,7 +921,33 @@ public class ProspectingTask extends AbstractChoreTask {
         plan.clear();
         resetWatch();
         decideTicks = 19;
+        if (buscarComida) {
+            buscarComida = false;
+            if (Mining.onSurface(world, Mining.pies(villager))) {
+                startForage();
+            }
+        }
         MCA.LOGGER.info("[Tropeles] {} vuelve a lo suyo: {}", name(), debug());
+    }
+
+    /** Everyday food: what it picks up when the player throws it something to eat. */
+    public static boolean comestible(ItemStack stack) {
+        return edible(stack);
+    }
+
+    /** It eats the best food it carries, right now: false with nothing to eat. */
+    public boolean comerAhora(ServerWorld world) {
+        return villager != null && eatBest(world, villager);
+    }
+
+    /** Bread right now from the wheat it carries, with a crafting table at hand or in the bag: true when it made one. */
+    public boolean hacerPan(ServerWorld world) {
+        return villager != null && progreso.pan(world, villager);
+    }
+
+    /** Its will sends it to find food: when it gets its body back it goes foraging (on the land), and the will brings it back after. */
+    public void buscarComida() {
+        buscarComida = true;
     }
 
     /** Food points it carries (everyday food only). */
@@ -1029,7 +1062,7 @@ public class ProspectingTask extends AbstractChoreTask {
     private void say(String key, Object... params) {
         tellAssigner(key, params);
         if (villager != null) {
-            Recuerdos.anotar(villager, kind(key), Recuerdos.frase(key, params), villager.getBlockPos());
+            Recuerdos.anotar(villager, kind(key), Recuerdos.frase(key, params), Mining.pies(villager));
         }
     }
 
@@ -1264,7 +1297,7 @@ public class ProspectingTask extends AbstractChoreTask {
         if (motor.midStep(villager) || !villager.isOnGround()) {
             return;
         }
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         if (phase == Phase.HOME_UP) {
             if (fallback && Mining.standable(world, feet.down()) && Mining.passable(world, feet) && Mining.passable(world, feet.up())
                     && (climb.isEmpty() || !climb.get(climb.size() - 1).equals(feet))) {
@@ -1419,7 +1452,7 @@ public class ProspectingTask extends AbstractChoreTask {
      */
     private boolean decide(ServerWorld world, VillagerEntityMCA villager) {
         long now = world.getTime();
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         SimpleInventory inv = villager.getInventory();
         if (phase == Phase.SEEK && campo == Campo.NADA && now >= nextCampo && !progreso.wantsChest() && campoStart(world, villager)) {
             return true;
@@ -1551,7 +1584,7 @@ public class ProspectingTask extends AbstractChoreTask {
     /** Up and out, whatever for: back along its trail (or a staircase of its own), then home. */
     private void leave(ServerWorld world, VillagerEntityMCA villager, Trip why) {
         trip = why;
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         if (campo != Campo.NADA) {
             endCampo(world, villager, world.getTime() + 1200);
         }
@@ -1627,7 +1660,7 @@ public class ProspectingTask extends AbstractChoreTask {
         if (homeTarget != null) {
             return homeTarget;
         }
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         camping = false;
         var bed = villager.getResidency().getHome();
         if (bed.isPresent() && bed.get().getDimension() == world.getRegistryKey()
@@ -1664,7 +1697,7 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         BlockPos target = homePos(world, villager);
         homeTicks++;
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         if (phase == Phase.HOME_UP) {
             equipPick(villager);
             climbUp(world, villager, target, feet, memory, now);
@@ -1747,7 +1780,7 @@ public class ProspectingTask extends AbstractChoreTask {
             } else if (fallback) {
                 plan.clear();
                 climbFails = 0;
-                BlockPos here = villager.getBlockPos();
+                BlockPos here = Mining.pies(villager);
                 climbMode = preferredClimbMode(world, villager, here);
                 int hx = target.getX() - feet.getX();
                 int hz = target.getZ() - feet.getZ();
@@ -1785,7 +1818,7 @@ public class ProspectingTask extends AbstractChoreTask {
                 } else {
                     skip += 3;
                 }
-            } else if (salidaAPie(world, villager, villager.getBlockPos())) {
+            } else if (salidaAPie(world, villager, Mining.pies(villager))) {
                 // the leg it was cutting is shut, but its own staircase is there to walk after all
                 fallback = false;
                 plan.clear();
@@ -1996,7 +2029,7 @@ public class ProspectingTask extends AbstractChoreTask {
         if (door == null) {
             door = Recuerdos.of(world, villager).sitio("mina");
         }
-        return door != null && door.isWithinDistance(villager.getBlockPos(), RESUME_DISTANCE) ? door : null;
+        return door != null && door.isWithinDistance(Mining.pies(villager), RESUME_DISTANCE) ? door : null;
     }
 
     /**
@@ -2035,7 +2068,7 @@ public class ProspectingTask extends AbstractChoreTask {
 
     /** Inside its own house: not under the open sky, a few steps from its bed, on the floor of the bed. */
     private static boolean enCasa(ServerWorld world, VillagerEntityMCA villager, BlockPos bed) {
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         return !Mining.outdoors(world, feet) && feet.isWithinDistance(bed, 6.0) && Math.abs(feet.getY() - bed.getY()) <= 1;
     }
 
@@ -2085,7 +2118,7 @@ public class ProspectingTask extends AbstractChoreTask {
                 if (!motor.midStep(villager)) {
                     motor.reset(world, villager);
                 }
-                MCA.LOGGER.info("[Tropeles] {} no sigue {} de corrido en {}: paso a paso, sin cavar", name(), viaDe, villager.getBlockPos().toShortString());
+                MCA.LOGGER.info("[Tropeles] {} no sigue {} de corrido en {}: paso a paso, sin cavar", name(), viaDe, Mining.pies(villager).toShortString());
                 return Motor.Result.RUNNING;
             }
             if (r == Motor.Result.ARRIVED) {
@@ -2328,15 +2361,32 @@ public class ProspectingTask extends AbstractChoreTask {
         return open >= 4;
     }
 
-    /** Boxed in on the way up: it says where it is (once a minute at most) so someone can come and get it out. */
+    /**
+     * Boxed in, or getting nowhere: it says where it is so someone can come and get it out, once every two minutes at
+     * most and never more than {@value #STUCK_CALLS} times in a row without getting free. Under the ground it is the
+     * mine it cannot get out of; on the land (a village path, by its house) it only says it is stuck there.
+     */
     private void callOutStuck(ServerWorld world) {
         long now = world.getTime();
-        if (now - lastStuckCall < 1200) {
+        BlockPos pos = Mining.pies(villager);
+        if (stuckCallAt != null && !stuckCallAt.isWithinDistance(pos, 16)) {
+            stuckCalls = 0; // it got free since and is stuck somewhere else now
+        }
+        if (now - lastStuckCall < 2400 || stuckCalls >= STUCK_CALLS) {
             return;
         }
         lastStuckCall = now;
-        BlockPos pos = villager.getBlockPos();
-        say("chore.mining.stuck", pos.getX(), pos.getY(), pos.getZ());
+        stuckCalls++;
+        stuckCallAt = pos.toImmutable();
+        if (Entorno.bajoTierra(world, villager) && !Mining.outdoors(world, pos)) {
+            say("chore.mining.stuck", pos.getX(), pos.getY(), pos.getZ());
+        } else {
+            boolean house = phase == Phase.HOME_WALK || phase == Phase.HOME_STORE;
+            Voluntad.contar(villager, (house ? "No logro llegar a mi casa" : "Estoy atascado") + " en " + pos.getX() + " " + pos.getY() + " " + pos.getZ()
+                            + ". Sigo intentando, pero si pasas por aquí, ¿me echas una mano?",
+                    (house ? "I can't get to my house" : "I'm stuck") + " at " + pos.getX() + " " + pos.getY() + " " + pos.getZ()
+                            + ". I'll keep trying, but if you come by, could you give me a hand?");
+        }
         getAssigningPlayer().ifPresent(assigner -> DistressCalls.raise(world, villager, assigner.getUuid()));
     }
 
@@ -2344,7 +2394,7 @@ public class ProspectingTask extends AbstractChoreTask {
     private void surfaced(ServerWorld world, VillagerEntityMCA villager) {
         motor.reset(world, villager);
         plan.clear();
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         if (fallback && !climb.isEmpty() && mina.rebase(world, climb, climbFromIdx)) {
             MCA.LOGGER.info("[Tropeles] {} guarda la escalera por la que salió como camino a su mina ({} pasos)", name(), mina.size());
             // the foot and the head of the staircase it cut are marks on its way, like its torches
@@ -2569,7 +2619,7 @@ public class ProspectingTask extends AbstractChoreTask {
                     }
                     if (placeTicks > 1000) {
                         // nowhere to set it down around here: it keeps its things on it this time
-                        MCA.LOGGER.info("[Tropeles] {} no encuentra dónde poner su cofre en {}", name(), villager.getBlockPos().toShortString());
+                        MCA.LOGGER.info("[Tropeles] {} no encuentra dónde poner su cofre en {}", name(), Mining.pies(villager).toShortString());
                         stored = true;
                     } else if ((placeTicks % 60) == 1) {
                         // a cramped spot: a few steps to one side and try again
@@ -2682,7 +2732,7 @@ public class ProspectingTask extends AbstractChoreTask {
             // starving and ripe berries in sight right here: those too (never instead of a night's sleep, never a blind
             // search that wanders back into its mine); otherwise only food it knows of, as before
             if ((!foraged || food <= GO_HOME_BELOW) && !world.isNight() && (foodKnown(world, villager)
-                    || food <= GO_HOME_BELOW && !wantsSleep(world, villager) && Mining.onSurface(world, villager.getBlockPos())
+                    || food <= GO_HOME_BELOW && !wantsSleep(world, villager) && Mining.onSurface(world, Mining.pies(villager))
                     && seenBerries(villager, Retina.memory(villager)) != null)) {
                 say("chore.mining.forage");
                 startForage();
@@ -2713,7 +2763,7 @@ public class ProspectingTask extends AbstractChoreTask {
         nextFoodTrip = world.getTime() + 6000;
         foraged = true;
         MCA.LOGGER.info("[Tropeles] {} no tiene nada que comer ni en casa (comida {}): sigue conectado y vuelve a lo suyo", name(), food);
-        Recuerdos.anotar(villager, "viaje", "no había comida ni en casa; seguí con lo mío", villager.getBlockPos());
+        Recuerdos.anotar(villager, "viaje", "no había comida ni en casa; seguí con lo mío", Mining.pies(villager));
         Voluntad.contar(villager, "En casa tampoco hay comida. Sigo con lo mío y busco algo de comer más tarde.",
                 "There's no food at home either. I'll carry on and look for something to eat later.");
     }
@@ -2763,7 +2813,7 @@ public class ProspectingTask extends AbstractChoreTask {
         ItemStack first = firstToStore(villager);
         if (free <= 2 && !first.isEmpty()) {
             BlockPos target = homePos(world, villager);
-            if (!camping && target.isWithinDistance(villager.getBlockPos(), Cofres.HOME_RANGE)) {
+            if (!camping && target.isWithinDistance(Mining.pies(villager), Cofres.HOME_RANGE)) {
                 return false; // home is right here: its chest at home
             }
             if (chest || canMake || campoCerca(world, villager, first) != null) {
@@ -2794,7 +2844,7 @@ public class ProspectingTask extends AbstractChoreTask {
             // the wood is for the chest from now on: nothing else gets it first
             progreso.wantChest();
         }
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         if (kind == Campo.BASURA) {
             MCA.LOGGER.info("[Tropeles] {} tiene la mochila llena de cosas que no le sirven ({} de basura) en {}: las deja en un cofre ahí mismo",
                     name(), junkCount(villager.getInventory()), feet.toShortString());
@@ -2823,7 +2873,7 @@ public class ProspectingTask extends AbstractChoreTask {
         long now = world.getTime();
         SimpleInventory inv = villager.getInventory();
         VisualMemory memory = Retina.memory(villager);
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         boolean basuraNow = campo == Campo.BASURA;
         if (++campoTicks > CAMPO_TICKS) {
             MCA.LOGGER.info("[Tropeles] {} no logró dejar sus cosas en un cofre en {} ticks: sigue como antes", name(), CAMPO_TICKS);
@@ -3001,7 +3051,7 @@ public class ProspectingTask extends AbstractChoreTask {
         if (first.isEmpty()) {
             return null;
         }
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         Recuerdos r = Recuerdos.of(world, villager);
         BlockPos best = null;
         double bestD = (double) CAMPO_REUSE * CAMPO_REUSE;
@@ -3026,7 +3076,7 @@ public class ProspectingTask extends AbstractChoreTask {
     /** The junk chest of this trip, when it is still close and has room. */
     @Nullable
     private BlockPos basuraCerca(ServerWorld world, VillagerEntityMCA villager) {
-        if (basura == null || !basura.isWithinDistance(villager.getBlockPos(), 12) || campoLleno.contains(basura.asLong())
+        if (basura == null || !basura.isWithinDistance(Mining.pies(villager), 12) || campoLleno.contains(basura.asLong())
                 || !(world.getBlockState(basura).getBlock() instanceof ChestBlock)) {
             return null;
         }
@@ -3131,7 +3181,7 @@ public class ProspectingTask extends AbstractChoreTask {
             phase = Phase.RETURN;
             say("chore.mining.back");
             MCA.LOGGER.info("[Tropeles] {} vuelve a su mina por su camino ({} pasos)", name(), mina.size());
-        } else if (faceByMemory(world, villager, villager.getBlockPos())) {
+        } else if (faceByMemory(world, villager, Mining.pies(villager))) {
             // no trail from a door, but it remembers walking from here to its work face
             phase = Phase.RETURN;
             say("chore.mining.back");
@@ -3209,7 +3259,7 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         VisualMemory memory = Retina.memory(villager);
         long now = world.getTime();
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         equipPick(villager);
         if (viaMemoria) {
             returnTicks++;
@@ -3338,7 +3388,7 @@ public class ProspectingTask extends AbstractChoreTask {
             beginReturn(world, villager);
             return;
         }
-        if (villager.getBlockPos().getSquaredDistance(target) > 16 && ((restTicks % 40) == 1 || villager.getNavigation().isIdle())) {
+        if (Mining.pies(villager).getSquaredDistance(target) > 16 && ((restTicks % 40) == 1 || villager.getNavigation().isIdle())) {
             villager.getNavigation().startMovingTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, 0.6);
         }
     }
@@ -3389,7 +3439,7 @@ public class ProspectingTask extends AbstractChoreTask {
     /** Its own bed in the village when it is near, else any free bed close by (its head cell), or null. */
     @Nullable
     private BlockPos findBed(ServerWorld world, VillagerEntityMCA villager) {
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         var home = villager.getResidency().getHome();
         if (home.isPresent() && home.get().getDimension() == world.getRegistryKey() && home.get().getPos().isWithinDistance(feet, 48)) {
             BlockPos head = bedHead(world, home.get().getPos());
@@ -3445,7 +3495,7 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         if (slept || !night(world)) {
             if (slept) {
-                Recuerdos.anotar(villager, "viaje", "me desperté", villager.getBlockPos());
+                Recuerdos.anotar(villager, "viaje", "me desperté", Mining.pies(villager));
                 Voluntad.contar(villager, "Buenos días. Sigo con lo mío.", "Good morning. Back to it.");
             }
             wakeUpAndGoOn(world, villager);
@@ -3569,8 +3619,8 @@ public class ProspectingTask extends AbstractChoreTask {
         if (lootTicks > 0) {
             lootTicks--;
             if (lootAt != null) {
-                if (villager.getBlockPos().isWithinDistance(lootAt, 2.0)) {
-                    Hands.collect(world, villager, villager.getBlockPos(), 2.0);
+                if (Mining.pies(villager).isWithinDistance(lootAt, 2.0)) {
+                    Hands.collect(world, villager, Mining.pies(villager), 2.0);
                     lootTicks = Math.min(lootTicks, 5);
                 } else if ((lootTicks % 20) == 19 || villager.getNavigation().isIdle()) {
                     villager.getNavigation().startMovingTo(lootAt.getX() + 0.5, lootAt.getY(), lootAt.getZ() + 0.5, 0.7);
@@ -3615,7 +3665,7 @@ public class ProspectingTask extends AbstractChoreTask {
             }
         }
         if (!camping && (villager.age % 20) == 5) {
-            BlockPos chest = Cofres.withFood(world, villager, villager.getBlockPos(), HOME_REACH, ProspectingTask::edible);
+            BlockPos chest = Cofres.withFood(world, villager, Mining.pies(villager), HOME_REACH, ProspectingTask::edible);
             if (chest != null) {
                 // it remembers food in one of its chests after all
                 homeTarget = chest.toImmutable();
@@ -3734,7 +3784,7 @@ public class ProspectingTask extends AbstractChoreTask {
     /** The nearest ripe crop its eye saw within 20 blocks (still ripe there now), or null. */
     @Nullable
     private static BlockPos seenCrop(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory) {
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         BlockPos best = null;
         double bestD = Double.MAX_VALUE;
         for (BlockPos pos : BlockPos.iterate(feet.add(-20, -4, -20), feet.add(20, 4, 20))) {
@@ -3754,7 +3804,7 @@ public class ProspectingTask extends AbstractChoreTask {
     /** The nearest ripe sweet berry bush its eye saw within 16 blocks, or null. */
     @Nullable
     private static BlockPos seenBerries(VillagerEntityMCA villager, VisualMemory memory) {
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         BlockPos best = null;
         double bestD = Double.MAX_VALUE;
         for (BlockPos pos : BlockPos.iterate(feet.add(-16, -4, -16), feet.add(16, 4, 16))) {
@@ -3878,7 +3928,7 @@ public class ProspectingTask extends AbstractChoreTask {
         foodKnownCache = rawCount(villager.getInventory()) >= 2 || villager.getInventory().count(Items.WHEAT) >= 3
                 || seenCrop(world, villager, Retina.memory(villager)) != null
                 || findPrey(world, villager, Retina.memory(villager), now) != null
-                || Cofres.withFood(world, villager, villager.getBlockPos(), HOME_REACH, ProspectingTask::edible) != null;
+                || Cofres.withFood(world, villager, Mining.pies(villager), HOME_REACH, ProspectingTask::edible) != null;
         return foodKnownCache;
     }
 
@@ -3936,7 +3986,7 @@ public class ProspectingTask extends AbstractChoreTask {
         if (remedy == Atasco.Remedio.NINGUNO) {
             return false;
         }
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         Recuerdos recuerdos = Recuerdos.of(world, villager);
         recuerdos.anotar(now, "atasco", "me quedé atascado en " + feet.getX() + " " + feet.getY() + " " + feet.getZ() + " haciendo «" + memory.doing()
                 + "»: " + remedy.name().toLowerCase(java.util.Locale.ROOT), feet);
@@ -3970,7 +4020,6 @@ public class ProspectingTask extends AbstractChoreTask {
                 MCA.LOGGER.info("[Tropeles] {} atascado en {}: pide ayuda en el chat", name(), feet.toShortString());
                 Voluntad.contar(villager, "Estoy atascado en " + feet.getX() + " " + feet.getY() + " " + feet.getZ() + " y no logro salir. ¿Me ayudas?",
                         "I'm stuck at " + feet.getX() + " " + feet.getY() + " " + feet.getZ() + " and can't get out. Can you help me?");
-                lastStuckCall = -1200;
                 callOutStuck(world);
             }
             default -> {
@@ -4057,7 +4106,7 @@ public class ProspectingTask extends AbstractChoreTask {
             return "dejo ese animal en paz";
         }
         if (viaMemoria && !via.isEmpty()) {
-            viaBlocked(world, villager, villager.getBlockPos(), via.peekFirst(), now);
+            viaBlocked(world, villager, Mining.pies(villager), via.peekFirst(), now);
             return "por ahí no paso, busco otro camino";
         }
         switch (phase) {
@@ -4166,13 +4215,12 @@ public class ProspectingTask extends AbstractChoreTask {
                     lostSaid = true;
                     say("chore.mining.lost");
                 }
-                lastStuckCall = -1200;
                 callOutStuck(world);
                 if (phase == Phase.HOME_UP && !fallback) {
-                    startFallback(world, villager, villager.getBlockPos(), mina.nearLow(world, villager.getBlockPos()));
+                    startFallback(world, villager, Mining.pies(villager), mina.nearLow(world, Mining.pies(villager)));
                 } else if (phase == Phase.HOME_WALK) {
                     camping = true;
-                    homeTarget = villager.getBlockPos().toImmutable();
+                    homeTarget = Mining.pies(villager).toImmutable();
                     enterHomeStore();
                 }
                 return true;
@@ -4182,40 +4230,37 @@ public class ProspectingTask extends AbstractChoreTask {
             if (viaMemoria) {
                 // the remembered way does not get it anywhere: that cell is shut for now, another way or its own stairs
                 BlockPos next = via.peekFirst();
-                viaBlocked(world, villager, villager.getBlockPos(), next != null ? next : villager.getBlockPos(), world.getTime());
+                viaBlocked(world, villager, Mining.pies(villager), next != null ? next : Mining.pies(villager), world.getTime());
             } else if (trailDig) {
                 if (stuckRounds >= 2) {
                     // its own trail does not open up from here: a staircase of its own after all
-                    intentos.add("su propio camino, abriéndolo: atascado en " + villager.getBlockPos().toShortString());
+                    intentos.add("su propio camino, abriéndolo: atascado en " + Mining.pies(villager).toShortString());
                     trailDig = false;
-                    startFallback(world, villager, villager.getBlockPos(), mina.nearLow(world, villager.getBlockPos()));
+                    startFallback(world, villager, Mining.pies(villager), mina.nearLow(world, Mining.pies(villager)));
                 } else {
                     trailDigFails++;
                 }
             } else if (!fallback && stuckRounds == 1) {
                 skip += 4;
             } else if (!fallback) {
-                wayOut(world, villager, villager.getBlockPos(), mina.nearLow(world, villager.getBlockPos()));
+                wayOut(world, villager, Mining.pies(villager), mina.nearLow(world, Mining.pies(villager)));
             } else {
                 climbMode = (climbMode + 1) % 5;
                 // rounds are ten seconds now: a call after a minute, a cry for help after a minute and a half
                 if (stuckRounds >= 6) {
                     callOutStuck(world);
                 }
-                if (stuckRounds >= 9) {
-                    cryForHelp(world);
-                }
             }
         } else if (phase == Phase.RETURN) {
             if (viaMemoria) {
                 BlockPos next = via.peekFirst();
-                viaBlocked(world, villager, villager.getBlockPos(), next != null ? next : villager.getBlockPos(), world.getTime());
+                viaBlocked(world, villager, Mining.pies(villager), next != null ? next : Mining.pies(villager), world.getTime());
                 if (!viaMemoria && !mina.known()) {
                     phase = Phase.SEEK;
                 }
-            } else if (stuckRounds >= 2 && !sinCavar(world, villager, villager.getBlockPos())) {
+            } else if (stuckRounds >= 2 && !sinCavar(world, villager, Mining.pies(villager))) {
                 // the trail does not lead there any more and no way on foot does: it digs on from where it is
-                MCA.LOGGER.info("[Tropeles] {} no avanza hacia su mina desde {} y no ve paso a pie: cava desde aquí", name(), villager.getBlockPos().toShortString());
+                MCA.LOGGER.info("[Tropeles] {} no avanza hacia su mina desde {} y no ve paso a pie: cava desde aquí", name(), Mining.pies(villager).toShortString());
                 phase = Phase.SEEK;
                 nextMineReturn = world.getTime() + 1200;
             }
@@ -4229,10 +4274,9 @@ public class ProspectingTask extends AbstractChoreTask {
                 if (!homeOutside) {
                     homeOutside = true;
                     MCA.LOGGER.info("[Tropeles] {} no logra entrar a su casa desde {}: guarda sus cosas junto a la casa", name(),
-                            villager.getBlockPos().toShortString());
+                            Mining.pies(villager).toShortString());
                     Voluntad.contar(villager, "No logro entrar a mi casa. Dejo mis cosas aquí al lado y lo intento después.",
                             "I can't get into my house. I'll leave my things right by it and try again later.");
-                    callOutStuck(world);
                 }
                 if (horizontalSq(house, villager) <= 8 * 8) {
                     enterHomeStore();
@@ -4243,11 +4287,11 @@ public class ProspectingTask extends AbstractChoreTask {
             } else if (stuckRounds >= 6) {
                 // a minute without getting closer, far from any house: no way home from here, this is the camp now
                 camping = true;
-                homeTarget = villager.getBlockPos().toImmutable();
+                homeTarget = Mining.pies(villager).toImmutable();
                 enterHomeStore();
             } else if (stuckRounds == 2 || stuckRounds == 4) {
                 BlockPos target = homePos(world, villager);
-                BlockPos feet = villager.getBlockPos();
+                BlockPos feet = Mining.pies(villager);
                 // a way on foot to it first (up its own steps out of a cut, round what stops the path finder): never a
                 // staircase of its own beside one that is there
                 if (!pieA(world, villager, feet, target, 2.0, target, "un camino a pie hasta casa")) {
@@ -4263,7 +4307,7 @@ public class ProspectingTask extends AbstractChoreTask {
 
     /** Bigger is closer to where the phase is going. */
     private double progress(ServerWorld world, VillagerEntityMCA villager) {
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         if (viaMemoria && (phase == Phase.HOME_UP || phase == Phase.RETURN)) {
             return -via.size();
         }
@@ -4297,7 +4341,7 @@ public class ProspectingTask extends AbstractChoreTask {
         if ((villager.age % 20) != 0) {
             return false;
         }
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         int items = 0;
         for (int i = 0; i < villager.getInventory().size(); i++) {
             items += villager.getInventory().getStack(i).getCount();
@@ -4366,18 +4410,18 @@ public class ProspectingTask extends AbstractChoreTask {
     private void seek(ServerWorld world, VillagerEntityMCA villager) {
         VisualMemory memory = Retina.memory(villager);
         long now = world.getTime();
-        if (ore == null && plan.isEmpty() && !motor.busy() && !Entorno.bajoTierra(world, villager) && oldMine(world, villager.getBlockPos())) {
+        if (ore == null && plan.isEmpty() && !motor.busy() && !Entorno.bajoTierra(world, villager) && oldMine(world, Mining.pies(villager))) {
             // up on the land, its own mine still there: back to it and on from its work face, never a new one beside it
             MCA.LOGGER.info("[Tropeles] {} está en la superficie con su mina en {}: vuelve a ella ({} pasos)", name(),
                     mina.entrance() == null ? "?" : mina.entrance().toShortString(), mina.size());
             beginReturn(world, villager);
             return;
         }
-        if (ore == null && plan.isEmpty() && !motor.busy() && shortOfFace(world, villager.getBlockPos(), now)) {
+        if (ore == null && plan.isEmpty() && !motor.busy() && shortOfFace(world, Mining.pies(villager), now)) {
             // standing on its own staircase or tunnel short of its work face (a trip back that stopped half way, a fight,
             // its tools): down to the face and on from its end, never a new staircase from the middle of the old one
             MCA.LOGGER.info("[Tropeles] {} está en su propia mina en {}, a {} pasos de su frente {}: baja a él en vez de cavar otra escalera", name(),
-                    villager.getBlockPos().toShortString(), mina.size() - 1 - mina.nearHigh(world, villager.getBlockPos()),
+                    Mining.pies(villager).toShortString(), mina.size() - 1 - mina.nearHigh(world, Mining.pies(villager)),
                     mina.last() == null ? "?" : mina.last().toShortString());
             beginReturn(world, villager);
             return;
@@ -4397,7 +4441,7 @@ public class ProspectingTask extends AbstractChoreTask {
             }
         }
         if (ore != null) {
-            BlockPos feet = villager.getBlockPos();
+            BlockPos feet = Mining.pies(villager);
             boolean underFeet = ore.equals(feet.down());
             // only on its feet and between steps: mid-jump the step goes on (and puts its block down), and the ore
             // waits until it has landed, so the ore and the step never take the one Breaker from each other
@@ -4489,7 +4533,7 @@ public class ProspectingTask extends AbstractChoreTask {
      * starts there. True while it is busy getting to such a spot.
      */
     private boolean needsSite(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now) {
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         if (site == null && !siteExploring && !forceSite
                 && (now < siteCheckAt || feet.getY() <= targetY(world, villager) + 2 || Entorno.bajoTierra(world, villager)
                 || Entorno.profundidad(world, villager) > 2)) {
@@ -4694,7 +4738,7 @@ public class ProspectingTask extends AbstractChoreTask {
 
     private boolean mountains(ServerWorld world, VillagerEntityMCA villager) {
         BlockPos door = mina.entrance();
-        BlockPos at = door != null ? door : base != null ? base : villager.getBlockPos();
+        BlockPos at = door != null ? door : base != null ? base : Mining.pies(villager);
         return world.getBiome(at).isIn(MOUNTAINS);
     }
 
@@ -4720,7 +4764,7 @@ public class ProspectingTask extends AbstractChoreTask {
 
     /** Next stretch: a staircase to the layer, then a corridor with side branches on both sides every third block. */
     private void planExploration(ServerWorld world, VillagerEntityMCA villager) {
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         int depth = targetY(world, villager);
         BlockPos oven = progreso.cookingAt();
         if (oven != null && !Mining.onSurface(world, oven.up())) {
@@ -4830,7 +4874,7 @@ public class ProspectingTask extends AbstractChoreTask {
     private BlockPos chooseOre(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory) {
         ItemStack tool = villager.getMainHandStack();
         long now = world.getTime();
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         BlockPos best = null;
         double bestScore = Double.MAX_VALUE;
         int blocks = Hands.buildingBlockCount(villager);
@@ -4896,7 +4940,7 @@ public class ProspectingTask extends AbstractChoreTask {
         if ((villager.age & 31) != 0) {
             return;
         }
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         if (world.getLightLevel(feet) > 7) {
             return;
         }
@@ -4936,7 +4980,7 @@ public class ProspectingTask extends AbstractChoreTask {
         if (troubled() || (villager.age & 3) != 0) {
             return false;
         }
-        MobEntity threat = Threats.nearest(world, villager.getBlockPos(), 10, villager, null);
+        MobEntity threat = Threats.nearest(world, Mining.pies(villager), 10, villager, null);
         if (threat == null || CombatMind.ignoring(villager, threat)) {
             return false;
         }
@@ -4962,7 +5006,7 @@ public class ProspectingTask extends AbstractChoreTask {
             }
             MCA.LOGGER.info("[Tropeles] {} le hace frente a {}", name(), threat.getName().getString());
             Recuerdos.anotar(villager, "pelea", "le hice frente a " + threat.getName().getString() + " en " + villager.getBlockX() + " "
-                    + villager.getBlockY() + " " + villager.getBlockZ(), villager.getBlockPos());
+                    + villager.getBlockY() + " " + villager.getBlockZ(), Mining.pies(villager));
             return true;
         }
         beginDanger(world, threat);
@@ -4983,7 +5027,7 @@ public class ProspectingTask extends AbstractChoreTask {
         }
         int allowed = health >= 0.6F ? 2 : 1;
         int seen = 0;
-        for (MobEntity mob : world.getNonSpectatingEntities(MobEntity.class, new Box(villager.getBlockPos()).expand(12))) {
+        for (MobEntity mob : world.getNonSpectatingEntities(MobEntity.class, new Box(Mining.pies(villager)).expand(12))) {
             if (Threats.isThreat(mob, villager, null) && !(mob instanceof CreeperEntity && mob != threat)
                     && Retina.canSee(world, villager, mob) && ++seen > allowed) {
                 return false;
@@ -5012,10 +5056,10 @@ public class ProspectingTask extends AbstractChoreTask {
             fightTarget = null;
             digTicks = 0;
             digTarget = null;
-            Recuerdos.anotar(villager, "pelea", "terminé la pelea, no queda nada que me ataque", villager.getBlockPos());
+            Recuerdos.anotar(villager, "pelea", "terminé la pelea, no queda nada que me ataque", Mining.pies(villager));
             // nothing left to fight: what it dropped (nobody eats rotten flesh), and back to what it was doing
             CombatMind.disengage(villager);
-            Hands.collect(world, villager, villager.getBlockPos(), 2.0, stack -> !stack.isOf(Items.ROTTEN_FLESH));
+            Hands.collect(world, villager, Mining.pies(villager), 2.0, stack -> !stack.isOf(Items.ROTTEN_FLESH));
             afterTrouble(world, villager);
             return;
         }
@@ -5130,7 +5174,7 @@ public class ProspectingTask extends AbstractChoreTask {
     private void beginDanger(ServerWorld world, MobEntity threat) {
         dangerFrom = threat.getBlockPos().toImmutable();
         Recuerdos.anotar(villager, "pelea", "me escondí de " + threat.getName().getString() + " en " + villager.getBlockX() + " "
-                + villager.getBlockY() + " " + villager.getBlockZ(), villager.getBlockPos());
+                + villager.getBlockY() + " " + villager.getBlockZ(), Mining.pies(villager));
         cryForHelp(world);
         motor.reset(world, villager);
         plan.clear();
@@ -5143,7 +5187,7 @@ public class ProspectingTask extends AbstractChoreTask {
     }
 
     private boolean tryBeginShelter(ServerWorld world, MobEntity threat) {
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         Direction away = awayFrom(villager, threat.getBlockPos());
         BlockPos retreat = feet.offset(away);
         pocket = retreat;
@@ -5163,7 +5207,7 @@ public class ProspectingTask extends AbstractChoreTask {
      * never down; there it walls itself in.
      */
     private void beginEscape(ServerWorld world) {
-        BlockPos feet = villager.getBlockPos();
+        BlockPos feet = Mining.pies(villager);
         escapeTicks = 0;
         escapes++;
         escapeGoal = null;
@@ -5214,7 +5258,7 @@ public class ProspectingTask extends AbstractChoreTask {
             return;
         }
         villager.getMoveControl().moveTo(pocket.getX() + 0.5, pocket.getY(), pocket.getZ() + 0.5, 0.8);
-        if (villager.getBlockPos().equals(pocket) && villager.isOnGround()) {
+        if (Mining.pies(villager).equals(pocket) && villager.isOnGround()) {
             Motor.standStill(villager);
             phase = Phase.SHELTER_SEAL;
             cryForHelp(world);
@@ -5248,7 +5292,7 @@ public class ProspectingTask extends AbstractChoreTask {
             return;
         }
         Motor.standStill(villager);
-        List<BlockPos> holes = openings(world, villager.getBlockPos());
+        List<BlockPos> holes = openings(world, Mining.pies(villager));
         for (BlockPos hole : holes) {
             if (placeSolid(world, hole)) {
                 sealed.add(hole.toImmutable());
@@ -5276,7 +5320,7 @@ public class ProspectingTask extends AbstractChoreTask {
             return; // land first
         }
         motor.reset(world, villager);
-        BlockPos at = villager.getBlockPos();
+        BlockPos at = Mining.pies(villager);
         say("chore.mining.escape", at.getX(), at.getY(), at.getZ());
         MCA.LOGGER.info("[Tropeles] {} se retira a {} y se tapia", name(), at.toShortString());
         // where it got to, it walls itself in
@@ -5289,14 +5333,14 @@ public class ProspectingTask extends AbstractChoreTask {
      * back and goes on with what it was doing.
      */
     private void recover(ServerWorld world, VillagerEntityMCA villager) {
-        MobEntity threat = Threats.nearest(world, villager.getBlockPos(), 8, villager, null);
+        MobEntity threat = Threats.nearest(world, Mining.pies(villager), 8, villager, null);
         BlockPos heard = threat == null ? Threats.footstep(world, villager, null) : null;
         if (threat != null || heard != null) {
             calmTicks = 0;
             keepDistressAlive(world);
             if (threat != null) {
                 dangerFrom = threat.getBlockPos().toImmutable();
-                if (!openings(world, villager.getBlockPos()).isEmpty() && villager.squaredDistanceTo(threat) < 25) {
+                if (!openings(world, Mining.pies(villager)).isEmpty() && villager.squaredDistanceTo(threat) < 25) {
                     // it can get at it: wall up again, or retreat
                     beginDanger(world, threat);
                 }
@@ -5360,9 +5404,9 @@ public class ProspectingTask extends AbstractChoreTask {
     private void cryForHelp(ServerWorld world) {
         long now = world.getTime();
         getAssigningPlayer().ifPresent(assigner -> DistressCalls.raise(world, villager, assigner.getUuid()));
-        if (now - lastCry > 400) {
+        if (now - lastCry > 1200) {
             lastCry = now;
-            BlockPos pos = villager.getBlockPos();
+            BlockPos pos = Mining.pies(villager);
             say("chore.mining.help", pos.getX(), pos.getY(), pos.getZ());
         }
     }

@@ -3,6 +3,7 @@ package net.mca.entity.ai.body;
 import net.mca.entity.ai.sense.VisualMemory;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.entity.Entity;
 import net.minecraft.block.Blocks;
 import net.minecraft.registry.Registries;
 import net.minecraft.registry.RegistryKeys;
@@ -144,6 +145,25 @@ public final class Mining {
             return true;
         }
         return isRock(state) || isOre(state);
+    }
+
+    /**
+     * The cell the body stands in. Its block position, or the cell over it when the feet are on the top of a low block
+     * that fills the bottom of that same cell (a dirt path or farmland, 15/16 high; soul sand, mud, a bed, a bottom
+     * slab): on a village path the body stands in the cell over the path, the cell every way it plans, remembers and
+     * arrives at, never "inside" the path. Ladders and other climbables keep their own cell.
+     */
+    public static BlockPos pies(Entity entity) {
+        BlockPos pos = entity.getBlockPos();
+        if (entity.getY() - pos.getY() < 0.5 - 1.0E-4) {
+            return pos;
+        }
+        World world = entity.getWorld();
+        BlockState state = world.getBlockState(pos);
+        if (state.isIn(net.minecraft.registry.tag.BlockTags.CLIMBABLE) || state.getCollisionShape(world, pos).isEmpty()) {
+            return pos;
+        }
+        return state.getCollisionShape(world, pos).getMax(Direction.Axis.Y) <= entity.getY() - pos.getY() + 1.0E-3 ? pos.up() : pos;
     }
 
     /** A body fits here: nothing solid, no lava. Water is fine. */

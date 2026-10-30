@@ -66,6 +66,7 @@ public class PerceptionModule {
             // connected: it lives on its own, and its will says what it is set on and why
             input.add("Your current mode and what you are thinking: "
                     + Voluntad.forModel(villager, player.getName().getString()) + " ");
+            input.add(net.mca.entity.ai.mente.Companero.forModel(villager, player));
         } else if (move == MoveState.FOLLOW) {
             input.add("$villager is following $player. ");
         } else if (move == MoveState.STAY) {
