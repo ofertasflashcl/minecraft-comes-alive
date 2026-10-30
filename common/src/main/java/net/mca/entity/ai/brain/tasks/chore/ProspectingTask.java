@@ -2682,7 +2682,8 @@ public class ProspectingTask extends AbstractChoreTask {
             // starving and ripe berries in sight right here: those too (never instead of a night's sleep, never a blind
             // search that wanders back into its mine); otherwise only food it knows of, as before
             if ((!foraged || food <= GO_HOME_BELOW) && !world.isNight() && (foodKnown(world, villager)
-                    || food <= GO_HOME_BELOW && !wantsSleep(world, villager))) {
+                    || food <= GO_HOME_BELOW && !wantsSleep(world, villager) && Mining.onSurface(world, villager.getBlockPos())
+                    && seenBerries(villager, Retina.memory(villager)) != null)) {
                 say("chore.mining.forage");
                 startForage();
                 return;
@@ -3503,7 +3504,7 @@ public class ProspectingTask extends AbstractChoreTask {
             resetWatch();
             return;
         }
-        if (food < EAT_BELOW && foodPoints(villager.getInventory()) == 0 && !world.isNight()) {
+        if (food < EAT_BELOW && foodPoints(villager.getInventory()) == 0 && !world.isNight() && foodKnown(world, villager)) {
             // a hungry morning: breakfast first (the crops of the village, an animal, berries), the mine after
             say("chore.mining.forage");
             startForage();
@@ -3775,6 +3776,11 @@ public class ProspectingTask extends AbstractChoreTask {
      * {@link Explorar}). Once it has seen most of the land around and nothing to hunt, the search is over.
      */
     private void lookAround(ServerWorld world, VillagerEntityMCA villager, VisualMemory memory, long now) {
+        if (Entorno.bajoTierra(world, villager)) {
+            // food grows and walks up on the land: a search that led down a hole (its own staircase) is over
+            noFoodTicks = LOOK_FOR_FOOD;
+            return;
+        }
         memory.doing(explorar.sweeping() ? "mirando alrededor buscando algo para comer" : "buscando algo para comer", now);
         if (!explorar.tick(world, villager, Explorar.Busca.COMIDA)) {
             noFoodTicks = LOOK_FOR_FOOD; // nothing to hunt anywhere it can see: done looking
