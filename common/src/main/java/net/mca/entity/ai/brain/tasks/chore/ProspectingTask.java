@@ -4776,18 +4776,23 @@ public class ProspectingTask extends AbstractChoreTask {
         return true;
     }
 
-    /** Armed, grown, healthy, and only one of them in sight; never a creeper. */
+    /**
+     * Armed and grown, never a creeper. With a sword or axe it takes on what it sees (a skeleton included) unless it is
+     * already badly hurt; healthy and armed it faces two at once, never more.
+     */
     private boolean canFight(ServerWorld world, VillagerEntityMCA villager, MobEntity threat) {
-        if (threat instanceof CreeperEntity || villager.getHealth() < villager.getMaxHealth() * 0.5F
-                || villager.getAgeState().ordinal() < AgeState.TEEN.ordinal()) {
+        float health = villager.getHealth() / villager.getMaxHealth();
+        if (threat instanceof CreeperEntity || health < 0.3F || villager.getAgeState().ordinal() < AgeState.TEEN.ordinal()) {
             return false;
         }
         if (!CombatMind.hasMelee(villager) && !(CombatMind.hasRanged(villager) && Archery.hasAmmo(villager))) {
             return false;
         }
+        int allowed = health >= 0.6F ? 2 : 1;
         int seen = 0;
         for (MobEntity mob : world.getNonSpectatingEntities(MobEntity.class, new Box(villager.getBlockPos()).expand(12))) {
-            if (Threats.isThreat(mob, villager, null) && Retina.canSee(world, villager, mob) && ++seen > 1) {
+            if (Threats.isThreat(mob, villager, null) && !(mob instanceof CreeperEntity && mob != threat)
+                    && Retina.canSee(world, villager, mob) && ++seen > allowed) {
                 return false;
             }
         }
@@ -4812,7 +4817,9 @@ public class ProspectingTask extends AbstractChoreTask {
             return;
         }
         dangerFrom = target.getBlockPos().toImmutable();
-        boolean hurt = villager.getHealth() < villager.getMaxHealth() * 0.4F;
+        // it only thinks of running when it is really low, and finishes off an enemy that is about to fall
+        boolean almostDead = target.getHealth() <= 4.0F && villager.getHealth() >= villager.getMaxHealth() * 0.12F;
+        boolean hurt = villager.getHealth() < villager.getMaxHealth() * (CombatMind.hasMelee(villager) ? 0.2F : 0.3F) && !almostDead;
         if (target instanceof CreeperEntity || hurt || ++fightTicks > 1200) {
             if (fightTicks > 1200) {
                 CombatMind.giveUp(villager, target, 2400); // a minute on one enemy: it is not winning this one

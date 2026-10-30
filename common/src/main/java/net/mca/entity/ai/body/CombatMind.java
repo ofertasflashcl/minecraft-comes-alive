@@ -327,9 +327,13 @@ public final class CombatMind {
         boolean ranged = hasRanged(villager) && Archery.hasAmmo(villager);
         boolean melee = hasMelee(villager);
 
-        // children and the badly hurt step away; nobody stands next to a hissing creeper
+        // children and the badly hurt step away; nobody stands next to a hissing creeper. Armed with a blade it only
+        // runs when it is really low, and not from an enemy that is one hit from dying
         boolean child = villager.getAgeState().ordinal() < AgeState.TEEN.ordinal();
-        boolean hurt = villager.getHealth() < villager.getMaxHealth() * 0.25F;
+        boolean bladed = hasMelee(villager);
+        float low = bladed ? 0.2F : 0.3F;
+        boolean almostDead = target.getHealth() <= 4.0F && villager.getHealth() >= villager.getMaxHealth() * 0.12F;
+        boolean hurt = villager.getHealth() < villager.getMaxHealth() * low && !almostDead;
         boolean creeperClose = target instanceof CreeperEntity && distance < 4.5;
         if (child || hurt && !ranged || creeperClose) {
             memory.doing("alejándose de " + target.getName().getString(), now);
@@ -368,6 +372,9 @@ public final class CombatMind {
         if (style == Style.MELEE) {
             holdBestMelee(villager);
         }
+        // a shield goes in the off hand; it is raised while closing in on anything that shoots
+        boolean shooter = shoots(target);
+        boolean shield = style != Style.RANGED && equipShield(villager);
         if (distance > Retina.ENTITY_REACH && villager.age - state.closerTick > 200) {
             // ten seconds and not a step closer: it cannot get there on foot, so it stops staring at it
             memory.doing("no llega a " + target.getName().getString(), now);
@@ -377,13 +384,34 @@ public final class CombatMind {
         }
         memory.doing("peleando con " + target.getName().getString() + String.format(" a %.1f bloques", distance), now);
         if (distance > Retina.ENTITY_REACH - 0.4 || !seen) {
-            if ((villager.age & 3) == 0 || villager.getNavigation().isIdle()) {
-                villager.getNavigation().startMovingTo(target, 1.05);
+            // closing in: sprinting like a player, and against an archer weaving left and right so its arrows miss
+            villager.setSprinting(distance > 3.0);
+            if (shooter && seen && distance > 3.0 && villager.isOnGround()) {
+                if (--state.strafeTicks <= 0) {
+                    state.strafe = -state.strafe;
+                    state.strafeTicks = 8 + villager.getRandom().nextInt(8);
+                }
+                Vec3d to = target.getPos().subtract(villager.getPos()).multiply(1, 0, 1);
+                if (to.lengthSquared() > 1.0E-4) {
+                    Vec3d side = new Vec3d(-to.z, 0, to.x).normalize().multiply(1.6 * state.strafe);
+                    Vec3d aim = villager.getPos().add(to.normalize().multiply(2.5)).add(side);
+                    villager.getNavigation().stop();
+                    villager.getMoveControl().moveTo(aim.x, villager.getY(), aim.z, 1.25);
+                }
+            } else if ((villager.age & 3) == 0 || villager.getNavigation().isIdle()) {
+                villager.getNavigation().startMovingTo(target, shooter ? 1.25 : 1.1);
+            }
+            if (shield && shooter && seen && !villager.isUsingItem()) {
+                villager.setCurrentHand(Hand.OFF_HAND); // shield up while it walks into the arrows
             }
         } else {
+            villager.setSprinting(false);
             villager.getNavigation().stop();
             Vec3d center = target.getBoundingBox().getCenter();
             villager.getMoveControl().moveTo(center.x, target.getY(), center.z, 0.6);
+        }
+        if (seen && distance <= Retina.ENTITY_REACH && state.cooldown <= 0 && villager.isUsingItem() && villager.getActiveHand() == Hand.OFF_HAND) {
+            villager.clearActiveItem(); // the shield comes down to strike
         }
         if (seen && distance <= Retina.ENTITY_REACH && state.cooldown <= 0) {
             Hands.aim(villager, target.getBoundingBox().getCenter());
@@ -394,6 +422,34 @@ public final class CombatMind {
                 weapon.getItem().postHit(weapon, target, villager);
             }
             state.cooldown = cooldownTicks(weapon);
+        }
+        return true;
+    }
+
+    /** Skeletons, strays, pillagers, blazes...: anything that hurts from afar. */
+    private static boolean shoots(Entity target) {
+        return target instanceof net.minecraft.entity.ai.RangedAttackMob || target instanceof net.minecraft.entity.mob.AbstractSkeletonEntity
+                || target instanceof BlazeEntity;
+    }
+
+    /** Puts a shield from the bag in the off hand (what was there goes back in the bag). True when it holds one. */
+    private static boolean equipShield(VillagerEntityMCA villager) {
+        if (villager.getOffHandStack().getItem() instanceof net.minecraft.item.ShieldItem) {
+            return true;
+        }
+        var inv = villager.getInventory();
+        int slot = Hands.findSlot(inv, s -> s.getItem() instanceof net.minecraft.item.ShieldItem);
+        if (slot < 0) {
+            return false;
+        }
+        ItemStack shield = inv.removeStack(slot, 1);
+        ItemStack old = villager.getOffHandStack();
+        villager.equipStack(EquipmentSlot.OFFHAND, shield);
+        if (!old.isEmpty()) {
+            ItemStack rest = inv.addStack(old);
+            if (!rest.isEmpty()) {
+                villager.dropStack(rest);
+            }
         }
         return true;
     }
