@@ -270,6 +270,19 @@ public final class Retina {
      * are erased from it.
      */
     public static Sight cast(World world, Vec3d from, Vec3d to, @Nullable Entity viewer, @Nullable VisualMemory memory, long tick, boolean night) {
+        return cast(world, from, to, viewer, memory, tick, night, null);
+    }
+
+    /**
+     * What a picture wants of the exact ray, and nothing the memory gets: every see-through surface it goes through
+     * (a plant, a pane, a torch), and the first water. The ray, its hit and the memory are the same with or without it.
+     */
+    interface Paso {
+        void through(BlockPos pos, BlockState state, BlockHitResult hit, boolean fluid);
+    }
+
+    static Sight cast(World world, Vec3d from, Vec3d to, @Nullable Entity viewer, @Nullable VisualMemory memory, long tick, boolean night,
+                      @Nullable Paso paso) {
         ShapeContext context = viewer == null ? ShapeContext.absent() : ShapeContext.of(viewer);
         boolean[] water = new boolean[1];
         int[] chunk = {Integer.MIN_VALUE, Integer.MIN_VALUE, 1};
@@ -297,6 +310,9 @@ public final class Retina {
                     if (!water[0] && memory != null) {
                         memory.see(pos, state, fluidHit.getSide(), fluidHit.getPos(), from.distanceTo(fluidHit.getPos()), world.getLightLevel(pos), tick, true, skyOn(world, pos, fluidHit.getSide()));
                     }
+                    if (!water[0] && paso != null) {
+                        paso.through(pos, state, fluidHit, true);
+                    }
                     water[0] = true;
                 }
             }
@@ -321,6 +337,9 @@ public final class Retina {
                     if (perceives(light, d, night)) {
                         memory.see(pos, state, blockHit.getSide(), blockHit.getPos(), d, light, tick, true, skyOn(world, pos, blockHit.getSide()));
                     }
+                }
+                if (paso != null) {
+                    paso.through(pos, state, blockHit, false);
                 }
                 return null;
             }

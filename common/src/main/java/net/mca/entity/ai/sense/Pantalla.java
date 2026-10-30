@@ -21,6 +21,7 @@ import net.minecraft.registry.tag.FluidTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Util;
 import net.minecraft.util.WorldSavePath;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
@@ -217,6 +218,29 @@ public final class Pantalla {
     private int stepY;
     private int stepZ;
 
+    // ---------------------------------------------------------------- the picture only (textures): never the mind's
+    /** How many blocks one pixel spans per block of distance (its footprint, for the texture's mip level). */
+    private static final double PIXEL = 2.0 * Math.tan(Math.toRadians(Retina.VERTICAL_FOV / 2.0)) / HEIGHT;
+    /** Nothing nearer than this is painted over the view (the camera's own near plane, a little more). */
+    private static final double NEAR_PLANE = 0.2;
+    /** this tick's brush: null without textures (a dedicated server), and then every colour is the old one */
+    @Nullable
+    private Texturas.Pincel brush;
+    @Nullable
+    private ServerWorld rayWorld;
+    private Vec3d rayEye = Vec3d.ZERO;
+    private Vec3d rayDir = Vec3d.ZERO;
+    private boolean rayNight;
+    private int raySky;
+    // what the exact ray went through on its way, for this pixel's colour: a plant or a torch, a pane, the water
+    private int frontColor;
+    private double frontT = Double.POSITIVE_INFINITY;
+    private int veilColor;
+    private double veilAlpha;
+    private double veilT = Double.POSITIVE_INFINITY;
+    private int waterColor = -1;
+    private final Retina.Paso paso = this::through;
+
     private Pantalla() {
         chunkTop.defaultReturnValue(Integer.MIN_VALUE);
         java.util.Arrays.fill(face, (byte) -1);
@@ -335,6 +359,10 @@ public final class Pantalla {
         if ((now % 10) == 0) {
             memory.mapa().walked(feet, now);
         }
+        brush = Texturas.pincel(world);
+        rayWorld = world;
+        rayNight = night;
+        raySky = sky;
         int cast = 0;
         try {
             while (cast < count) {
@@ -360,6 +388,8 @@ public final class Pantalla {
             chunks.clear();
             hitChunk = null;
             bodies = List.of();
+            brush = null;
+            rayWorld = null;
         }
         return cast;
     }
@@ -416,9 +446,14 @@ public final class Pantalla {
     private void pixel(ServerWorld world, LivingEntity viewer, VisualMemory memory, Vec3d eye, Vec3d dir, int i, boolean night, int sky, long now) {
         double near = Math.min(range, NEAR);
         Vec3d end = eye.add(dir.multiply(near));
+        frontT = Double.POSITIVE_INFINITY;
+        veilT = Double.POSITIVE_INFINITY;
+        waterColor = -1;
+        rayEye = eye;
+        rayDir = dir;
         // a ray that climbs from above every column top it passes over has nothing to touch: no exact walk for it
         Retina.Sight sight = end.y > eye.y && clearAbove(world, eye, end) ? new Retina.Sight(null, near, false)
-                : Retina.cast(world, eye, end, viewer, memory, now, night);
+                : Retina.cast(world, eye, end, viewer, memory, now, night, brush == null ? null : paso);
         boolean nearHit = sight.hit() != null;
         double limit = nearHit ? sight.distance() : Math.min(range, BODY_RANGE);
 
@@ -440,6 +475,7 @@ public final class Pantalla {
             body(world, memory, body, bodyT, i, night, sky, sight.water(), now);
             return;
         }
+        int water = waterColor >= 0 ? waterColor : Foto.WATER;
         if (nearHit) {
             Retina.Pixel p = Retina.blockPixel(world, memory, sight, near, night, now);
             far[i] = false;
@@ -452,9 +488,11 @@ public final class Pantalla {
             }
             BlockState s = p.state();
             BlockPos at = p.pos();
-            int color = blockColor(world, at, s, p.face(), p.light(), p.distance(), night, sky);
+            Vec3d point = p.hit() != null ? p.hit() : Vec3d.ofCenter(at);
+            int color = blockColor(world, at, s, p.face(), p.light(), p.distance(), night, sky,
+                    point.x - at.getX(), point.y - at.getY(), point.z - at.getZ());
             if (sight.water()) {
-                color = Foto.mix(color, Foto.WATER, 0.45);
+                color = Foto.mix(color, water, 0.45);
             }
             set(i, BLOQUE, at.asLong(), s, p.face().getId(), color);
             return;
@@ -469,7 +507,7 @@ public final class Pantalla {
             }
             far[i] = false;
             dist[i] = (float) near;
-            set(i, open ? CIELO : OSCURO, 0, null, -1, open ? (sight.water() ? Foto.mix(sky, Foto.WATER, 0.3) : sky) : DARK);
+            set(i, open ? CIELO : OSCURO, 0, null, -1, open ? (sight.water() ? Foto.mix(sky, water, 0.3) : sky) : DARK);
             return;
         }
         // past the near pass: the far one, over the height columns
@@ -501,9 +539,10 @@ public final class Pantalla {
                 }
                 int skyLight = side == Direction.UP ? world.getLightLevel(LightType.SKY, beside) : -1;
                 memory.mapa().saw(at, s, side, now, skyLight);
-                int color = blockColor(world, at, s, side, light, hitT, night, sky);
+                int color = blockColor(world, at, s, side, light, hitT, night, sky,
+                        eye.x + dir.x * hitT - hitX, eye.y + dir.y * hitT - hitY, eye.z + dir.z * hitT - hitZ);
                 if (sight.water()) {
-                    color = Foto.mix(color, Foto.WATER, 0.45);
+                    color = Foto.mix(color, water, 0.45);
                 }
                 set(i, farKind == AGUA ? AGUA : BLOQUE, at.asLong(), s, side.getId(), color);
             }
@@ -518,7 +557,7 @@ public final class Pantalla {
             default -> {
                 escaped++;
                 skies++;
-                set(i, CIELO, 0, null, -1, sight.water() ? Foto.mix(sky, Foto.WATER, 0.3) : sky);
+                set(i, CIELO, 0, null, -1, sight.water() ? Foto.mix(sky, water, 0.3) : sky);
             }
         }
     }
@@ -528,7 +567,61 @@ public final class Pantalla {
         pos[i] = p;
         state[i] = s;
         face[i] = (byte) f;
-        rgb[i] = color;
+        rgb[i] = brush == null ? color : dress(color, dist[i]);
+    }
+
+    /** The colour of a pixel with what the ray went through in front of it: a plant, a torch, the frame of a pane. */
+    private int dress(int color, double d) {
+        if (frontT < d) {
+            color = frontColor;
+            d = frontT;
+        }
+        if (veilT < d) {
+            color = Foto.mix(color, veilColor, veilAlpha);
+        }
+        return color;
+    }
+
+    /**
+     * A see-through surface the exact ray went through ({@link Retina.Paso}): its texel, where the model really is
+     * (the planes of a flower, the stick of a torch), kept when it is the nearest; the first water gives its tint.
+     * Only the colour of the pixel: what the pixel shows, and the memory, are the ray's own.
+     */
+    private void through(BlockPos pos, BlockState s, BlockHitResult hit, boolean fluid) {
+        Texturas.Pincel b = brush;
+        ServerWorld world = rayWorld;
+        if (b == null || world == null) {
+            return;
+        }
+        int x = pos.getX();
+        int y = pos.getY();
+        int z = pos.getZ();
+        if (fluid) {
+            if (waterColor < 0 && s.getFluidState().isIn(FluidTags.WATER)) {
+                waterColor = b.water(s, x, y, z);
+            }
+            return;
+        }
+        int argb = b.shape(s, x, y, z, rayEye.x, rayEye.y, rayEye.z, rayDir.x, rayDir.y, rayDir.z, PIXEL * Texturas.SIZE);
+        double t = b.t;
+        int alpha = argb >>> 24;
+        if (alpha < Texturas.HOLE || t < NEAR_PLANE || t >= frontT || t >= range) {
+            return;
+        }
+        int light = s.getLuminance() > 0 ? s.getLuminance() : world.getLightLevel(pos);
+        if (!Retina.perceives(light, t, rayNight)) {
+            return;
+        }
+        double lit = s.getLuminance() >= 10 ? 1.0 : (b.side == null ? 0.9 : shade(b.side)) * Foto.lightShade(light, t, rayNight);
+        int color = Foto.mix(Foto.scale(argb & 0xFFFFFF, lit), raySky, haze(t));
+        if (alpha >= Texturas.OPAQUE) {
+            frontColor = color;
+            frontT = t;
+        } else if (t < veilT) {
+            veilColor = color;
+            veilAlpha = alpha / 255.0 * 0.85;
+            veilT = t;
+        }
     }
 
     private void body(ServerWorld world, VisualMemory memory, Entity body, double t, int i, boolean night, int sky, boolean water, long now) {
@@ -552,7 +645,9 @@ public final class Pantalla {
         set(i, CUERPO, 0, null, -1, color);
     }
 
-    private int blockColor(ServerWorld world, BlockPos at, BlockState s, Direction side, int light, double t, boolean night, int sky) {
+    /** {@code lx, ly, lz}: where on the block (0..1 inside it) the ray touched it, for its texture. */
+    private int blockColor(ServerWorld world, BlockPos at, BlockState s, Direction side, int light, double t, boolean night, int sky,
+                           double lx, double ly, double lz) {
         int base;
         FluidState fluid = s.getFluidState();
         boolean lava = false;
@@ -564,6 +659,12 @@ public final class Pantalla {
         } else {
             MapColor map = s.getMapColor(world, at);
             base = map == MapColor.CLEAR || map.color == 0 ? 0x8A8A8A : map.color;
+        }
+        if (brush != null) {
+            int texel = brush.color(s, side, at.getX(), at.getY(), at.getZ(), lx, ly, lz, Texturas.level(t * PIXEL * Texturas.SIZE));
+            if (texel >= 0) {
+                base = texel;
+            }
         }
         double shade = lava ? 1.0 : shade(side) * Foto.lightShade(light, t, night);
         return Foto.mix(Foto.scale(base, shade), sky, haze(t));

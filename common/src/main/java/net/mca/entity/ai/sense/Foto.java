@@ -16,6 +16,7 @@ import net.minecraft.registry.tag.FluidTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.Heightmap;
 import net.minecraft.world.chunk.Chunk;
@@ -45,6 +46,10 @@ import java.util.zip.Deflater;
  * of its own (so the grid of blocks shows), ores keep the colour of their specks (iron tan, diamond cyan...), a lit
  * torch or lantern is a small bright dot, the outlines where the depth jumps are drawn dark (where one thing stands
  * in front of another), and a small crosshair marks where the eye points.
+ * <p>
+ * When the server runs inside the client the game's own block textures are on the class path, and the picture is
+ * painted with them instead ({@link Texturas}, {@link #rayTex}): the real texel of each face, tinted by the biome, with
+ * holes in leaves and glass and plants drawn where their model is. On a dedicated server it is the map-coloured sketch.
  */
 public final class Foto {
     /** Larger pictures are refused. */
@@ -94,6 +99,9 @@ public final class Foto {
 
         int bottom = world.getBottomY();
         int top = world.getTopY();
+        // the game's own textures when the server runs inside the client; null on a dedicated one (the map colours)
+        Texturas.Pincel brush = Texturas.pincel(world);
+        double footprint = 2.0 * tanV / h * Texturas.SIZE;
         BlockPos.Mutable cell = new BlockPos.Mutable();
         BlockPos.Mutable from = new BlockPos.Mutable();
         int[] out = new int[w * h];
@@ -110,7 +118,8 @@ public final class Foto {
                 dy /= len;
                 dz /= len;
                 int i = row * w + col;
-                out[i] = ray(world, eye, dx, dy, dz, range, night, sky, bottom, top, cell, from, bodyT[i], bodyColor[i], depth, i);
+                out[i] = brush == null ? ray(world, eye, dx, dy, dz, range, night, sky, bottom, top, cell, from, bodyT[i], bodyColor[i], depth, i)
+                        : rayTex(brush, footprint, world, eye, dx, dy, dz, range, night, sky, bottom, top, cell, from, bodyT[i], bodyColor[i], depth, i);
             }
         }
         outline(out, depth, w, h);
@@ -332,6 +341,211 @@ public final class Foto {
             color = mix(color, WATER, Math.min(0.85, 0.35 + 0.08 * water));
         }
         return color;
+    }
+
+    /**
+     * The same ray with the game's textures: the texel where the ray meets each face (16x16, a smaller mip level the
+     * farther it is), tinted by the biome; holes in leaves and glass let it go on, a stained pane or ice tints what
+     * is behind, and plants, torches, rails and slabs are met where their model really is (the planes of a flower,
+     * the box of a slab). The light, the face shading, the haze and the water are the same as {@link #ray}.
+     */
+    private static int rayTex(Texturas.Pincel brush, double footprint, ServerWorld world, Vec3d eye, double dx, double dy, double dz, double range,
+                              boolean night, int sky, int bottom, int top, BlockPos.Mutable cell, BlockPos.Mutable from, double bodyT, int bodyColor,
+                              double[] depth, int index) {
+        int x = (int) Math.floor(eye.x);
+        int y = (int) Math.floor(eye.y);
+        int z = (int) Math.floor(eye.z);
+        int stepX = dx > 0 ? 1 : -1;
+        int stepY = dy > 0 ? 1 : -1;
+        int stepZ = dz > 0 ? 1 : -1;
+        double tDeltaX = dx == 0 ? Double.POSITIVE_INFINITY : Math.abs(1.0 / dx);
+        double tDeltaY = dy == 0 ? Double.POSITIVE_INFINITY : Math.abs(1.0 / dy);
+        double tDeltaZ = dz == 0 ? Double.POSITIVE_INFINITY : Math.abs(1.0 / dz);
+        double tMaxX = dx == 0 ? Double.POSITIVE_INFINITY : (dx > 0 ? x + 1 - eye.x : eye.x - x) * tDeltaX;
+        double tMaxY = dy == 0 ? Double.POSITIVE_INFINITY : (dy > 0 ? y + 1 - eye.y : eye.y - y) * tDeltaY;
+        double tMaxZ = dz == 0 ? Double.POSITIVE_INFINITY : (dz > 0 ? z + 1 - eye.z : eye.z - z) * tDeltaZ;
+
+        double t = 0;
+        int axis = -1;
+        int water = 0;
+        int waterColor = WATER;
+        int veil = 0;
+        double veilAlpha = 0;
+        double veilT = Double.POSITIVE_INFINITY;
+        int chunkX = Integer.MIN_VALUE;
+        int chunkZ = Integer.MIN_VALUE;
+        Chunk chunk = null;
+        int columnX = Integer.MIN_VALUE;
+        int columnZ = Integer.MIN_VALUE;
+        int columnTop = 0;
+        int color = -1;
+        double hitT = range;
+        boolean under = false;
+        while (t <= range && t < bodyT) {
+            if (y >= top && dy >= 0 || y < bottom && dy <= 0) {
+                break;
+            }
+            if (y >= bottom && y < top) {
+                int cx = x >> 4;
+                int cz = z >> 4;
+                if (cx != chunkX || cz != chunkZ) {
+                    chunkX = cx;
+                    chunkZ = cz;
+                    chunk = world.isChunkLoaded(cx, cz) ? world.getChunk(cx, cz) : null;
+                }
+                if (chunk == null) {
+                    break;
+                }
+                if (x != columnX || z != columnZ) {
+                    columnX = x;
+                    columnZ = z;
+                    columnTop = chunk.sampleHeightmap(Heightmap.Type.WORLD_SURFACE, x & 15, z & 15);
+                }
+                under = y < columnTop;
+                if (under) {
+                    cell.set(x, y, z);
+                    BlockState state = chunk.getBlockState(cell);
+                    if (!state.isAir()) {
+                        FluidState fluid = state.getFluidState();
+                        boolean lava = !fluid.isEmpty() && fluid.isIn(FluidTags.LAVA);
+                        boolean plainFluid = !fluid.isEmpty() && fluid.getBlockState().getBlock() == state.getBlock();
+                        if (!fluid.isEmpty() && fluid.isIn(FluidTags.WATER)) {
+                            if (water == 0) {
+                                int wc = brush.water(state, x, y, z);
+                                if (wc >= 0) {
+                                    waterColor = wc;
+                                }
+                            }
+                            water++;
+                        }
+                        Direction side = axis < 0 ? Direction.getFacing(-dx, -dy, -dz) : switch (axis) {
+                            case 0 -> stepX > 0 ? Direction.WEST : Direction.EAST;
+                            case 1 -> stepY > 0 ? Direction.DOWN : Direction.UP;
+                            default -> stepZ > 0 ? Direction.NORTH : Direction.SOUTH;
+                        };
+                        int hit = -1;
+                        double at = t;
+                        boolean inside = false; // met inside the cell (a plant, a slab): lit by the cell itself
+                        if (lava) {
+                            hit = brush.color(fluid.getBlockState(), side, x, y, z, 0.5, 0.5, 0.5, Texturas.level(t * footprint));
+                            if (hit < 0) {
+                                hit = LAVA;
+                            }
+                        } else if (plainFluid) {
+                            // water: looked through, tinted at the end
+                        } else if (!brush.textured(state)) {
+                            // no texture for it: the map colour, as without textures
+                            if (state.blocksMovement()) {
+                                MapColor map = state.getMapColor(world, cell);
+                                if (map != MapColor.CLEAR && map.color != 0) {
+                                    hit = scale(map.color, texture(x, y, z));
+                                    int ore = oreColor(state);
+                                    if (ore >= 0) {
+                                        hit = mix(hit, ore, 0.6);
+                                    }
+                                }
+                            }
+                        } else if (state.blocksMovement() && brush.full(state) && !brush.cross(state)) {
+                            // a whole cube: the texel where the ray comes in
+                            Texturas.Cara c = brush.cara(state, side);
+                            if (c != null) {
+                                int argb = brush.texel(c, x, y, z, eye.x + dx * t - x, eye.y + dy * t - y, eye.z + dz * t - z, Texturas.level(t * footprint));
+                                int alpha = argb >>> 24;
+                                if (alpha >= Texturas.OPAQUE) {
+                                    hit = argb & 0xFFFFFF;
+                                } else if (alpha >= Texturas.HOLE && t < veilT) {
+                                    veil = argb & 0xFFFFFF;
+                                    veilAlpha = alpha / 255.0 * 0.85;
+                                    veilT = t;
+                                }
+                            }
+                        } else {
+                            // its model's own shape: the planes of a cross, the box of a slab, a torch, a rail
+                            int argb = brush.shape(state, x, y, z, eye.x, eye.y, eye.z, dx, dy, dz, footprint);
+                            double st = brush.t;
+                            int alpha = argb >>> 24;
+                            if (st <= range && st < bodyT && alpha >= Texturas.HOLE) {
+                                if (alpha >= Texturas.OPAQUE) {
+                                    hit = argb & 0xFFFFFF;
+                                    at = st;
+                                    side = brush.side;
+                                    inside = true;
+                                } else if (st < veilT) {
+                                    veil = argb & 0xFFFFFF;
+                                    veilAlpha = alpha / 255.0 * 0.85;
+                                    veilT = st;
+                                }
+                            }
+                        }
+                        if (hit >= 0) {
+                            hitT = at;
+                            int light;
+                            if (inside) {
+                                light = Math.max(world.getLightLevel(cell), state.getLuminance());
+                            } else {
+                                if (axis < 0) {
+                                    from.set(x, y, z);
+                                } else {
+                                    from.set(axis == 0 ? x - stepX : x, axis == 1 ? y - stepY : y, axis == 2 ? z - stepZ : z);
+                                }
+                                light = Math.max(world.getLightLevel(from), state.getLuminance());
+                            }
+                            double shade = lava || state.getLuminance() >= 10 && inside ? 1.0 : faceShade(side) * lightShade(light, at, night);
+                            color = scale(hit, shade);
+                            break;
+                        }
+                    }
+                }
+            }
+            if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+                x += stepX;
+                t = tMaxX;
+                tMaxX += tDeltaX;
+                axis = 0;
+            } else if (tMaxY < tMaxZ) {
+                y += stepY;
+                t = tMaxY;
+                tMaxY += tDeltaY;
+                axis = 1;
+            } else {
+                z += stepZ;
+                t = tMaxZ;
+                tMaxZ += tDeltaZ;
+                axis = 2;
+            }
+        }
+        if (bodyT < hitT && bodyT <= range) {
+            color = bodyColor;
+            hitT = bodyT;
+        }
+        depth[index] = color < 0 ? Double.POSITIVE_INFINITY : hitT;
+        int result;
+        if (color < 0) {
+            result = under && water == 0 && !night ? 0x050505 : water > 0 ? mix(waterColor, sky, 0.25) : sky;
+        } else {
+            double haze = Math.min(1.0, hitT / range);
+            result = mix(color, sky, haze * haze * 0.7);
+            if (water > 0) {
+                result = mix(result, waterColor, Math.min(0.85, 0.35 + 0.08 * water));
+            }
+        }
+        if (veilT < (color < 0 ? Double.POSITIVE_INFINITY : hitT)) {
+            result = mix(result, veil, veilAlpha);
+        }
+        return result;
+    }
+
+    /** The flat shading of a side; a cross plane (null) a little under full. */
+    private static double faceShade(@Nullable Direction side) {
+        if (side == null) {
+            return 0.9;
+        }
+        return switch (side) {
+            case UP -> 1.0;
+            case DOWN -> 0.5;
+            case NORTH, SOUTH -> 0.8;
+            default -> 0.6;
+        };
     }
 
     /** Like the game's own flat shading: tops full, north and south faces 0.8, east and west 0.6, bottoms 0.5. */
